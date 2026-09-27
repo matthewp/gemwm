@@ -1,17 +1,23 @@
 /*
  * GEM-style window frame, drawn with cairo in pure black and white.
  *
- * Layout, for a frame W x H pixels wrapping content of cw x ch (G = gadget):
+ * Layout, for a frame W x H pixels wrapping content of cw x ch (G = gadget),
+ * with both scroll bars and a sizer:
  *
  *   +---+---------------- title ----------------+---+
  *   | X |  :::::::::::: [ Title ] :::::::::::::  | <> |   y = 1 .. G
  *   +---+----------------------------------------+---+   y = G+1
  *   |                                            | ^ |
- *   |               client content               |:::|
+ *   |               client content               |[ ]|  <- slider
  *   |                                            | v |
  *   +---+------------------------------------+---+---+
- *   | < |::::::::::::::::::::::::::::::::::::| > | # |
+ *   | < |:::::[    ]::::::::::::::::::::::::::| > | # |
  *   +---+------------------------------------+---+---+
+ *
+ * A window only has the scroll bars its client reports (gemwm-scroll-v1).
+ * Without a vertical bar the right side is a 1px border; with no bars at
+ * all a sizer sits in a bottom row of its own, and without a sizer either
+ * the frame is just the title bar and a thin border.
  *
  * Lines between parts are 1px and shared by their neighbours, like GEM does.
  */
@@ -23,53 +29,101 @@
 
 #define G GEM_GADGET
 
+struct rect { int x, y, w, h; };
+
 struct frame_layout {
 	int w, h; /* total frame size */
-	struct { int x, y, w, h; } title, closer, fuller, sizer,
-		up, down, vtrack, left, right, htrack;
+	bool column, row; /* right scroll bar column, bottom row */
+	struct rect title, closer, fuller, sizer, up, down, vtrack, vslider,
+		left, right, htrack, hslider;
 };
 
-static void frame_layout(int cw, int ch, struct frame_layout *l) {
-	int W = cw + FRAME_LEFT + FRAME_RIGHT;
-	int H = ch + FRAME_TOP + FRAME_BOTTOM;
+static bool has_row(const struct frame_style *s) {
+	return s->h.on || (s->sizer && !s->v.on);
+}
+
+void frame_extents(const struct frame_style *style, int *right, int *bottom) {
+	*right = style->v.on ? GEM_GADGET + 2 : 1;
+	*bottom = has_row(style) ? GEM_GADGET + 2 : 1;
+}
+
+/* The slider inside a track: as long as the visible share of the content
+ * (at least a gadget), placed by the scroll position. It fills the track
+ * when everything fits. */
+static struct rect slider_in(struct rect track, const struct frame_axis *a,
+		bool vertical) {
+	int len = vertical ? track.h : track.w;
+	int size = len, offset = 0;
+	if (a->total > a->visible && a->total > 0 && len > 0) {
+		size = (int)((double)len * a->visible / a->total);
+		if (size < G) {
+			size = G < len ? G : len;
+		}
+		int range = a->total - a->visible;
+		int pos = a->position < 0 ? 0 : a->position > range ? range : a->position;
+		offset = (int)((double)(len - size) * pos / range + 0.5);
+	}
+	struct rect r = track;
+	if (vertical) {
+		r.y += offset;
+		r.h = size;
+	} else {
+		r.x += offset;
+		r.w = size;
+	}
+	return r;
+}
+
+static void frame_layout(const struct frame_style *s, int cw, int ch,
+		struct frame_layout *l) {
+	int right, bottom;
+	frame_extents(s, &right, &bottom);
+	int W = cw + FRAME_LEFT + right;
+	int H = ch + FRAME_TOP + bottom;
+	memset(l, 0, sizeof(*l));
 	l->w = W;
 	l->h = H;
-	l->closer.x = 1;          l->closer.y = 1;
-	l->closer.w = G;          l->closer.h = G;
-	l->fuller.x = W - G - 1;  l->fuller.y = 1;
-	l->fuller.w = G;          l->fuller.h = G;
-	l->title.x = G + 2;       l->title.y = 1;
-	l->title.w = W - 2 * G - 4; l->title.h = G;
+	l->column = s->v.on;
+	l->row = has_row(s);
+	l->closer = (struct rect){ 1, 1, G, G };
+	l->fuller = (struct rect){ W - G - 1, 1, G, G };
+	l->title = (struct rect){ G + 2, 1, W - 2 * G - 4, G };
 
-	/* Vertical scroll bar, right of the content. */
-	int sx = W - G - 1;
-	l->up.x = sx;             l->up.y = G + 2;
-	l->up.w = G;              l->up.h = G;
-	l->down.x = sx;           l->down.y = H - 2 * G - 2;
-	l->down.w = G;            l->down.h = G;
-	l->vtrack.x = sx;         l->vtrack.y = 2 * G + 3;
-	l->vtrack.w = G;          l->vtrack.h = ch - 2 * G - 2;
+	/* The sizer takes the bottom-right corner: the end of the bottom row,
+	 * or the end of the scroll column when there is no row. */
+	int corner_x = W - G - 1, corner_y = H - G - 1;
+	if (s->sizer) {
+		l->sizer = (struct rect){ corner_x, corner_y, G, G };
+	}
 
-	/* Horizontal scroll bar, below the content. */
-	int sy = H - G - 1;
-	l->left.x = 1;            l->left.y = sy;
-	l->left.w = G;            l->left.h = G;
-	l->right.x = W - 2 * G - 2; l->right.y = sy;
-	l->right.w = G;           l->right.h = G;
-	l->htrack.x = G + 2;      l->htrack.y = sy;
-	l->htrack.w = cw - 2 * G - 2; l->htrack.h = G;
-
-	l->sizer.x = sx;          l->sizer.y = sy;
-	l->sizer.w = G;           l->sizer.h = G;
+	if (l->column) {
+		int end = l->row ? H - G - 3 : H - 2;      /* last row of the column */
+		if (s->sizer && !l->row) {
+			end -= G + 1;                          /* the sizer is below */
+		}
+		l->up = (struct rect){ corner_x, G + 2, G, G };
+		l->down = (struct rect){ corner_x, end - G + 1, G, G };
+		l->vtrack = (struct rect){ corner_x, 2 * G + 3, G, end - 3 * G - 3 };
+		l->vslider = slider_in(l->vtrack, &s->v, true);
+	}
+	if (s->h.on) {
+		int end = l->column || s->sizer ? W - G - 3 : W - 2;
+		l->left = (struct rect){ 1, corner_y, G, G };
+		l->right = (struct rect){ end - G + 1, corner_y, G, G };
+		l->htrack = (struct rect){ G + 2, corner_y, end - 2 * G - 2, G };
+		l->hslider = slider_in(l->htrack, &s->h, false);
+	}
 }
 
 #define IN(r, px, py) \
-	((px) >= (r).x && (px) < (r).x + (r).w && \
+	((r).w > 0 && (r).h > 0 && \
+	 (px) >= (r).x && (px) < (r).x + (r).w && \
 	 (py) >= (r).y && (py) < (r).y + (r).h)
 
-enum frame_part frame_part_at(int cw, int ch, int x, int y) {
+enum frame_part frame_part_at(const struct frame_style *style, int cw, int ch,
+		int x, int y) {
 	struct frame_layout l;
-	frame_layout(cw, ch, &l);
+	frame_layout(style, cw, ch, &l);
 	if (x < 0 || y < 0 || x >= l.w || y >= l.h) {
 		return FRAME_PART_NONE;
 	}
@@ -79,11 +133,25 @@ enum frame_part frame_part_at(int cw, int ch, int x, int y) {
 	if (IN(l.sizer, x, y)) return FRAME_PART_SIZER;
 	if (IN(l.up, x, y)) return FRAME_PART_UP;
 	if (IN(l.down, x, y)) return FRAME_PART_DOWN;
-	if (IN(l.vtrack, x, y)) return FRAME_PART_VTRACK;
+	if (IN(l.vslider, x, y)) return FRAME_PART_VSLIDER;
+	if (IN(l.vtrack, x, y)) {
+		return y < l.vslider.y ? FRAME_PART_PAGE_UP : FRAME_PART_PAGE_DOWN;
+	}
 	if (IN(l.left, x, y)) return FRAME_PART_LEFT;
 	if (IN(l.right, x, y)) return FRAME_PART_RIGHT;
-	if (IN(l.htrack, x, y)) return FRAME_PART_HTRACK;
+	if (IN(l.hslider, x, y)) return FRAME_PART_HSLIDER;
+	if (IN(l.htrack, x, y)) {
+		return x < l.hslider.x ? FRAME_PART_PAGE_LEFT : FRAME_PART_PAGE_RIGHT;
+	}
 	return FRAME_PART_BORDER;
+}
+
+void frame_slider_size(const struct frame_style *style, int cw, int ch,
+		bool vertical, int *track, int *slider) {
+	struct frame_layout l;
+	frame_layout(style, cw, ch, &l);
+	*track = vertical ? l.vtrack.h : l.htrack.w;
+	*slider = vertical ? l.vslider.h : l.hslider.w;
 }
 
 /* Builds a repeating 1-bit fill pattern from rows of '#' (black) and '.'. */
@@ -231,10 +299,19 @@ static void draw_title(cairo_t *cr, const struct frame_layout *l,
 	cairo_restore(cr);
 }
 
-void frame_draw(struct wlr_scene_buffer *node, int cw, int ch,
-		const char *title, bool active) {
+static void draw_slider(cairo_t *cr, struct rect r) {
+	white(cr);
+	fill_rect(cr, r.x, r.y, r.w, r.h);
+	black(cr);
+	cairo_set_line_width(cr, 1);
+	cairo_rectangle(cr, r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+	cairo_stroke(cr);
+}
+
+void frame_draw(struct wlr_scene_buffer *node, const struct frame_style *style,
+		int cw, int ch, const char *title, bool active) {
 	struct frame_layout l;
-	frame_layout(cw, ch, &l);
+	frame_layout(style, cw, ch, &l);
 
 	struct cairo_buffer *buffer = cairo_buffer_create(l.w, l.h);
 	if (buffer == NULL) {
@@ -257,15 +334,25 @@ void frame_draw(struct wlr_scene_buffer *node, int cw, int ch,
 	/* Title bar separators. */
 	hline(cr, 0, G + 1, l.w);
 	vline(cr, G + 1, 0, G + 1);
-	/* The line left of the fuller continues down the scroll bar column. */
-	vline(cr, l.w - G - 2, 0, l.h);
-	/* Line above the horizontal scroll bar. */
-	hline(cr, 0, l.h - G - 2, l.w);
-	/* Separators around arrows. */
-	hline(cr, l.up.x, l.up.y + G, G);
-	hline(cr, l.down.x, l.down.y - 1, G);
-	vline(cr, l.left.x + G, l.left.y, G);
-	vline(cr, l.right.x - 1, l.right.y, G);
+	/* Left of the fuller; with a scroll column it continues to the bottom. */
+	vline(cr, l.w - G - 2, 0, l.column ? l.h : G + 1);
+	if (l.row) {
+		hline(cr, 0, l.h - G - 2, l.w);
+		if (!l.column && l.sizer.w > 0) {
+			vline(cr, l.sizer.x - 1, l.sizer.y, G);   /* left of the sizer */
+		}
+	}
+	if (l.column) {
+		hline(cr, l.up.x, l.up.y + G, G);
+		hline(cr, l.down.x, l.down.y - 1, G);
+		if (!l.row && l.sizer.w > 0) {
+			hline(cr, l.sizer.x, l.sizer.y - 1, G);   /* above the sizer */
+		}
+	}
+	if (style->h.on) {
+		vline(cr, l.left.x + G, l.left.y, G);
+		vline(cr, l.right.x - 1, l.right.y, G);
+	}
 
 	draw_title(cr, &l, title, active);
 
@@ -280,11 +367,23 @@ void frame_draw(struct wlr_scene_buffer *node, int cw, int ch,
 
 		draw_closer(cr, l.closer.x, l.closer.y);
 		draw_fuller(cr, l.fuller.x, l.fuller.y);
-		draw_sizer(cr, l.sizer.x, l.sizer.y);
-		draw_arrow(cr, l.up.x, l.up.y, FRAME_PART_UP);
-		draw_arrow(cr, l.down.x, l.down.y, FRAME_PART_DOWN);
-		draw_arrow(cr, l.left.x, l.left.y, FRAME_PART_LEFT);
-		draw_arrow(cr, l.right.x, l.right.y, FRAME_PART_RIGHT);
+		if (l.sizer.w > 0) {
+			draw_sizer(cr, l.sizer.x, l.sizer.y);
+		}
+		if (l.column) {
+			draw_arrow(cr, l.up.x, l.up.y, FRAME_PART_UP);
+			draw_arrow(cr, l.down.x, l.down.y, FRAME_PART_DOWN);
+			if (l.vtrack.h > 0) {
+				draw_slider(cr, l.vslider);
+			}
+		}
+		if (style->h.on) {
+			draw_arrow(cr, l.left.x, l.left.y, FRAME_PART_LEFT);
+			draw_arrow(cr, l.right.x, l.right.y, FRAME_PART_RIGHT);
+			if (l.htrack.w > 0) {
+				draw_slider(cr, l.hslider);
+			}
+		}
 	}
 
 	cairo_destroy(cr);

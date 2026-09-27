@@ -554,6 +554,7 @@ int main(int argc, char *argv[]) {
 	server.layer_drag = wlr_scene_tree_create(root);
 
 	view_init_shell(&server);
+	scrollbars_init(&server);
 	workspaces_init(&server);
 	config_load(&server);
 	layers_init(&server);

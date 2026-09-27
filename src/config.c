@@ -32,6 +32,15 @@ static const char default_config[] =
 	"Super+7 = workspace 7\n"
 	"Super+8 = workspace 8\n"
 	"Super+9 = workspace 9\n"
+	"Super+Shift+1 = move-window focused 1\n"
+	"Super+Shift+2 = move-window focused 2\n"
+	"Super+Shift+3 = move-window focused 3\n"
+	"Super+Shift+4 = move-window focused 4\n"
+	"Super+Shift+5 = move-window focused 5\n"
+	"Super+Shift+6 = move-window focused 6\n"
+	"Super+Shift+7 = move-window focused 7\n"
+	"Super+Shift+8 = move-window focused 8\n"
+	"Super+Shift+9 = move-window focused 9\n"
 	"Alt+Return = exec ${TERMINAL:-gemwm-terminal}\n"
 	"Alt+Tab = cycle-windows next\n"
 	"Alt+Shift+Tab = cycle-windows prev\n"
@@ -250,7 +259,8 @@ static void parse(struct server *server, FILE *f, const char *name) {
 				strcmp(key, "column-width") == 0) {
 			double w = strtod(value, NULL);
 			server->column_width = w < 0.1 ? 0.1 : w > 1 ? 1 : w;
-		} else if (strcmp(section, "clock") != 0) { /* the menu bar's */
+		} else if (strcmp(section, "clock") != 0 &&
+				strcmp(section, "battery") != 0) { /* the menu bar's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);
 		}
 	}

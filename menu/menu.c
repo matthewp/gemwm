@@ -21,6 +21,7 @@
  */
 #define _GNU_SOURCE /* memfd_create */
 #include <cairo.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -46,6 +47,8 @@
 #define MAX_MENUS 16
 #define MAX_ITEMS 32
 #define CLOCK_PAD 8    /* space right of the clock */
+#define BATTERY_PAD 8  /* space either side of the battery */
+#define BATTERY_LOW 10 /* percent at which the charge is shown inverted */
 #define ARROW_W 12     /* room for a submenu's arrow */
 #define MAX_DEPTH 6    /* menu plus nested submenus open at once */
 #define WS_PAD 6       /* space either side of a workspace number */
@@ -191,6 +194,10 @@ static struct {
 	int clock_x, clock_w; /* where it was drawn, for clicks */
 	int quiet_title;      /* title just clicked shut: no hover-open until left */
 	int clock_fd;             /* timerfd that fires when the clock changes */
+	/* The battery, left of the clock: [battery] in the config. Shown only
+	 * on machines with one. */
+	bool battery_on, battery_present, battery_plugged;
+	int battery_percent;
 
 	/* Workspaces, from the control socket. ws_count 0: no buttons. */
 	/* A GEM alert box asking before a command runs. */
@@ -416,13 +423,16 @@ static void load_config(void) {
 	st.n_menus = kept;
 }
 
-/* [clock] in ~/.config/gemwm/config (the compositor reads the rest):
- *   mode = 24h | 12h | off
- *   seconds = yes | no */
+/* [clock] and [battery] in ~/.config/gemwm/config (the compositor reads
+ * the rest):
+ *   [clock]    mode = 24h | 12h | off
+ *              seconds = yes | no
+ *   [battery]  mode = on | off */
 static void load_clock_config(void) {
 	st.clock_on = true;
 	st.clock_24h = true;
 	st.clock_seconds = false;
+	st.battery_on = true;
 
 	char path[4096];
 	const char *xdg = getenv("XDG_CONFIG_HOME");
@@ -439,21 +449,26 @@ static void load_clock_config(void) {
 	}
 	char *line = NULL;
 	size_t cap = 0;
-	bool in_clock = false;
+	bool in_clock = false, in_battery = false;
 	while (getline(&line, &cap, f) != -1) {
 		char *s = trim(line);
 		if (s[0] == '[') {
 			in_clock = strncmp(s, "[clock]", 7) == 0;
+			in_battery = strncmp(s, "[battery]", 9) == 0;
 			continue;
 		}
 		char *eq = strchr(s, '=');
-		if (!in_clock || s[0] == '#' || eq == NULL) {
+		if ((!in_clock && !in_battery) || s[0] == '#' || eq == NULL) {
 			continue;
 		}
 		*eq = '\0';
 		char *key = trim(s), *value = trim(eq + 1);
 		value[strcspn(value, " \t#")] = '\0'; /* a trailing # comment */
-		if (strcmp(key, "mode") == 0) {
+		if (in_battery) {
+			if (strcmp(key, "mode") == 0) {
+				st.battery_on = strcmp(value, "off") != 0;
+			}
+		} else if (strcmp(key, "mode") == 0) {
 			st.clock_on = strcmp(value, "off") != 0;
 			st.clock_24h = strcmp(value, "12h") != 0;
 		} else if (strcmp(key, "seconds") == 0) {
@@ -756,6 +771,156 @@ static void ipc_read(void) {
 	}
 }
 
+/* ---- Battery ------------------------------------------------------------ */
+
+/* The first line of a sysfs attribute, or "" if it can't be read. */
+static void read_attr(const char *dir, const char *name, char *out, size_t n) {
+	char path[512];
+	snprintf(path, sizeof(path), "/sys/class/power_supply/%s/%s", dir, name);
+	out[0] = '\0';
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return;
+	}
+	if (fgets(out, (int)n, f) == NULL) {
+		out[0] = '\0';
+	}
+	out[strcspn(out, "\n")] = '\0';
+	fclose(f);
+}
+
+static long read_long(const char *dir, const char *name) {
+	char v[32];
+	read_attr(dir, name, v, sizeof(v));
+	return v[0] != '\0' ? atol(v) : -1;
+}
+
+/* Reads the system's batteries from sysfs (a laptop's own; not a mouse's or
+ * a phone's). With two, the charge is their combined one. Returns whether
+ * anything changed. */
+static bool battery_update(void) {
+	bool present = false, plugged = false;
+	long now = 0, full = 0, percents = 0, count = 0;
+	DIR *d = opendir("/sys/class/power_supply");
+	struct dirent *e;
+	while (d != NULL && (e = readdir(d)) != NULL) {
+		char v[32];
+		if (e->d_name[0] == '.') {
+			continue;
+		}
+		read_attr(e->d_name, "type", v, sizeof(v));
+		if (strcmp(v, "Battery") != 0) {
+			continue;
+		}
+		read_attr(e->d_name, "scope", v, sizeof(v));
+		if (strcmp(v, "Device") == 0 || read_long(e->d_name, "present") == 0) {
+			continue;
+		}
+		present = true;
+		read_attr(e->d_name, "status", v, sizeof(v));
+		/* "Not charging" is plugged in but held, e.g. by a charge limit. */
+		if (strcmp(v, "Charging") == 0 || strcmp(v, "Full") == 0 ||
+				strcmp(v, "Not charging") == 0) {
+			plugged = true;
+		}
+		long n = read_long(e->d_name, "energy_now");
+		long f = read_long(e->d_name, "energy_full");
+		if (n < 0 || f <= 0) {
+			n = read_long(e->d_name, "charge_now");
+			f = read_long(e->d_name, "charge_full");
+		}
+		if (n >= 0 && f > 0) {
+			now += n;
+			full += f;
+		}
+		long c = read_long(e->d_name, "capacity");
+		if (c >= 0) {
+			percents += c;
+			count++;
+		}
+	}
+	if (d != NULL) {
+		closedir(d);
+	}
+	/* The kernel's capacity for one battery; our own sum for several. */
+	int percent = count == 1 ? (int)percents :
+		full > 0 ? (int)((now * 100 + full / 2) / full) :
+		count > 0 ? (int)(percents / count) : 0;
+	percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	bool changed = present != st.battery_present ||
+		plugged != st.battery_plugged || percent != st.battery_percent;
+	st.battery_present = present;
+	st.battery_plugged = plugged;
+	st.battery_percent = percent;
+	return changed;
+}
+
+/* A 1-bit battery, filled to the charge, with a lightning bolt over it on
+ * mains power; then the percentage. Its right edge is at right; returns its
+ * left edge. */
+static int draw_battery(cairo_t *cr, int right) {
+	enum { BODY_W = 18, BODY_H = 10, NUB_W = 2, NUB_H = 4, IN_W = 14, IN_H = 6 };
+	static const char *bolt[IN_H] = {
+		"....##.",
+		"...##..",
+		"..#####",
+		"#####..",
+		"..##...",
+		".##....",
+	};
+	char label[8];
+	snprintf(label, sizeof(label), "%d%%", st.battery_percent);
+	cairo_text_extents_t te;
+	cairo_text_extents(cr, label, &te);
+	int text_w = (int)te.x_advance;
+	int low = !st.battery_plugged && st.battery_percent <= BATTERY_LOW;
+
+	int text_x = right - BATTERY_PAD - text_w;
+	int x = text_x - 4 - NUB_W - BODY_W;
+	int y = (BAR_H - 1 - BODY_H) / 2;
+
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_rectangle(cr, x + 0.5, y + 0.5, BODY_W - 1, BODY_H - 1);
+	cairo_set_line_width(cr, 1);
+	cairo_stroke(cr);
+	cairo_rectangle(cr, x + BODY_W, y + (BODY_H - NUB_H) / 2, NUB_W, NUB_H);
+	cairo_fill(cr);
+	int in_x = x + 2, in_y = y + 2;
+	int fill = (IN_W * st.battery_percent + 50) / 100;
+	if (fill == 0 && st.battery_percent > 0) {
+		fill = 1;
+	}
+	cairo_rectangle(cr, in_x, in_y, fill, IN_H);
+	cairo_fill(cr);
+	if (st.battery_plugged) {
+		/* Drawn in the opposite colour to what's under it. */
+		int bx = in_x + (IN_W - 7) / 2;
+		for (int r = 0; r < IN_H; r++) {
+			for (int c = 0; c < 7; c++) {
+				if (bolt[r][c] != '#') {
+					continue;
+				}
+				double v = bx + c < in_x + fill ? 1 : 0;
+				cairo_set_source_rgb(cr, v, v, v);
+				cairo_rectangle(cr, bx + c, in_y + r, 1, 1);
+				cairo_fill(cr);
+			}
+		}
+	}
+
+	if (low) {
+		/* Running out: the percentage inverted, as a selected item. */
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_rectangle(cr, text_x - 2, 0, text_w + 4, BAR_H - 1);
+		cairo_fill(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+	} else {
+		cairo_set_source_rgb(cr, 0, 0, 0);
+	}
+	text(cr, label, text_x, 0, BAR_H - 1);
+	return x - BATTERY_PAD;
+}
+
 static void draw_bar(void) {
 	if (st.bar_w <= 0) {
 		return;
@@ -801,6 +966,9 @@ static void draw_bar(void) {
 		st.clock_x = st.bar_w - st.clock_w;
 		cairo_set_source_rgb(cr, 0, 0, 0);
 		text(cr, shown, st.clock_x + CLOCK_PAD, 0, BAR_H - 1);
+	}
+	if (st.battery_on && st.battery_present) {
+		draw_battery(cr, st.clock_w > 0 ? st.clock_x : st.bar_w);
 	}
 
 	cairo_destroy(cr);
@@ -1520,13 +1688,23 @@ static bool clock_has_seconds(void) {
 	return st.clock_seconds;
 }
 
+/* The timer's period: the clock's, but a battery is checked every few
+ * seconds so plugging in shows promptly. Divides a minute, so the clock
+ * still turns over on the minute. */
+static long tick_period(void) {
+	if (st.clock_on && clock_has_seconds()) {
+		return 1;
+	}
+	return st.battery_on && st.battery_present ? 5 : 60;
+}
+
 /* Arms the timer for the next whole minute (or second), on the wall clock.
  * CANCEL_ON_SET wakes us if the time jumps (resume, NTP, timezone), so we
  * re-arm instead of drifting. */
 static void clock_arm(void) {
 	struct timespec now;
 	clock_gettime(CLOCK_REALTIME, &now);
-	long period = clock_has_seconds() ? 1 : 60;
+	long period = tick_period();
 	struct itimerspec spec = {
 		.it_value = { .tv_sec = (now.tv_sec / period + 1) * period },
 		.it_interval = { .tv_sec = period },
@@ -1537,11 +1715,16 @@ static void clock_arm(void) {
 
 static void clock_tick(void) {
 	uint64_t expirations;
-	if (read(st.clock_fd, &expirations, sizeof(expirations)) < 0 &&
-			errno == ECANCELED) {
+	bool jumped = read(st.clock_fd, &expirations, sizeof(expirations)) < 0 &&
+		errno == ECANCELED;
+	if (jumped) {
 		clock_arm();
 	}
-	if (st.bar_w > 0) {
+	/* Between the clock's minutes, only a battery change needs drawing. */
+	bool changed = st.battery_on && battery_update();
+	bool minute = st.clock_on && (jumped || tick_period() == 1 ||
+		time(NULL) % 60 < tick_period());
+	if (st.bar_w > 0 && (changed || minute)) {
 		draw_bar();
 	}
 }
@@ -1670,8 +1853,11 @@ int main(void) {
 
 	ipc_connect();
 
+	if (st.battery_on) {
+		battery_update();
+	}
 	st.clock_fd = -1;
-	if (st.clock_on) {
+	if (st.clock_on || (st.battery_on && st.battery_present)) {
 		st.clock_fd = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC);
 		if (st.clock_fd >= 0) {
 			clock_arm();

@@ -12,9 +12,25 @@
 #include "server.h"
 
 /* Size of the frame around the client's window geometry. */
+/* The window's gadgets: the scroll bars its client drives, and a sizer
+ * unless the layout decides its size. */
+void view_frame_style(struct view *view, struct frame_style *style) {
+	style->v = view->scroll_v;
+	style->h = view->scroll_h;
+	style->sizer = !view_is_tiled(view);
+}
+
 void view_extents(struct view *view, int *w, int *h) {
-	*w = view->ssd ? FRAME_LEFT + FRAME_RIGHT : 0;
-	*h = view->ssd ? FRAME_TOP + FRAME_BOTTOM : 0;
+	if (!view->ssd) {
+		*w = *h = 0;
+		return;
+	}
+	struct frame_style style;
+	view_frame_style(view, &style);
+	int right, bottom;
+	frame_extents(&style, &right, &bottom);
+	*w = FRAME_LEFT + right;
+	*h = FRAME_TOP + bottom;
 }
 
 void view_frame_box(struct view *view, struct wlr_box *box) {
@@ -146,12 +162,16 @@ void view_update_frame(struct view *view) {
 	bool active = view->server->focused_view == view;
 	const char *title = view->xdg_toplevel->title ?
 		view->xdg_toplevel->title : "";
+	struct frame_style style;
+	view_frame_style(view, &style);
 	if (view->drawn_w == geo->width && view->drawn_h == geo->height &&
 			view->drawn_active == active && view->drawn_title != NULL &&
-			strcmp(view->drawn_title, title) == 0) {
+			strcmp(view->drawn_title, title) == 0 &&
+			memcmp(&view->drawn_style, &style, sizeof(style)) == 0) {
 		return;
 	}
-	frame_draw(view->frame, geo->width, geo->height, title, active);
+	frame_draw(view->frame, &style, geo->width, geo->height, title, active);
+	view->drawn_style = style;
 	view->drawn_w = geo->width;
 	view->drawn_h = geo->height;
 	view->drawn_active = active;
@@ -356,6 +376,25 @@ void process_interactive_motion(struct server *server) {
 	int dy = (int)(server->cursor->y - server->grab_y);
 	struct wlr_box b = server->grab_box;
 
+	if (server->cursor_mode == CURSOR_SCROLL) {
+		/* The slider follows the pointer; the client is told the matching
+		 * position, and redraws the frame by reporting it back. */
+		bool vertical = server->grab_vertical;
+		struct frame_axis *a = vertical ? &view->scroll_v : &view->scroll_h;
+		struct wlr_box *geo = &view->xdg_toplevel->base->geometry;
+		struct frame_style style;
+		view_frame_style(view, &style);
+		int track, slider;
+		frame_slider_size(&style, geo->width, geo->height, vertical,
+			&track, &slider);
+		if (track > slider) {
+			double per_px = (double)(a->total - a->visible) / (track - slider);
+			view_scroll_to(view, vertical,
+				server->grab_position + (int)((vertical ? dy : dx) * per_px));
+		}
+		return;
+	}
+
 	if (server->cursor_mode == CURSOR_MOVE) {
 		b.x += dx;
 		b.y += dy;
@@ -407,7 +446,7 @@ void end_interactive(struct server *server) {
 	server->cursor_mode = CURSOR_PASSTHROUGH;
 	server->grabbed_view = NULL;
 	outline_hide(server);
-	if (view == NULL) {
+	if (view == NULL || mode == CURSOR_SCROLL) {
 		return;
 	}
 
@@ -465,25 +504,31 @@ void view_toggle_maximize(struct view *view) {
 	view_move(view, area.x, area.y);
 }
 
-/* Scroll arrows send one wheel notch to the client, as if the pointer were
- * over the middle of the window. */
-static void view_send_scroll(struct view *view, enum wl_pointer_axis axis,
-		int dir, uint32_t time) {
-	struct wlr_seat *seat = view->server->seat;
-	struct wlr_xdg_surface *base = view->xdg_toplevel->base;
-	wlr_seat_pointer_notify_enter(seat, base->surface,
-		base->geometry.x + base->geometry.width / 2.0,
-		base->geometry.y + base->geometry.height / 2.0);
-	wlr_seat_pointer_notify_axis(seat, time, axis, dir * 15.0, dir * 120,
-		WL_POINTER_AXIS_SOURCE_WHEEL,
-		WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-	wlr_seat_pointer_notify_frame(seat);
-	wlr_seat_pointer_clear_focus(seat);
+/* An arrow moves a tenth of the view; the track pages by most of one. */
+static void view_scroll_by(struct view *view, bool vertical, double views) {
+	struct frame_axis *a = vertical ? &view->scroll_v : &view->scroll_h;
+	int step = (int)(a->visible * (views < 0 ? -views : views));
+	step = step < 1 ? 1 : step;
+	view_scroll_to(view, vertical, a->position + (views < 0 ? -step : step));
+}
+
+static void view_begin_slider_drag(struct view *view, bool vertical) {
+	struct server *server = view->server;
+	server->grabbed_view = view;
+	server->cursor_mode = CURSOR_SCROLL;
+	server->grab_x = server->cursor->x;
+	server->grab_y = server->cursor->y;
+	server->grab_vertical = vertical;
+	server->grab_position = vertical ? view->scroll_v.position :
+		view->scroll_h.position;
+	wlr_seat_pointer_clear_focus(server->seat);
 }
 
 void view_frame_click(struct view *view, double fx, double fy, uint32_t time) {
 	struct wlr_box *geo = &view->xdg_toplevel->base->geometry;
-	switch (frame_part_at(geo->width, geo->height, (int)fx, (int)fy)) {
+	struct frame_style style;
+	view_frame_style(view, &style);
+	switch (frame_part_at(&style, geo->width, geo->height, (int)fx, (int)fy)) {
 	case FRAME_PART_CLOSER:
 		wlr_xdg_toplevel_send_close(view->xdg_toplevel);
 		break;
@@ -498,16 +543,34 @@ void view_frame_click(struct view *view, double fx, double fy, uint32_t time) {
 			WLR_EDGE_BOTTOM | WLR_EDGE_RIGHT);
 		break;
 	case FRAME_PART_UP:
-		view_send_scroll(view, WL_POINTER_AXIS_VERTICAL_SCROLL, -1, time);
+		view_scroll_by(view, true, -0.1);
 		break;
 	case FRAME_PART_DOWN:
-		view_send_scroll(view, WL_POINTER_AXIS_VERTICAL_SCROLL, 1, time);
+		view_scroll_by(view, true, 0.1);
 		break;
 	case FRAME_PART_LEFT:
-		view_send_scroll(view, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -1, time);
+		view_scroll_by(view, false, -0.1);
 		break;
 	case FRAME_PART_RIGHT:
-		view_send_scroll(view, WL_POINTER_AXIS_HORIZONTAL_SCROLL, 1, time);
+		view_scroll_by(view, false, 0.1);
+		break;
+	case FRAME_PART_PAGE_UP:
+		view_scroll_by(view, true, -0.9);
+		break;
+	case FRAME_PART_PAGE_DOWN:
+		view_scroll_by(view, true, 0.9);
+		break;
+	case FRAME_PART_PAGE_LEFT:
+		view_scroll_by(view, false, -0.9);
+		break;
+	case FRAME_PART_PAGE_RIGHT:
+		view_scroll_by(view, false, 0.9);
+		break;
+	case FRAME_PART_VSLIDER:
+		view_begin_slider_drag(view, true);
+		break;
+	case FRAME_PART_HSLIDER:
+		view_begin_slider_drag(view, false);
 		break;
 	default:
 		break;
@@ -666,6 +729,7 @@ static void view_destroy(struct wl_listener *listener, void *data) {
 		server->focused_view = NULL;
 	}
 	view->xdg_toplevel->base->surface->data = NULL;
+	scrollbars_view_destroyed(view);
 
 	wl_list_remove(&view->map.link);
 	wl_list_remove(&view->unmap.link);

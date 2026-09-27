@@ -6,6 +6,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/box.h>
 #include <xkbcommon/xkbcommon.h>
+#include "frame.h"
 
 /* A key binding from the config: the action is a control-socket command. */
 struct binding {
@@ -18,6 +19,7 @@ enum cursor_mode {
 	CURSOR_PASSTHROUGH,
 	CURSOR_MOVE,   /* dragging a window outline by its title bar */
 	CURSOR_RESIZE, /* dragging a window outline by its sizer */
+	CURSOR_SCROLL, /* dragging a scroll bar's slider */
 };
 
 struct server {
@@ -102,6 +104,8 @@ struct server {
 	 * the window only moves/resizes when the button is released. */
 	enum cursor_mode cursor_mode;
 	struct view *grabbed_view;
+	bool grab_vertical;   /* CURSOR_SCROLL: which slider */
+	int grab_position;    /* CURSOR_SCROLL: its position when grabbed */
 	double grab_x, grab_y;
 	struct wlr_box grab_box;  /* frame box when the grab started */
 	struct wlr_box drag_box;  /* current outline */
@@ -178,6 +182,11 @@ struct view {
 	int drawn_w, drawn_h;
 	bool drawn_active;
 	char *drawn_title;
+	struct frame_style drawn_style;
+
+	/* Scroll bars the client drives (scrollbar.c); off unless it does. */
+	struct scroll_client *scroll;
+	struct frame_axis scroll_v, scroll_h;
 
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -211,6 +220,7 @@ void focus_view(struct view *view);
 struct view *view_at(struct server *server, double lx, double ly,
 	struct wlr_surface **surface, double *sx, double *sy, bool *on_frame);
 void view_frame_box(struct view *view, struct wlr_box *box);
+void view_frame_style(struct view *view, struct frame_style *style);
 void view_extents(struct view *view, int *w, int *h);
 void view_move(struct view *view, int x, int y);
 void view_update_frame(struct view *view);
@@ -223,6 +233,11 @@ void end_interactive(struct server *server);
 void view_cycle(struct server *server, int direction, bool held);
 void view_cycle_end(struct server *server);
 void highlight_update(struct server *server);
+
+/* scrollbar.c */
+void scrollbars_init(struct server *server);
+void scrollbars_view_destroyed(struct view *view);
+void view_scroll_to(struct view *view, bool vertical, int position);
 
 /* tile.c */
 bool view_is_tiled(struct view *view);

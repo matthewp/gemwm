@@ -32,10 +32,11 @@ wl_protocol_dir = wayland_protos.get_variable('pkgdatadir')
 xdg_shell_xml = wl_protocol_dir / 'stable/xdg-shell/xdg-shell.xml'
 viewporter_xml = wl_protocol_dir / 'stable/viewporter/viewporter.xml'
 layer_shell_xml = 'protocols/wlr-layer-shell-unstable-v1.xml'
+scroll_xml = 'protocols/gemwm-scroll-v1.xml'
 
 # Headers for the compositor.
 server_protocols = []
-foreach p : [xdg_shell_xml, layer_shell_xml]
+foreach p : [xdg_shell_xml, layer_shell_xml, scroll_xml]
 	server_protocols += custom_target(
 		p.underscorify() + '_server_h',
 		input: p,
@@ -43,10 +44,16 @@ foreach p : [xdg_shell_xml, layer_shell_xml]
 		command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
 	)
 endforeach
+# Our own protocol's glue code, for the compositor side.
+server_protocols += custom_target('gemwm_scroll_server_c',
+	input: scroll_xml,
+	output: 'gemwm-scroll-v1-server-protocol.c',
+	command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
 
 # Headers and glue code for clients (the menu bar).
 client_protocols = []
-foreach p : [xdg_shell_xml, viewporter_xml, layer_shell_xml]
+foreach p : [xdg_shell_xml, viewporter_xml, layer_shell_xml, scroll_xml]
 	client_protocols += custom_target(
 		p.underscorify() + '_client_h',
 		input: p,
@@ -70,6 +77,7 @@ executable(
 		'src/workspace.c',
 		'src/tile.c',
 		'src/scroll.c',
+		'src/scrollbar.c',
 		'src/ipc.c',
 		'src/config.c',
 		'src/frame.c',
@@ -121,8 +129,9 @@ webkit = dependency('webkitgtk-6.0', required: false)
 if webkit.found()
 	executable(
 		'gemweb',
-		'browser/gemweb.c',
-		dependencies: [webkit, dependency('gtk4'), cairo],
+		['browser/gemweb.c', client_protocols],
+		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
+			wayland_client, cairo],
 		install: true,
 	)
 	install_data('browser/gemweb.desktop',

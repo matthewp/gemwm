@@ -50,7 +50,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+[ / Super+]   | scrolling: consume or expel the window   |
 | Super+R             | scrolling: column width ⅓ → ½ → ⅔        |
 | Super+1..9, Alt+1..9 | switch workspace                        |
-| Alt+Shift+1..9      | move the focused window to a workspace   |
+| Super+Shift+1..9, Alt+Shift+1..9 | move the focused window to a workspace |
 | Alt+Escape          | quit                                     |
 
 While Super is held, the focused window gets a thick pink border.
@@ -66,7 +66,8 @@ Environment:
 Hover a title to drop its menu; click an item to run it. Click the title
 (or anywhere outside) to close it again; a click outside never reaches the
 window underneath, as on the ST. Click the clock to switch between 24-hour
-and 12-hour time.
+and 12-hour time. On a laptop the battery sits left of the clock: a bolt
+means it's on mains power, and the charge turns inverted at 10% or less.
 
 The menus are built in, and `~/.config/gemwm/menu` changes them. You only
 write what you want to change: a section replaces the built-in menu with the
@@ -124,6 +125,9 @@ each line adds or replaces one binding, and `none` removes one.
     mode = 24h                           # 12h, or off; click the clock to switch
     seconds = no
 
+    [battery]
+    mode = on                            # or off; hidden anyway without a battery
+
     [layout]
     mode = window                        # tiling or scrolling: the starting mode
     gap = 8                              # pixels between tiles and columns
@@ -132,16 +136,16 @@ each line adds or replaces one binding, and `none` removes one.
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
 `gemwm msg` command (see below), plus `exec <command>` and `quit`.
-Apply changes with `gemwm msg reload-config`; `[clock]` is read by the
-menu bar when it starts (`pkill gemwm-menu; setsid gemwm-menu &`).
+Apply changes with `gemwm msg reload-config`; `[clock]` and `[battery]`
+are read by the menu bar when it starts (`pkill gemwm-menu; setsid gemwm-menu &`).
 
 ## Workspaces
 
 The middle of the menu bar shows the workspaces, `1 | 2 | +`. Click a
 number to switch, or `+` to add one. Workspaces are dynamic: an empty
 workspace is removed when you leave it, and the ones after it move up a
-number. Alt+1..9 and Alt+Shift+1..9 accept one past the last workspace,
-which creates a new one.
+number. The number keys, with or without Shift, accept one past the last
+workspace, which creates a new one.
 
 ## Tiling
 
@@ -249,13 +253,20 @@ tab to close it. Text that isn't an address is searched with DuckDuckGo, or
 with `$GEMWEB_SEARCH` (`%s` marks the query). Downloads go to
 `~/Downloads`; cookies and site data live in `~/.local/share/gemweb`.
 
+Under GemWM a page scrolls with the window frame's own scroll bars, and its
+built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
+
 ## Windows
 
 - Drag the title bar to move: an outline follows the pointer and the window
   moves on release, as in GEM.
 - Sizer (bottom right) resizes the same way.
 - Closer (top left) closes, fuller (top right) toggles full screen size.
-- Scroll arrows send wheel scrolls to the application.
+- Scroll bars are real GEM ones, for applications that drive them through
+  the `gemwm-scroll-v1` protocol (`protocols/gemwm-scroll-v1.xml`), as GemWeb
+  does: drag the slider, click the arrows to step, or click the track to
+  page. As in GEM, windows whose applications don't use it have no scroll
+  bars, just a thin border and the sizer.
 - Clicking a background window only brings it to the top.
 
 ## License

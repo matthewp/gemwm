@@ -13,10 +13,12 @@
  *   page       (a WebKitWebView per tab, in a GtkStack)
  */
 #include <cairo.h>
+#include <gdk/wayland/gdkwayland.h>
 #include <gtk/gtk.h>
 #include <stdbool.h>
 #include <string.h>
 #include <webkit/webkit.h>
+#include "gemwm-scroll-v1-client-protocol.h"
 
 #define TAB_H 20       /* 19px of tabs plus a 1px line */
 #define TOOL_H 21      /* the toolbar's buttons; the box adds a 1px line */
@@ -36,6 +38,9 @@ struct browser;
 struct tab {
 	struct browser *browser;
 	WebKitWebView *view;
+	WebKitUserContentManager *content;
+	/* The page's scroll state, as its script last reported it (CSS px). */
+	int scroll_x, scroll_y, view_w, view_h, doc_w, doc_h;
 };
 
 struct browser {
@@ -47,6 +52,7 @@ struct browser {
 	char *download_status; /* last download message */
 	bool entry_edited;     /* the user typed in the address field */
 	bool entry_setting;    /* we are changing it, not the user */
+	struct gemwm_scroll_v1 *scroll; /* GemWM draws our scroll bars */
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -54,8 +60,11 @@ struct browser {
 static struct {
 	GtkApplication *app;
 	WebKitNetworkSession *session;
-	WebKitUserContentManager *content;
+	WebKitUserStyleSheet *style;
+	WebKitUserScript *scroll_script;
 	WebKitSettings *settings;
+	/* Under GemWM, the window frame's GEM scroll bars scroll the page. */
+	struct gemwm_scroll_manager_v1 *scroll_manager;
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -85,6 +94,35 @@ static const char page_css[] =
 	"  url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='7' height='11'><path d='M0 5.5L7 0V11z'/></svg>\"); }"
 	"::-webkit-scrollbar-button:single-button:horizontal:increment { background-image:"
 	"  url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='7' height='11'><path d='M0 0L7 5.5L0 11z'/></svg>\"); }";
+
+/* Under GemWM the window's own scroll bars are GEM ones in the frame, so
+ * the page's main scroll bar goes; scrolling boxes inside pages keep the
+ * GEM-styled ones above. */
+static const char frame_scroll_css[] = "html { scrollbar-width: none; }";
+
+/* Tells GemWeb how the page is scrolled, whenever that changes: position,
+ * viewport and document size, in CSS pixels. */
+static const char scroll_script[] =
+	"(function () {"
+	"  var queued = false;"
+	"  function send() {"
+	"    queued = false;"
+	"    var d = document.scrollingElement || document.documentElement;"
+	"    if (!d) return;"
+	"    window.webkit.messageHandlers.gemwmScroll.postMessage([window.scrollX,"
+	"      window.scrollY, window.innerWidth, window.innerHeight,"
+	"      d.scrollWidth, d.scrollHeight]);"
+	"  }"
+	"  function queue() {"
+	"    if (!queued) { queued = true; requestAnimationFrame(send); }"
+	"  }"
+	"  addEventListener('scroll', queue, { passive: true });"
+	"  addEventListener('resize', queue);"
+	"  addEventListener('load', queue);"
+	"  if (window.ResizeObserver && document.documentElement)"
+	"    new ResizeObserver(queue).observe(document.documentElement);"
+	"  queue();"
+	"})();";
 
 /* A new tab: a GEM dialog box on a dithered desk. */
 static const char start_page[] =
@@ -203,35 +241,38 @@ static int tab_width(struct browser *b, int w) {
 }
 
 static void paint_tabbar(struct browser *b, cairo_t *cr, int w, int h) {
-	static const char *title_rows[] = { "#.", "..", ".#", ".." };
 	int tw = tab_width(b, w);
 	for (guint i = 0; i < b->tabs->len; i++) {
 		struct tab *t = g_ptr_array_index(b->tabs, i);
 		int x = i * tw;
-		const char *title = tab_title(t);
+		bool active = (int)i == b->active;
 
-		/* The active tab looks like the top window's title bar: a dotted
-		 * fill with the title on a white box. */
-		if ((int)i == b->active) {
-			cairo_pattern_t *p = dither(title_rows, 2, 4, false);
-			cairo_set_source(cr, p);
-			fill(cr, x + GADGET + 1, 0, tw - GADGET - 2, h - 1);
-			cairo_pattern_destroy(p);
+		/* The active tab is inverted, as GEM shows an open menu title. */
+		if (active) {
+			black(cr);
+			fill(cr, x, 0, tw - 1, h - 1);
 		}
 		cairo_save(cr);
 		cairo_rectangle(cr, x + GADGET + 1, 0, tw - GADGET - 2, h - 1);
 		cairo_clip(cr);
-		double tx = x + GADGET + 7;
-		double box_w = text_width(cr, title) + 12;
-		white(cr);
-		fill(cr, tx - 6, 0, box_w, h - 1);
-		black(cr);
-		text(cr, title, tx, 0, h - 1);
+		if (active) {
+			white(cr);
+		} else {
+			black(cr);
+		}
+		text(cr, tab_title(t), x + GADGET + 7, 0, h - 1);
 		cairo_restore(cr);
 
+		if (active) {
+			white(cr);
+			draw_closer(cr, x, 0);
+			fill(cr, x + GADGET, 0, 1, h - 1);  /* after the closer */
+		} else {
+			black(cr);
+			draw_closer(cr, x, 0);
+			fill(cr, x + GADGET, 0, 1, h - 1);
+		}
 		black(cr);
-		draw_closer(cr, x, 0);
-		fill(cr, x + GADGET, 0, 1, h - 1);      /* after the closer */
 		fill(cr, x + tw - 1, 0, 1, h - 1);      /* between tabs */
 	}
 	/* The "+" box. */
@@ -471,6 +512,76 @@ static void sync_tabbar(struct browser *b) {
 	gtk_widget_queue_draw(b->tabbar);
 }
 
+/* Tells GemWM how the active tab is scrolled, for the frame's scroll bars.
+ * The vertical bar is always there; the horizontal one only for pages
+ * wider than the window (it takes height, not width, so it can't make the
+ * page reflow in and out of needing it). */
+static void report_scroll(struct browser *b) {
+	struct tab *t = b->active >= 0 && b->active < (int)b->tabs->len ?
+		g_ptr_array_index(b->tabs, b->active) : NULL;
+	if (b->scroll == NULL || t == NULL) {
+		return;
+	}
+	int doc_h = t->doc_h > t->view_h ? t->doc_h : t->view_h;
+	gemwm_scroll_v1_set_axis(b->scroll, GEMWM_SCROLL_V1_AXIS_VERTICAL,
+		t->scroll_y, t->view_h, doc_h > 0 ? doc_h : 1);
+	gemwm_scroll_v1_set_axis(b->scroll, GEMWM_SCROLL_V1_AXIS_HORIZONTAL,
+		t->scroll_x, t->view_w, t->doc_w > t->view_w + 1 ? t->doc_w : 0);
+}
+
+static void on_scroll_message(WebKitUserContentManager *content,
+		JSCValue *value, struct tab *t) {
+	int *fields[] = { &t->scroll_x, &t->scroll_y, &t->view_w, &t->view_h,
+		&t->doc_w, &t->doc_h };
+	for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
+		JSCValue *v = jsc_value_object_get_property_at_index(value, i);
+		*fields[i] = jsc_value_to_int32(v);
+		g_object_unref(v);
+	}
+	if (t->browser->active >= 0 &&
+			g_ptr_array_index(t->browser->tabs, t->browser->active) == t) {
+		report_scroll(t->browser);
+	}
+}
+
+/* The user worked a scroll bar in GemWM's frame. */
+static void on_scroll_to(void *data, struct gemwm_scroll_v1 *scroll,
+		uint32_t axis, int32_t position) {
+	struct browser *b = data;
+	if (b->active < 0 || b->active >= (int)b->tabs->len) {
+		return;
+	}
+	struct tab *t = g_ptr_array_index(b->tabs, b->active);
+	char js[96];
+	if (axis == GEMWM_SCROLL_V1_AXIS_VERTICAL) {
+		snprintf(js, sizeof(js), "window.scrollTo(window.scrollX, %d)", position);
+	} else {
+		snprintf(js, sizeof(js), "window.scrollTo(%d, window.scrollY)", position);
+	}
+	webkit_web_view_evaluate_javascript(t->view, js, -1, NULL, NULL, NULL,
+		NULL, NULL);
+}
+
+static const struct gemwm_scroll_v1_listener scroll_listener = {
+	.scroll_to = on_scroll_to,
+};
+
+/* Once the window is on screen it has a Wayland surface to hang the scroll
+ * bars on. */
+static void window_mapped(GtkWidget *window, struct browser *b) {
+	if (shared.scroll_manager == NULL || b->scroll != NULL) {
+		return;
+	}
+	GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+	if (!GDK_IS_WAYLAND_SURFACE(surface)) {
+		return;
+	}
+	b->scroll = gemwm_scroll_manager_v1_get_scroll(shared.scroll_manager,
+		gdk_wayland_surface_get_wl_surface(surface));
+	gemwm_scroll_v1_add_listener(b->scroll, &scroll_listener, b);
+	report_scroll(b);
+}
+
 static void sync_all(struct browser *b) {
 	struct tab *t = active_tab(b);
 	if (t != NULL) {
@@ -478,6 +589,7 @@ static void sync_all(struct browser *b) {
 	}
 	sync_entry(b);
 	sync_tabbar(b);
+	report_scroll(b);
 	gtk_widget_queue_draw(b->buttons);
 	gtk_widget_queue_draw(b->info);
 }
@@ -729,14 +841,25 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 		const char *input, bool select) {
 	struct tab *t = g_new0(struct tab, 1);
 	t->browser = b;
+	/* Each tab has its own content manager so its scroll reports say which
+	 * tab they come from. */
+	t->content = webkit_user_content_manager_new();
+	webkit_user_content_manager_add_style_sheet(t->content, shared.style);
+	if (shared.scroll_manager != NULL) {
+		webkit_user_content_manager_add_script(t->content, shared.scroll_script);
+		webkit_user_content_manager_register_script_message_handler(t->content,
+			"gemwmScroll", NULL);
+		g_signal_connect(t->content, "script-message-received::gemwmScroll",
+			G_CALLBACK(on_scroll_message), t);
+	}
 	if (related != NULL) {
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
 			"related-view", related,
-			"user-content-manager", shared.content, NULL);
+			"user-content-manager", t->content, NULL);
 	} else {
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
 			"network-session", shared.session,
-			"user-content-manager", shared.content,
+			"user-content-manager", t->content,
 			"settings", shared.settings, NULL);
 	}
 	gtk_widget_set_vexpand(GTK_WIDGET(t->view), TRUE);
@@ -782,6 +905,8 @@ static void tab_close(struct browser *b, int index) {
 	struct tab *t = g_ptr_array_index(b->tabs, index);
 	g_ptr_array_remove_index(b->tabs, index);
 	g_object_set_data(G_OBJECT(t->view), "tab", NULL);
+	g_signal_handlers_disconnect_by_data(t->content, t);
+	g_object_unref(t->content);
 	gtk_stack_remove(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	g_free(t);
 	if (b->tabs->len == 0) {
@@ -953,10 +1078,44 @@ static void load_css(void) {
 }
 
 static void window_destroyed(GtkWidget *window, struct browser *b) {
+	if (b->scroll != NULL) {
+		gemwm_scroll_v1_destroy(b->scroll);
+	}
 	g_ptr_array_free(b->tabs, TRUE);
 	g_free(b->hover_link);
 	g_free(b->download_status);
 	g_free(b);
+}
+
+static void registry_global(void *data, struct wl_registry *registry,
+		uint32_t name, const char *interface, uint32_t version) {
+	if (strcmp(interface, gemwm_scroll_manager_v1_interface.name) == 0) {
+		shared.scroll_manager = wl_registry_bind(registry, name,
+			&gemwm_scroll_manager_v1_interface, 1);
+	}
+}
+
+static void registry_global_remove(void *data, struct wl_registry *registry,
+		uint32_t name) {
+}
+
+static const struct wl_registry_listener registry_listener = {
+	.global = registry_global,
+	.global_remove = registry_global_remove,
+};
+
+/* Asks the compositor, over GTK's own Wayland connection, whether it draws
+ * scroll bars for us (GemWM does). */
+static void find_scroll_manager(void) {
+	GdkDisplay *display = gdk_display_get_default();
+	if (!GDK_IS_WAYLAND_DISPLAY(display)) {
+		return;
+	}
+	struct wl_display *wl = gdk_wayland_display_get_wl_display(display);
+	struct wl_registry *registry = wl_display_get_registry(wl);
+	wl_registry_add_listener(registry, &registry_listener, NULL);
+	wl_display_roundtrip(wl);
+	wl_registry_destroy(registry);
 }
 
 static void shared_init(GtkApplication *app) {
@@ -974,12 +1133,16 @@ static void shared_init(GtkApplication *app) {
 	g_free(data);
 	g_free(cache);
 
-	shared.content = webkit_user_content_manager_new();
-	WebKitUserStyleSheet *sheet = webkit_user_style_sheet_new(page_css,
+	find_scroll_manager();
+	char *css = g_strconcat(page_css,
+		shared.scroll_manager != NULL ? frame_scroll_css : "", NULL);
+	shared.style = webkit_user_style_sheet_new(css,
 		WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER,
 		NULL, NULL);
-	webkit_user_content_manager_add_style_sheet(shared.content, sheet);
-	webkit_user_style_sheet_unref(sheet);
+	g_free(css);
+	shared.scroll_script = webkit_user_script_new(scroll_script,
+		WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+		WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, NULL, NULL);
 
 	shared.settings = webkit_settings_new();
 	webkit_settings_set_enable_developer_extras(shared.settings, TRUE);
@@ -997,6 +1160,7 @@ static struct browser *browser_new(GtkApplication *app) {
 	gtk_widget_add_css_class(b->window, "gemweb");
 	g_object_set_data(G_OBJECT(b->window), "browser", b);
 	g_signal_connect(b->window, "destroy", G_CALLBACK(window_destroyed), b);
+	g_signal_connect(b->window, "map", G_CALLBACK(window_mapped), b);
 
 	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	b->tabbar = pixel_area(b, TAB_H, draw_tabbar, G_CALLBACK(tabbar_pressed));

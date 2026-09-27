@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="gemwm_scroll_v1">
+  <copyright>
+    Copyright (c) 2026, Matthew Phillips. BSD-3-Clause, see LICENSE.
+  </copyright>
+
+  <description summary="GEM scroll bars drawn by the compositor">
+    On the Atari ST, GEM drew a window's scroll bars and the application
+    told it where the sliders were. This protocol does the same on Wayland:
+    a client reports how its window's content is scrolled, GemWM draws GEM
+    scroll bars in the window frame, and asks the client to scroll when the
+    user works them. Windows that don't use it get frames without scroll
+    bars and draw their own.
+
+    Units are the client's own (a browser uses CSS pixels): only the ratios
+    between position, visible and total matter to the compositor.
+  </description>
+
+  <interface name="gemwm_scroll_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+
+    <request name="get_scroll">
+      <description summary="scroll bars for a window">
+        Create a scroll object for a toplevel's surface. The frame shows no
+        scroll bars until the client reports an axis.
+      </description>
+      <arg name="id" type="new_id" interface="gemwm_scroll_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="gemwm_scroll_v1" version="1">
+    <enum name="axis">
+      <entry name="vertical" value="0"/>
+      <entry name="horizontal" value="1"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="stop drawing scroll bars for the window"/>
+    </request>
+
+    <request name="set_axis">
+      <description summary="report how an axis is scrolled">
+        The visible part starts at position and is visible units long, out
+        of total. A total of 0 removes that axis's scroll bar. Takes effect
+        at once.
+      </description>
+      <arg name="axis" type="uint" enum="axis"/>
+      <arg name="position" type="int"/>
+      <arg name="visible" type="int"/>
+      <arg name="total" type="int"/>
+    </request>
+
+    <event name="scroll_to">
+      <description summary="the user moved a scroll bar">
+        Scroll the axis so the visible part starts at position. The client
+        reports the result with set_axis as usual.
+      </description>
+      <arg name="axis" type="uint" enum="axis"/>
+      <arg name="position" type="int"/>
+    </event>
+  </interface>
+</protocol>
