@@ -95,7 +95,10 @@ static const char default_config[] =
 	"[desktop]\n"
 	"color = green\n"
 	"image =\n"
-	"image-mode = fill\n";
+	"image-mode = fill\n"
+	"dither = off\n"
+	"dither-style = diffuse\n"
+	"pixel-size = 2\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -272,7 +275,7 @@ static void parse(struct server *server, FILE *f, const char *name) {
 		} else if (strcmp(section, "desktop") == 0 &&
 				strcmp(key, "color") == 0) {
 			if (!desktop_parse_color(value, &server->desktop_color,
-					&server->desktop_dither)) {
+					&server->desktop_mono)) {
 				wlr_log(WLR_ERROR, "%s:%d: colours are a name (green, blue, "
 					"grey...), mono, or like #00ff00", name, lineno);
 			}
@@ -295,6 +298,18 @@ static void parse(struct server *server, FILE *f, const char *name) {
 				strcmp(value, "center") == 0 ? IMAGE_CENTER :
 				strcmp(value, "tile") == 0 ? IMAGE_TILE :
 				strcmp(value, "stretch") == 0 ? IMAGE_STRETCH : IMAGE_FILL;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "dither") == 0) {
+			server->desktop_palette = strcmp(value, "st") == 0 ? DITHER_ST :
+				strcmp(value, "st16") == 0 ? DITHER_ST16 : DITHER_OFF;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "dither-style") == 0) {
+			server->desktop_dither_style = strcmp(value, "ordered") == 0 ?
+				DITHER_ORDERED : DITHER_DIFFUSE;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "pixel-size") == 0) {
+			int size = atoi(value);
+			server->desktop_pixel_size = size < 1 ? 1 : size > 16 ? 16 : size;
 		} else if (strcmp(section, "clock") != 0 &&
 				strcmp(section, "battery") != 0) { /* the menu bar's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);

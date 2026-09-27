@@ -90,6 +90,7 @@ executable(
 		'src/config.c',
 		'src/frame.c',
 		'src/desktop.c',
+		'src/dither.c',
 		'src/cairo_buffer.c',
 		server_protocols,
 	],

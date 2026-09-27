@@ -210,6 +210,9 @@ each line adds or replaces one binding, and `none` removes one.
     color = green
     image =
     image-mode = fill
+    dither = off
+    dither-style = diffuse
+    pixel-size = 2
 
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
@@ -233,6 +236,19 @@ The named colours are ST palette entries, colours a real ST could show:
 `mono` is the high-resolution ST's 50% dither. An image (PNG, JPEG, WebP...)
 is drawn over the colour; `center` and `tile` show it at one desktop pixel
 per image pixel, and pixel art blown up 2x or more keeps its square pixels.
+
+To see the desktop as an ST would have shown it, turn on dithering:
+
+    [desktop]
+    dither = st16             # st: the ST's 512 colours; st16: 16 of them,
+                              # picked for the picture, as in low-res; off
+    dither-style = diffuse    # diffuse: a fine speckle; ordered: the
+                              # regular crosshatch of 80s computer art
+    pixel-size = 2            # how big its pixels are, in desktop pixels
+
+The picture is redrawn in big pixels, in those colours, with patterns of
+dots for the shades between them. It's done once, when the desktop
+changes, so it costs nothing while you work, and windows stay sharp.
 
 Changes apply with `gemwm msg reload-config`.
 

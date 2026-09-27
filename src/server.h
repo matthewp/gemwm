@@ -66,14 +66,18 @@ struct server {
 	enum { DIM_OFF, DIM_TILING, DIM_ALWAYS } dim; /* grey out unfocused windows */
 	float dim_opacity;
 
-	/* The desktop background (desktop.c): a colour or the ST's dither,
-	 * with an image over it if one is set. */
+	/* The desktop background (desktop.c): a colour or the ST's mono
+	 * pattern, with an image over it if one is set. */
 	uint32_t desktop_color;
-	bool desktop_dither;
+	bool desktop_mono;
 	char *desktop_image;              /* path, NULL for none */
 	enum image_mode { IMAGE_FILL, IMAGE_FIT, IMAGE_CENTER, IMAGE_TILE,
 		IMAGE_STRETCH } desktop_image_mode;
 	cairo_surface_t *desktop_picture; /* desktop_image, loaded */
+	/* Shown as an ST would (dither.c), in big pixels of pixel_size. */
+	enum dither_palette { DITHER_OFF, DITHER_ST, DITHER_ST16 } desktop_palette;
+	enum dither_style { DITHER_DIFFUSE, DITHER_ORDERED } desktop_dither_style;
+	int desktop_pixel_size;
 
 	/* Window cycling (Super+Tab): the windows in most-recently-used order
 	 * as it started, walked while the modifier stays down. */
@@ -321,7 +325,9 @@ bool output_usable_area_at(struct server *server, double lx, double ly,
 
 /* desktop.c */
 void desktop_update_output(struct output *output);
-bool desktop_parse_color(const char *value, uint32_t *argb, bool *dither);
+bool desktop_parse_color(const char *value, uint32_t *argb, bool *mono);
 void desktop_configure(struct server *server);
+void dither_surface(cairo_surface_t *surface, int block,
+	enum dither_palette palette, enum dither_style style);
 
 #endif

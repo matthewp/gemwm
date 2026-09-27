@@ -1,6 +1,7 @@
 /*
  * The desktop background, from [desktop] in the config: a colour (or the
- * high-resolution ST's 50% dither), with a picture over it if one is set.
+ * high-resolution ST's 50% mono pattern), with a picture over it if one is
+ * set, optionally shown in the ST's colours (dither.c).
  * It's drawn at the output's real pixel size, so pictures stay sharp on
  * HiDPI screens, while the dither keeps its chunky ST-sized pixels.
  */
@@ -38,15 +39,15 @@ static const struct {
 };
 
 /* A [desktop] colour: a name above, "mono" for the dither, or #rrggbb. */
-bool desktop_parse_color(const char *value, uint32_t *argb, bool *dither) {
+bool desktop_parse_color(const char *value, uint32_t *argb, bool *mono) {
 	if (strcasecmp(value, "mono") == 0) {
-		*dither = true;
+		*mono = true;
 		return true;
 	}
 	for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); i++) {
 		if (strcasecmp(value, presets[i].name) == 0) {
 			*argb = 0xff000000u | presets[i].rgb;
-			*dither = false;
+			*mono = false;
 			return true;
 		}
 	}
@@ -57,7 +58,7 @@ bool desktop_parse_color(const char *value, uint32_t *argb, bool *dither) {
 		return false;
 	}
 	*argb = 0xff000000u | (uint32_t)rgb;
-	*dither = false;
+	*mono = false;
 	return true;
 }
 
@@ -156,7 +157,7 @@ void desktop_update_output(struct output *output) {
 		int dy = (int)(y / scale);
 		for (int x = 0; x < w; x++) {
 			/* The dither's pixels are desktop pixels, not device ones. */
-			px[y * stride + x] = !server->desktop_dither ?
+			px[y * stride + x] = !server->desktop_mono ?
 				server->desktop_color :
 				(((int)(x / scale) + dy) & 1) ? 0xffffffff : 0xff000000;
 		}
@@ -167,6 +168,10 @@ void desktop_update_output(struct output *output) {
 		draw_picture(cr, server->desktop_picture, server->desktop_image_mode,
 			w, h, scale);
 		cairo_destroy(cr);
+	}
+	if (server->desktop_palette != DITHER_OFF) {
+		dither_surface(surface, (int)lround(server->desktop_pixel_size * scale),
+			server->desktop_palette, server->desktop_dither_style);
 	}
 	cairo_surface_flush(surface);
 
@@ -189,7 +194,7 @@ void desktop_configure(struct server *server) {
 	const char *env = getenv("GEMWM_DESKTOP");
 	if (env != NULL && env[0] != '\0' &&
 			!desktop_parse_color(env, &server->desktop_color,
-				&server->desktop_dither)) {
+				&server->desktop_mono)) {
 		wlr_log(WLR_ERROR, "GEMWM_DESKTOP: not a colour: %s", env);
 	}
 	if (server->desktop_picture != NULL) {
