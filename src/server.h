@@ -46,9 +46,11 @@ struct server {
 	struct wl_list workspaces; /* workspace.link, in order */
 	struct workspace *active_workspace;
 
-	/* Tiling mode (tile.c). */
-	bool tiling;
+	/* How windows are laid out: freely (GEM style), tiled (tile.c) or on a
+	 * scrolling strip of columns (scroll.c). */
+	enum layout_mode { MODE_WINDOW, MODE_TILING, MODE_SCROLLING } mode;
 	int gap;               /* pixels between tiles, from the config */
+	double column_width;   /* scrolling: new columns' share of the screen */
 	bool mode_configured;  /* [layout] mode applies at startup only */
 	struct wl_list tiles;  /* view.tile_link, in the order windows opened */
 
@@ -124,6 +126,16 @@ struct output {
 	struct wl_listener destroy;
 };
 
+/* Scrolling mode: a column of windows stacked top to bottom. */
+struct column {
+	struct wl_list link;  /* workspace.columns, left to right */
+	struct wl_list views; /* view.column_link, top to bottom */
+	double width;         /* share of the screen */
+	double saved_width;   /* width before Super+Z made it full; 0 if not */
+	struct view *focus;   /* the window last focused in it */
+	int x, w;             /* on the strip, from the last arrange */
+};
+
 /* A set of windows shown together. Workspaces are numbered by position:
  * removing an empty one renumbers those after it. */
 struct workspace {
@@ -131,6 +143,8 @@ struct workspace {
 	struct server *server;
 	struct wlr_scene_tree *tree; /* the windows; disabled while hidden */
 	struct view *zoomed; /* tiling: the tile filling the screen, or NULL */
+	struct wl_list columns; /* scrolling: column.link, left to right */
+	int scroll_x;           /* scrolling: the strip's offset on screen */
 };
 
 struct view {
@@ -138,6 +152,8 @@ struct view {
 	struct server *server;
 	uint32_t id; /* stable, for gemwm msg */
 	struct wl_list tile_link;    /* server.tiles, while mapped */
+	struct column *column;       /* scrolling mode */
+	struct wl_list column_link;  /* column.views */
 	struct wlr_box float_box;    /* frame box to go back to after tiling */
 	struct workspace *workspace; /* NULL while unmapped */
 	struct wlr_xdg_toplevel *xdg_toplevel;
@@ -211,11 +227,24 @@ void highlight_update(struct server *server);
 /* tile.c */
 bool view_is_tiled(struct view *view);
 void tile_arrange(struct server *server);
-void tile_set_mode(struct server *server, bool tiling);
+void tile_set_mode(struct server *server, enum layout_mode mode);
+void tile_place(struct view *view, int x, int y, int w, int h);
 bool tile_focus_direction(struct server *server, const char *dir);
 void tile_toggle_zoom(struct view *view);
 void tile_unzoom(struct workspace *ws);
 void view_toggle_maximize_or_zoom(struct view *view);
+
+/* scroll.c */
+void scroll_add_view(struct view *view);
+void scroll_remove_view(struct view *view);
+void scroll_build(struct server *server);
+void scroll_clear(struct server *server);
+void scroll_arrange_workspace(struct workspace *ws, struct wlr_box area);
+bool scroll_focus_direction(struct server *server, const char *dir);
+bool scroll_move(struct server *server, const char *dir);
+bool scroll_consume_or_expel(struct server *server, const char *dir);
+bool scroll_column_width(struct server *server, const char *arg);
+void scroll_toggle_full(struct view *view);
 
 /* config.c */
 void config_load(struct server *server);

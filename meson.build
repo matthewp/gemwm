@@ -69,6 +69,7 @@ executable(
 		'src/layer.c',
 		'src/workspace.c',
 		'src/tile.c',
+		'src/scroll.c',
 		'src/ipc.c',
 		'src/config.c',
 		'src/frame.c',

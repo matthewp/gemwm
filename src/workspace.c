@@ -43,6 +43,7 @@ struct workspace *workspace_create(struct server *server) {
 	struct workspace *ws = calloc(1, sizeof(*ws));
 	ws->server = server;
 	ws->tree = wlr_scene_tree_create(server->layer_views);
+	wl_list_init(&ws->columns);
 	wlr_scene_node_set_enabled(&ws->tree->node, false);
 	wl_list_insert(server->workspaces.prev, &ws->link);
 	return ws;
@@ -127,8 +128,12 @@ void view_set_workspace(struct view *view, struct workspace *ws) {
 		tile_unzoom(view->workspace);
 	}
 	tile_unzoom(ws);
+	scroll_remove_view(view);
 	view->workspace = ws;
 	wlr_scene_node_reparent(&view->tree->node, ws->tree);
+	if (server->mode == MODE_SCROLLING) {
+		scroll_add_view(view); /* joins the end of the strip there */
+	}
 	if (server->focused_view == view && ws != server->active_workspace) {
 		workspace_focus_top(server);
 	}

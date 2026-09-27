@@ -47,7 +47,7 @@ static bool dim_accepts_input(struct wlr_scene_buffer *buffer,
 static void view_update_dim(struct view *view) {
 	struct server *server = view->server;
 	bool on = server->dim == DIM_ALWAYS ||
-		(server->dim == DIM_TILING && server->tiling);
+		(server->dim == DIM_TILING && server->mode != MODE_WINDOW);
 	bool show = on && view->workspace != NULL &&
 		view != server->focused_view && server->dim_opacity > 0;
 	wlr_scene_node_set_enabled(&view->dim->node, show);
@@ -200,6 +200,11 @@ void focus_view(struct view *view) {
 		wlr_seat_keyboard_notify_enter(seat, surface,
 			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 	}
+	/* Scrolling mode brings the focused column into view. */
+	if (server->mode == MODE_SCROLLING && view->column != NULL) {
+		view->column->focus = view;
+		tile_arrange(server);
+	}
 	highlight_update(server);
 	ipc_notify_windows(server);
 }
@@ -244,8 +249,8 @@ struct view *view_at(struct server *server, double lx, double ly,
  * the order is frozen, so repeated presses walk the whole list; releasing
  * it ends the cycle (view_cycle_end, from the keyboard code). */
 void view_cycle(struct server *server, int direction, bool held) {
-	if (server->tiling) {
-		return; /* tiling moves focus with Super+Arrows instead */
+	if (server->mode != MODE_WINDOW) {
+		return; /* tiling and scrolling move focus with Super+Arrows */
 	}
 	if (server->cycle_views == NULL) {
 		int n = 0;
@@ -528,6 +533,9 @@ static void view_map(struct wl_listener *listener, void *data) {
 	wlr_scene_node_set_enabled(&view->tree->node, true);
 	wl_list_insert(&server->views, &view->link);
 	wl_list_insert(server->tiles.prev, &view->tile_link);
+	if (server->mode == MODE_SCROLLING) {
+		scroll_add_view(view); /* a new column, right of the focused one */
+	}
 	if (view_is_tiled(view)) {
 		tile_unzoom(view->workspace);
 		wlr_xdg_toplevel_set_tiled(view->xdg_toplevel, WLR_EDGE_TOP |
@@ -566,6 +574,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 	}
 	wl_list_remove(&view->tile_link);
 	wl_list_init(&view->tile_link);
+	scroll_remove_view(view);
 	workspace_prune(server);
 	tile_arrange(server);
 	cursor_rebase(server);
@@ -685,6 +694,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	view->xdg_toplevel = xdg_toplevel;
 	wl_list_init(&view->link);
 	wl_list_init(&view->tile_link);
+	wl_list_init(&view->column_link);
 
 	view->tree = wlr_scene_tree_create(server->layer_views);
 	view->tree->node.data = view;

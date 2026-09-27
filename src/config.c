@@ -39,6 +39,13 @@ static const char default_config[] =
 	"Super+Right = focus-direction right\n"
 	"Super+Up = focus-direction up\n"
 	"Super+Down = focus-direction down\n"
+	"Super+Ctrl+Left = move-direction left\n"
+	"Super+Ctrl+Right = move-direction right\n"
+	"Super+Ctrl+Up = move-direction up\n"
+	"Super+Ctrl+Down = move-direction down\n"
+	"Super+bracketleft = consume-or-expel left\n"
+	"Super+bracketright = consume-or-expel right\n"
+	"Super+R = column-width cycle\n"
 	"Alt+Escape = quit\n"
 	"Alt+1 = workspace 1\n"
 	"Alt+2 = workspace 2\n"
@@ -68,7 +75,8 @@ static const char default_config[] =
 	"\n"
 	"[layout]\n"
 	"mode = window\n"
-	"gap = 8\n";
+	"gap = 8\n"
+	"column-width = 0.5\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -234,8 +242,14 @@ static void parse(struct server *server, FILE *f, const char *name) {
 			/* Only the mode GemWM starts in: later reloads leave the
 			 * one picked from the menu alone. */
 			if (!server->mode_configured) {
-				server->tiling = strcmp(value, "tiling") == 0;
+				server->mode = strcmp(value, "tiling") == 0 ? MODE_TILING :
+					strcmp(value, "scrolling") == 0 ? MODE_SCROLLING :
+					MODE_WINDOW;
 			}
+		} else if (strcmp(section, "layout") == 0 &&
+				strcmp(key, "column-width") == 0) {
+			double w = strtod(value, NULL);
+			server->column_width = w < 0.1 ? 0.1 : w > 1 ? 1 : w;
 		} else if (strcmp(section, "clock") != 0) { /* the menu bar's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);
 		}

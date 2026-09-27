@@ -19,10 +19,12 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
+#include "frame.h"
 #include "server.h"
 
 bool view_is_tiled(struct view *view) {
-	return view->server->tiling && view->xdg_toplevel->parent == NULL &&
+	return view->server->mode != MODE_WINDOW &&
+		view->xdg_toplevel->parent == NULL &&
 		view->workspace != NULL;
 }
 
@@ -38,14 +40,20 @@ static int workspace_tiles(struct workspace *ws, struct view **out, int max) {
 	return n;
 }
 
-static void place(struct view *view, int x, int y, int w, int h) {
+void tile_place(struct view *view, int x, int y, int w, int h) {
 	int ew, eh;
 	view_extents(view, &ew, &eh);
 	if (w - ew < 1 || h - eh < 1) {
 		return;
 	}
 	view_move(view, x, y);
-	wlr_xdg_toplevel_set_size(view->xdg_toplevel, w - ew, h - eh);
+	/* Arranging runs often (every focus change when scrolling): only ask
+	 * the client to resize when the size actually changes. */
+	struct wlr_xdg_toplevel *toplevel = view->xdg_toplevel;
+	if (toplevel->scheduled.width != w - ew ||
+			toplevel->scheduled.height != h - eh) {
+		wlr_xdg_toplevel_set_size(toplevel, w - ew, h - eh);
+	}
 }
 
 static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
@@ -63,19 +71,19 @@ static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 			ws->zoomed == NULL || tiles[i] == ws->zoomed);
 	}
 	if (ws->zoomed != NULL) {
-		place(ws->zoomed, area.x + g, area.y + g,
+		tile_place(ws->zoomed, area.x + g, area.y + g,
 			area.width - 2 * g, area.height - 2 * g);
 		return;
 	}
 	if (n == 1) {
-		place(tiles[0], area.x + g, area.y + g,
+		tile_place(tiles[0], area.x + g, area.y + g,
 			area.width - 2 * g, area.height - 2 * g);
 		return;
 	}
 	int master_w = (area.width - 3 * g) / 2;
 	int stack_x = area.x + 2 * g + master_w;
 	int stack_w = area.width - 3 * g - master_w;
-	place(tiles[0], area.x + g, area.y + g, master_w, area.height - 2 * g);
+	tile_place(tiles[0], area.x + g, area.y + g, master_w, area.height - 2 * g);
 
 	int k = n - 1;
 	int avail = area.height - (k + 1) * g;
@@ -83,7 +91,7 @@ static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 	for (int i = 0; i < k; i++) {
 		/* The last one takes whatever rounding left over. */
 		int h = i == k - 1 ? area.y + area.height - g - y : avail / k;
-		place(tiles[1 + i], stack_x, y, stack_w, h);
+		tile_place(tiles[1 + i], stack_x, y, stack_w, h);
 		y += h + g;
 	}
 }
@@ -91,7 +99,7 @@ static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 void tile_arrange(struct server *server) {
 	/* At startup the config is read before the cursor and outputs exist;
 	 * the first output's arrival arranges everything. */
-	if (!server->tiling || server->cursor == NULL) {
+	if (server->mode == MODE_WINDOW || server->cursor == NULL) {
 		return;
 	}
 	struct wlr_box area;
@@ -101,7 +109,11 @@ void tile_arrange(struct server *server) {
 	}
 	struct workspace *ws;
 	wl_list_for_each(ws, &server->workspaces, link) {
-		arrange_workspace(ws, area);
+		if (server->mode == MODE_SCROLLING) {
+			scroll_arrange_workspace(ws, area);
+		} else {
+			arrange_workspace(ws, area);
+		}
 	}
 }
 
@@ -126,7 +138,8 @@ void tile_unzoom(struct workspace *ws) {
 /* Super+Z on a tile: fill the screen with it, or put it back. */
 void tile_toggle_zoom(struct view *view) {
 	struct workspace *ws = view->workspace;
-	if (!view_is_tiled(view) || ws == NULL) {
+	if (!view_is_tiled(view) || ws == NULL ||
+			view->server->mode != MODE_TILING) {
 		return;
 	}
 	if (ws->zoomed == view) {
@@ -145,15 +158,18 @@ void tile_toggle_zoom(struct view *view) {
 /* What the fuller gadget and Super+Z do: zoom a tile, or maximize a
  * window in window mode. */
 void view_toggle_maximize_or_zoom(struct view *view) {
-	if (view_is_tiled(view)) {
+	if (view->server->mode == MODE_SCROLLING && view->column != NULL) {
+		scroll_toggle_full(view);
+	} else if (view_is_tiled(view)) {
 		tile_toggle_zoom(view);
 	} else {
 		view_toggle_maximize(view);
 	}
 }
 
-void tile_set_mode(struct server *server, bool tiling) {
-	if (server->tiling == tiling) {
+void tile_set_mode(struct server *server, enum layout_mode mode) {
+	enum layout_mode old = server->mode;
+	if (old == mode) {
 		return;
 	}
 	if (server->grabbed_view != NULL) {
@@ -163,7 +179,8 @@ void tile_set_mode(struct server *server, bool tiling) {
 	view_cycle_end(server);
 
 	struct view *view;
-	if (tiling) {
+	struct workspace *ws;
+	if (old == MODE_WINDOW) {
 		/* Remember where every window was, to put it back later. */
 		wl_list_for_each(view, &server->views, link) {
 			if (view->maximized) {
@@ -175,14 +192,19 @@ void tile_set_mode(struct server *server, bool tiling) {
 					WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
 			}
 		}
-		server->tiling = true;
-		tile_arrange(server);
-	} else {
-		struct workspace *ws;
+	} else if (old == MODE_TILING) {
 		wl_list_for_each(ws, &server->workspaces, link) {
 			tile_unzoom(ws);
 		}
-		server->tiling = false;
+	} else if (old == MODE_SCROLLING) {
+		scroll_clear(server);
+	}
+
+	server->mode = mode;
+	if (mode == MODE_SCROLLING) {
+		scroll_build(server);
+	}
+	if (mode == MODE_WINDOW) {
 		wl_list_for_each(view, &server->views, link) {
 			if (view->xdg_toplevel->parent != NULL) {
 				continue;
@@ -191,16 +213,24 @@ void tile_set_mode(struct server *server, bool tiling) {
 			int ew, eh;
 			view_extents(view, &ew, &eh);
 			wlr_xdg_toplevel_set_tiled(view->xdg_toplevel, WLR_EDGE_NONE);
-			/* Windows opened while tiling have no old place: cascade. */
+			/* Windows opened while arranged have no old place: they
+			 * cascade from the top-left, like newly opened windows. */
 			if (b->width > ew && b->height > eh) {
 				view_move(view, b->x, b->y);
 				wlr_xdg_toplevel_set_size(view->xdg_toplevel,
 					b->width - ew, b->height - eh);
 			} else {
-				view_move(view, view->x + 16, view->y + 16);
+				struct wlr_box area = {0};
+				output_usable_area_at(server, server->cursor->x,
+					server->cursor->y, &area);
+				int step = server->cascade++ % 8;
+				view_move(view, area.x + 32 + step * GEM_GADGET,
+					area.y + 16 + step * GEM_GADGET);
 				wlr_xdg_toplevel_set_size(view->xdg_toplevel, 0, 0);
 			}
 		}
+	} else {
+		tile_arrange(server);
 	}
 	highlight_update(server);
 	cursor_rebase(server);

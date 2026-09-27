@@ -45,7 +45,10 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+Z             | maximize the focused window (toggle)     |
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
 | Alt+Tab             | the same                                 |
-| Super+Arrows        | focus the neighbouring tile; tiling mode |
+| Super+Arrows        | focus the neighbouring tile or column    |
+| Super+Ctrl+Arrows   | scrolling: move the column / the window  |
+| Super+[ / Super+]   | scrolling: consume or expel the window   |
+| Super+R             | scrolling: column width ⅓ → ½ → ⅔        |
 | Super+1..9, Alt+1..9 | switch workspace                        |
 | Alt+Shift+1..9      | move the focused window to a workspace   |
 | Alt+Escape          | quit                                     |
@@ -122,8 +125,9 @@ each line adds or replaces one binding, and `none` removes one.
     seconds = no
 
     [layout]
-    mode = window                        # or tiling: the mode GemWM starts in
-    gap = 8                              # pixels between tiles
+    mode = window                        # tiling or scrolling: the starting mode
+    gap = 8                              # pixels between tiles and columns
+    column-width = 0.5                   # scrolling: new columns' share of the screen
 
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
@@ -141,8 +145,8 @@ which creates a new one.
 
 ## Tiling
 
-Options > Mode switches between **Window** (overlapping GEM windows) and
-**Tiling**, with a check mark on the current one. In tiling mode the first
+Options > Mode switches between **Window** (overlapping GEM windows),
+**Tiling** and **Scrolling** (below), with a check mark on the current one. In tiling mode the first
 window takes the left half and the rest stack down the right, `gap` pixels
 apart; dialogs float on top. Super+Arrows move focus between tiles, and the
 focused tile keeps the pink focus border,
@@ -152,6 +156,23 @@ tile fill the screen; the other tiles stay open but hidden until Super+Z
 again, a new window, or moving focus brings the layout back. Tiles can't be
 dragged or resized; switching back to window mode returns every window to
 where it was.
+
+## Scrolling
+
+The third mode, after niri. Each workspace is a strip of columns that
+scrolls sideways; two half-width columns fill the screen, and the view moves
+just enough to keep the focused column in sight. A new window opens as a
+column to the right of the focused one.
+
+- Super+Left/Right (or Super+mouse wheel) moves between columns,
+  Super+Up/Down between the windows stacked in one.
+- Super+[ and Super+] **consume or expel**: a window alone in its column
+  joins the neighbouring column as a new row; a window sharing a column
+  leaves it for a column of its own. Columns hold rows, nothing deeper.
+- Super+Ctrl+Arrows move the focused column left/right, or the window
+  up/down within its column.
+- Super+R cycles the column between a third, a half and two thirds of the
+  screen; Super+Z makes it full width and back.
 
 ## Scripting: `gemwm msg`
 
@@ -167,8 +188,11 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
     gemwm msg maximize focused        # or an id; toggles, like Super+Z
     gemwm msg close-window focused
     gemwm msg cycle-windows next      # or prev, like Super+Tab
-    gemwm msg mode tiling             # window, tiling, toggle; alone: report
-    gemwm msg focus-direction left    # right, up, down (tiling mode)
+    gemwm msg mode scrolling          # window, tiling, toggle; alone: report
+    gemwm msg focus-direction left    # right, up, down (tiling, scrolling)
+    gemwm msg move-direction right    # scrolling: move column / window
+    gemwm msg consume-or-expel left   # scrolling
+    gemwm msg column-width 0.33       # scrolling: or "cycle"
     gemwm msg exec foot               # run a program
     gemwm msg reload-config           # re-read ~/.config/gemwm/config
     gemwm msg quit
@@ -186,7 +210,10 @@ to send every terminal to workspace 2:
 A WebKit browser whose tabs, buttons and info line are drawn like GemWM's
 windows. It's built when `webkitgtk-6.0` is installed.
 
-    gemweb [URL...]      # a running GemWeb opens these as new tabs
+    gemweb               # opens a new window
+    gemweb URL...        # opens tabs in the last-used window
+
+The tab bar appears once a window has two tabs; Ctrl+T opens the second.
 
 To make it the system default browser, for links opened from other apps:
 `xdg-settings set default-web-browser gemweb.desktop`. Desk > Internet >

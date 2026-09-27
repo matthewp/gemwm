@@ -111,7 +111,8 @@ static const char default_config[] =
 	"\n"
 	"[Options > Mode]\n"
 	"Window = gemwm msg mode window\n"
-	"Tiling = gemwm msg mode tiling\n";
+	"Tiling = gemwm msg mode tiling\n"
+	"Scrolling = gemwm msg mode scrolling\n";
 
 struct menu;
 

@@ -18,8 +18,15 @@
  *                                 window maximizes (the fuller gadget)
  *   close-window <id>|focused
  *   cycle-windows next|prev       focus the next/previous window (window mode)
- *   mode [window|tiling|toggle]   report or change the window mode
- *   focus-direction left|right|up|down  focus the neighbouring tile (tiling)
+ *   mode [window|tiling|scrolling|toggle]  report or change the window
+ *                                 mode (toggle steps through the three)
+ *   focus-direction left|right|up|down  focus the neighbouring window
+ *                                 (tiling and scrolling)
+ *   move-direction left|right|up|down   scrolling: move the column (left,
+ *                                 right) or the window in its column
+ *   consume-or-expel left|right   scrolling: join the neighbouring column,
+ *                                 or leave a shared one
+ *   column-width cycle|<fraction> scrolling: the focused column's width
  *   exec <shell command>          run a program
  *   reload-config                 re-read ~/.config/gemwm/config
  *   quit                          end the session
@@ -173,8 +180,9 @@ static void json_mode(struct server *server, struct strbuf *sb,
 	if (event != NULL) {
 		sb_printf(sb, "\"event\":\"%s\",", event);
 	}
+	static const char *names[] = { "window", "tiling", "scrolling" };
 	sb_printf(sb, "\"mode\":\"%s\",\"gap\":%d}",
-		server->tiling ? "tiling" : "window", server->gap);
+		names[server->mode], server->gap);
 }
 
 /* ---- Connections -------------------------------------------------------- */
@@ -408,14 +416,16 @@ static char *execute(struct server *server, struct ipc_client *client,
 			json_mode(server, &sb, NULL);
 			return sb.data;
 		}
-		if (strcmp(argv[1], "tiling") == 0) {
-			tile_set_mode(server, true);
-		} else if (strcmp(argv[1], "window") == 0) {
-			tile_set_mode(server, false);
+		if (strcmp(argv[1], "window") == 0) {
+			tile_set_mode(server, MODE_WINDOW);
+		} else if (strcmp(argv[1], "tiling") == 0) {
+			tile_set_mode(server, MODE_TILING);
+		} else if (strcmp(argv[1], "scrolling") == 0) {
+			tile_set_mode(server, MODE_SCROLLING);
 		} else if (strcmp(argv[1], "toggle") == 0) {
-			tile_set_mode(server, !server->tiling);
+			tile_set_mode(server, (server->mode + 1) % 3);
 		} else {
-			return reply_error("modes are window and tiling");
+			return reply_error("modes are window, tiling and scrolling");
 		}
 		return strdup(ok);
 	}
@@ -425,9 +435,36 @@ static char *execute(struct server *server, struct ipc_client *client,
 				strcmp(argv[1], "down") != 0)) {
 			return reply_error("directions are left, right, up and down");
 		}
-		/* Tiling mode only; in window mode the keys do nothing. */
-		if (server->tiling) {
+		/* In window mode the keys do nothing. */
+		if (server->mode == MODE_TILING) {
 			tile_focus_direction(server, argv[1]);
+		} else if (server->mode == MODE_SCROLLING) {
+			scroll_focus_direction(server, argv[1]);
+		}
+		return strdup(ok);
+	}
+	if (strcmp(cmd, "move-direction") == 0 ||
+			strcmp(cmd, "consume-or-expel") == 0) {
+		bool consume = cmd[0] == 'c';
+		if (argv[1] == NULL || (strcmp(argv[1], "left") != 0 &&
+				strcmp(argv[1], "right") != 0 && (consume ||
+				(strcmp(argv[1], "up") != 0 && strcmp(argv[1], "down") != 0)))) {
+			return reply_error(consume ? "directions are left and right" :
+				"directions are left, right, up and down");
+		}
+		if (server->mode == MODE_SCROLLING) {
+			if (consume) {
+				scroll_consume_or_expel(server, argv[1]);
+			} else {
+				scroll_move(server, argv[1]);
+			}
+		}
+		return strdup(ok);
+	}
+	if (strcmp(cmd, "column-width") == 0) {
+		if (server->mode == MODE_SCROLLING &&
+				!scroll_column_width(server, argv[1])) {
+			return reply_error("widths are cycle or a fraction like 0.5");
 		}
 		return strdup(ok);
 	}
@@ -586,7 +623,9 @@ int ipc_client_main(int argc, char *argv[]) {
 			"commands: workspaces, windows, workspace <n|new|next|prev>,\n"
 			"  move-window <id|focused> <n|new>, focus-window <id>,\n"
 			"  close-window <id|focused>, cycle-windows <next|prev>,\n"
-			"  mode [window|tiling|toggle], focus-direction <left|right|up|down>,\n"
+			"  mode [window|tiling|scrolling|toggle],\n"
+			"  focus-direction|move-direction <left|right|up|down>,\n"
+			"  consume-or-expel <left|right>, column-width <cycle|fraction>,\n"
 			"  maximize [id|focused],\n"
 			"  exec <command>, reload-config, quit, subscribe\n");
 		return 2;

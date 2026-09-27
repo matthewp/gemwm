@@ -351,6 +351,16 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 static void server_cursor_axis(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, cursor_axis);
 	struct wlr_pointer_axis_event *event = data;
+	/* Super+wheel scrolls the strip a column at a time, as in niri. */
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+	if (server->mode == MODE_SCROLLING && kb != NULL &&
+			(wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO) &&
+			event->source == WL_POINTER_AXIS_SOURCE_WHEEL &&
+			event->delta_discrete != 0) {
+		scroll_focus_direction(server, event->delta_discrete > 0 ?
+			"right" : "left");
+		return;
+	}
 	wlr_seat_pointer_notify_axis(server->seat, event->time_msec,
 		event->orientation, event->delta, event->delta_discrete,
 		event->source, event->relative_direction);
