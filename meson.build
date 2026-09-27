@@ -4,7 +4,7 @@ project(
 	version: '0.1.0',
 	license: 'BSD-3-Clause',
 	license_files: 'LICENSE',
-	meson_version: '>=1.0.0',
+	meson_version: '>=1.1.0',
 	default_options: ['c_std=c11', 'warning_level=2', 'werror=false'],
 )
 
