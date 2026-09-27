@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=GemWM
+Comment=An Atari TOS/GEM-style Wayland desktop
+Exec=@bindir@/gemwm-session
+Type=Application
+DesktopNames=GemWM

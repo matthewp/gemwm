@@ -1,0 +1,20 @@
+#!/bin/sh
+# Starts GemWM as a login session (see gemwm.desktop).
+#
+# Settings such as GEMWM_DESKTOP, GEMWM_FONT or XKB_DEFAULT_LAYOUT can go
+# in ~/.config/gemwm/env, which is sourced as a shell script.
+
+export XDG_CURRENT_DESKTOP=GemWM
+export XDG_SESSION_DESKTOP=gemwm
+export XDG_SESSION_TYPE=wayland
+
+config="${XDG_CONFIG_HOME:-$HOME/.config}/gemwm"
+[ -f "$config/env" ] && . "$config/env"
+
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
+mkdir -p "$log_dir"
+[ -f "$log_dir/gemwm.log" ] && mv "$log_dir/gemwm.log" "$log_dir/gemwm.log.old"
+
+# Tell D-Bus and systemd services (portals, notifications) where we are.
+exec gemwm -s "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP" \
+	> "$log_dir/gemwm.log" 2>&1

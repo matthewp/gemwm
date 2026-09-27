@@ -1,0 +1,3 @@
+option('wayland_sessions_dir', type: 'string',
+	value: '/usr/share/wayland-sessions',
+	description: 'Where to install gemwm.desktop, so display managers list it')

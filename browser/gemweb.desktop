@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=GemWeb
+Comment=A web browser that looks like GEM
+Exec=gemweb %U
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupWMClass=org.gemwm.GemWeb
