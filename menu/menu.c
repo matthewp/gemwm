@@ -910,18 +910,19 @@ static void app_read(struct menu_app *a) {
 			return;
 		}
 		a->len += n;
-		/* Only the latest whole line matters. */
-		char *last = NULL, *nl;
-		a->in[a->len] = '\0';
-		for (char *p = a->in; (nl = strchr(p, '\n')) != NULL; p = nl + 1) {
-			*nl = '\0';
-			last = p;
-		}
-		if (last != NULL) {
-			app_set(a, last);
-			size_t used = (size_t)(last + strlen(last) + 1 - a->in);
-			memmove(a->in, a->in + used, a->len - used);
+		/* Only the latest whole line matters: the one ending at the last
+		 * newline. It's copied out first, as app_set cuts it up. */
+		char *end = memrchr(a->in, '\n', a->len);
+		if (end != NULL) {
+			char *start = memrchr(a->in, '\n', (size_t)(end - a->in));
+			start = start != NULL ? start + 1 : a->in;
+			char line[sizeof(a->in)];
+			memcpy(line, start, (size_t)(end - start));
+			line[end - start] = '\0';
+			size_t used = (size_t)(end + 1 - a->in);
+			memmove(a->in, end + 1, a->len - used);
 			a->len -= used;
+			app_set(a, line);
 			draw_bar();
 		} else if (a->len == sizeof(a->in) - 1) {
 			a->len = 0; /* an absurdly long line: drop it */
