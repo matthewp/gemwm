@@ -97,6 +97,25 @@ configure_file(
 	install_dir: get_option('wayland_sessions_dir'),
 )
 
+# The terminal: foot in an Atari ST theme, with the ST's own font. The font
+# (extras/fonts) is GPL, from EmuTOS; it is data installed next to GemWM,
+# not part of it, and keeps its own license.
+configure_file(
+	input: 'session/gemwm-terminal.in',
+	output: 'gemwm-terminal',
+	configuration: {'datadir': get_option('prefix') / get_option('datadir')},
+	install_dir: get_option('bindir'),
+	install_mode: 'rwxr-xr-x',
+)
+install_data('extras/foot/foot.ini',
+	install_dir: get_option('datadir') / 'gemwm')
+fontdir = get_option('datadir') / 'fonts' / 'gemwm'
+install_data('extras/fonts/AtariST8x16.ttf', 'extras/fonts/COPYING',
+	'extras/fonts/README.md', install_dir: fontdir)
+# Let fontconfig see the font right away (not when packaging into DESTDIR).
+meson.add_install_script('sh', '-c',
+	'test -n "$DESTDIR" || fc-cache -f "$MESON_INSTALL_PREFIX/@0@" 2>/dev/null || true'.format(fontdir))
+
 # GemWeb, the browser. Optional: needs webkitgtk-6.0.
 webkit = dependency('webkitgtk-6.0', required: false)
 if webkit.found()

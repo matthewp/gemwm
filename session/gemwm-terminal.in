@@ -1,0 +1,41 @@
+#!/bin/sh
+# gemwm-terminal: GemWM's terminal, foot dressed as an Atari ST terminal.
+#
+#   gemwm-terminal [foot arguments...]   open a terminal
+#   gemwm-terminal theme light|dark      switch every open terminal, and
+#                                        remember it for new ones
+
+theme_file="${XDG_CONFIG_HOME:-$HOME/.config}/gemwm/terminal-theme"
+
+if [ "$1" = theme ]; then
+	case "$2" in
+	light) signal=USR2 ;;
+	dark) signal=USR1 ;;
+	*) echo "usage: gemwm-terminal theme light|dark" >&2; exit 2 ;;
+	esac
+	mkdir -p "$(dirname "$theme_file")"
+	echo "$2" > "$theme_file"
+	pkill -"$signal" -x foot   # foot switches theme on these signals
+	exit 0
+fi
+
+if ! command -v foot >/dev/null; then
+	echo "gemwm-terminal: needs foot (https://codeberg.org/dnkl/foot)" >&2
+	exit 1
+fi
+
+theme=$(cat "$theme_file" 2>/dev/null)
+case "$theme" in light|dark) ;; *) theme=light ;; esac
+
+# The ST theme goes on top of the user's own foot.ini, if there is one
+# (foot won't include a file that doesn't exist, so this is decided here).
+# Written to a temporary name and renamed, so a terminal starting at the
+# same moment never reads half a file.
+user="${XDG_CONFIG_HOME:-$HOME/.config}/foot/foot.ini"
+config="${XDG_RUNTIME_DIR:-/tmp}/gemwm-foot.ini"
+{
+	[ -f "$user" ] && echo "include=$user"
+	echo "include=@datadir@/gemwm/foot.ini"
+} > "$config.$$" && mv -f "$config.$$" "$config"
+
+exec foot -c "$config" -o main.initial-color-theme="$theme" "$@"

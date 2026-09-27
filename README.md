@@ -4,7 +4,7 @@ A Wayland compositor (wlroots 0.19, C) that looks like Atari TOS/GEM:
 the green colour-ST desktop, a GEM menu bar, and black and white GEM
 window frames.
 
-GemWM is three programs:
+GemWM is three programs (plus a terminal theme, below):
 
 - `gemwm`: the compositor. Draws the desktop and window frames.
 - `gemwm-menu`: the menu bar, a wlr-layer-shell client. `gemwm` starts
@@ -39,7 +39,7 @@ stay crisp); `-S 2` forces pixel doubling.
 
 | Keys                | Action                                   |
 |---------------------|------------------------------------------|
-| Super+T, Alt+Return | open a terminal (`$TERMINAL`, or foot)   |
+| Super+T, Alt+Return | open a terminal (`$TERMINAL`, or the GEM one) |
 | Super+B             | open the default browser                 |
 | Super+Q             | close the focused window                 |
 | Super+Z             | maximize the focused window (toggle)     |
@@ -205,6 +205,22 @@ to send every terminal to workspace 2:
     gemwm msg windows | jq '.windows[] | select(.app_id=="foot") | .id' |
         xargs -I{} gemwm msg move-window {} 2
 
+## Terminal
+
+Super+T, Alt+Return and Desk > Tools > Terminal open `gemwm-terminal`:
+[foot](https://codeberg.org/dnkl/foot) dressed as an Atari ST terminal, in
+the ST's own 8x16 system font with the ST palette. There are two themes,
+light (the mono monitor's black on white) and dark (reverse video):
+Options > Terminal Theme switches every open terminal and remembers the
+choice, and Ctrl+Shift+D flips a single window.
+
+    gemwm-terminal                  # open one
+    gemwm-terminal theme dark       # or light; what the menu does
+
+It layers the theme over your own `~/.config/foot/foot.ini`, so your key
+bindings and other settings still apply. To use another terminal instead,
+set `TERMINAL` in `~/.config/gemwm/env`.
+
 ## GemWeb
 
 A WebKit browser whose tabs, buttons and info line are drawn like GemWM's
@@ -244,6 +260,11 @@ with `$GEMWEB_SEARCH` (`%s` marks the query). Downloads go to
 
 ## License
 
-BSD 3-Clause, see [LICENSE](LICENSE). The vendored
-`protocols/wlr-layer-shell-unstable-v1.xml` keeps its own license (in the
-file).
+BSD 3-Clause, see [LICENSE](LICENSE), except for two pieces that keep
+their own licenses:
+
+- `protocols/wlr-layer-shell-unstable-v1.xml`, vendored from wlroots
+  (license in the file)
+- `extras/fonts/`, the Atari ST font, built from EmuTOS and so under the
+  GPL, version 2 or later (see `extras/fonts/README.md`). It is installed
+  as a font file for the terminal and is not part of the GemWM programs.

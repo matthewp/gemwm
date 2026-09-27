@@ -75,7 +75,7 @@ static const char default_config[] =
 	" else exec gtk-launch \"$(xdg-settings get default-web-browser)\"; fi\n"
 	"\n"
 	"[Desk > Tools]\n"
-	"Terminal = ${TERMINAL:-foot}\n"
+	"Terminal = ${TERMINAL:-gemwm-terminal}\n"
 	"\n"
 	"[File]\n"
 	"Open\n"
@@ -102,6 +102,7 @@ static const char default_config[] =
 	"\n"
 	"[Options]\n"
 	"Mode >\n"
+	"Terminal Theme >\n"
 	"-\n"
 	"Install Disk Drive...\n"
 	"Install Application...\n"
@@ -112,7 +113,11 @@ static const char default_config[] =
 	"[Options > Mode]\n"
 	"Window = gemwm msg mode window\n"
 	"Tiling = gemwm msg mode tiling\n"
-	"Scrolling = gemwm msg mode scrolling\n";
+	"Scrolling = gemwm msg mode scrolling\n"
+	"\n"
+	"[Options > Terminal Theme]\n"
+	"Light = gemwm-terminal theme light\n"
+	"Dark = gemwm-terminal theme dark\n";
 
 struct menu;
 
