@@ -47,10 +47,16 @@ struct browser {
 	char *download_status; /* last download message */
 	bool entry_edited;     /* the user typed in the address field */
 	bool entry_setting;    /* we are changing it, not the user */
+};
+
+/* Shared by every window: cookies and logins, the GEM scroll-bar style,
+ * and settings. */
+static struct {
+	GtkApplication *app;
 	WebKitNetworkSession *session;
 	WebKitUserContentManager *content;
 	WebKitSettings *settings;
-};
+} shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	const char *uri, bool select);
@@ -458,13 +464,20 @@ static void sync_entry(struct browser *b) {
 	set_entry(b, uri != NULL && strcmp(uri, "about:blank") != 0 ? uri : "");
 }
 
+/* The tab bar only appears once there are two tabs (Ctrl+T makes the
+ * second); a single page gets the whole window. */
+static void sync_tabbar(struct browser *b) {
+	gtk_widget_set_visible(b->tabbar, b->tabs->len >= 2);
+	gtk_widget_queue_draw(b->tabbar);
+}
+
 static void sync_all(struct browser *b) {
 	struct tab *t = active_tab(b);
 	if (t != NULL) {
 		gtk_window_set_title(GTK_WINDOW(b->window), tab_title(t));
 	}
 	sync_entry(b);
-	gtk_widget_queue_draw(b->tabbar);
+	sync_tabbar(b);
 	gtk_widget_queue_draw(b->buttons);
 	gtk_widget_queue_draw(b->info);
 }
@@ -545,8 +558,31 @@ static gboolean on_decide_policy(WebKitWebView *view,
 
 /* ---- Downloads ---------------------------------------------------------- */
 
+/* The window a download reports to: the one whose page started it, or
+ * else the active one; NULL once there are none. */
+static struct browser *download_browser(WebKitDownload *download) {
+	WebKitWebView *view = webkit_download_get_web_view(download);
+	struct tab *t = view ? g_object_get_data(G_OBJECT(view), "tab") : NULL;
+	if (t != NULL) {
+		return t->browser;
+	}
+	GtkWindow *window = gtk_application_get_active_window(shared.app);
+	return window ? g_object_get_data(G_OBJECT(window), "browser") : NULL;
+}
+
+/* Shows a download message (which it frees) in the right info line. */
+static void download_status(WebKitDownload *download, char *message) {
+	struct browser *b = download_browser(download);
+	if (b == NULL) {
+		g_free(message);
+		return;
+	}
+	set_status(&b->download_status, message);
+	gtk_widget_queue_draw(b->info);
+}
+
 static gboolean on_decide_destination(WebKitDownload *download,
-		const char *suggested, struct browser *b) {
+		const char *suggested, gpointer data) {
 	const char *dir = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
 	char *fallback = NULL;
 	if (dir == NULL) {
@@ -566,9 +602,8 @@ static gboolean on_decide_destination(WebKitDownload *download,
 		g_free(name);
 	}
 	webkit_download_set_destination(download, path);
-	set_status(&b->download_status,
+	download_status(download,
 		g_strdup_printf("Downloading %s...", strrchr(path, '/') + 1));
-	gtk_widget_queue_draw(b->info);
 	g_free(path);
 	g_free(base);
 	g_free(fallback);
@@ -576,37 +611,34 @@ static gboolean on_decide_destination(WebKitDownload *download,
 }
 
 static void on_download_progress(WebKitDownload *download, GParamSpec *pspec,
-		struct browser *b) {
+		gpointer data) {
 	const char *dest = webkit_download_get_destination(download);
-	set_status(&b->download_status, g_strdup_printf("Downloading %s... %d%%",
+	download_status(download, g_strdup_printf("Downloading %s... %d%%",
 		dest ? strrchr(dest, '/') + 1 : "",
 		(int)(webkit_download_get_estimated_progress(download) * 100)));
-	gtk_widget_queue_draw(b->info);
 }
 
-static void on_download_finished(WebKitDownload *download, struct browser *b) {
+static void on_download_finished(WebKitDownload *download, gpointer data) {
 	const char *dest = webkit_download_get_destination(download);
 	if (dest != NULL) {
-		set_status(&b->download_status, g_strdup_printf("Saved %s", dest));
-		gtk_widget_queue_draw(b->info);
+		download_status(download, g_strdup_printf("Saved %s", dest));
 	}
 }
 
 static void on_download_failed(WebKitDownload *download, GError *error,
-		struct browser *b) {
-	set_status(&b->download_status,
+		gpointer data) {
+	download_status(download,
 		g_strdup_printf("Download failed: %s", error->message));
-	gtk_widget_queue_draw(b->info);
 }
 
 static void on_download_started(WebKitNetworkSession *session,
-		WebKitDownload *download, struct browser *b) {
+		WebKitDownload *download, gpointer data) {
 	g_signal_connect(download, "decide-destination",
-		G_CALLBACK(on_decide_destination), b);
+		G_CALLBACK(on_decide_destination), NULL);
 	g_signal_connect(download, "notify::estimated-progress",
-		G_CALLBACK(on_download_progress), b);
-	g_signal_connect(download, "finished", G_CALLBACK(on_download_finished), b);
-	g_signal_connect(download, "failed", G_CALLBACK(on_download_failed), b);
+		G_CALLBACK(on_download_progress), NULL);
+	g_signal_connect(download, "finished", G_CALLBACK(on_download_finished), NULL);
+	g_signal_connect(download, "failed", G_CALLBACK(on_download_failed), NULL);
 }
 
 /* ---- Tabs --------------------------------------------------------------- */
@@ -700,14 +732,15 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	if (related != NULL) {
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
 			"related-view", related,
-			"user-content-manager", b->content, NULL);
+			"user-content-manager", shared.content, NULL);
 	} else {
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
-			"network-session", b->session,
-			"user-content-manager", b->content,
-			"settings", b->settings, NULL);
+			"network-session", shared.session,
+			"user-content-manager", shared.content,
+			"settings", shared.settings, NULL);
 	}
 	gtk_widget_set_vexpand(GTK_WIDGET(t->view), TRUE);
+	g_object_set_data(G_OBJECT(t->view), "tab", t);
 	g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), t);
 	g_signal_connect(t->view, "notify::uri", G_CALLBACK(on_uri), t);
 	g_signal_connect(t->view, "notify::estimated-load-progress",
@@ -726,6 +759,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	if ((int)at <= b->active) {
 		b->active++;
 	}
+	sync_tabbar(b);
 	if (related == NULL) {
 		load_input(t, input);
 	}
@@ -747,6 +781,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 static void tab_close(struct browser *b, int index) {
 	struct tab *t = g_ptr_array_index(b->tabs, index);
 	g_ptr_array_remove_index(b->tabs, index);
+	g_object_set_data(G_OBJECT(t->view), "tab", NULL);
 	gtk_stack_remove(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	g_free(t);
 	if (b->tabs->len == 0) {
@@ -795,10 +830,8 @@ enum action {
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME,
 };
 
-static struct browser *the_browser;
-
 static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
-	struct browser *b = the_browser;
+	struct browser *b = g_object_get_data(G_OBJECT(widget), "browser");
 	struct tab *t = active_tab(b);
 	int n = b->tabs->len;
 	switch (GPOINTER_TO_INT(data)) {
@@ -923,11 +956,33 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	g_ptr_array_free(b->tabs, TRUE);
 	g_free(b->hover_link);
 	g_free(b->download_status);
-	g_object_unref(b->settings);
-	g_object_unref(b->content);
-	g_object_unref(b->session);
 	g_free(b);
-	the_browser = NULL;
+}
+
+static void shared_init(GtkApplication *app) {
+	shared.app = app;
+	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
+	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
+	shared.session = webkit_network_session_new(data, cache);
+	char *cookies = g_build_filename(data, "cookies.sqlite", NULL);
+	webkit_cookie_manager_set_persistent_storage(
+		webkit_network_session_get_cookie_manager(shared.session),
+		cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+	g_signal_connect(shared.session, "download-started",
+		G_CALLBACK(on_download_started), NULL);
+	g_free(cookies);
+	g_free(data);
+	g_free(cache);
+
+	shared.content = webkit_user_content_manager_new();
+	WebKitUserStyleSheet *sheet = webkit_user_style_sheet_new(page_css,
+		WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER,
+		NULL, NULL);
+	webkit_user_content_manager_add_style_sheet(shared.content, sheet);
+	webkit_user_style_sheet_unref(sheet);
+
+	shared.settings = webkit_settings_new();
+	webkit_settings_set_enable_developer_extras(shared.settings, TRUE);
 }
 
 static struct browser *browser_new(GtkApplication *app) {
@@ -935,34 +990,12 @@ static struct browser *browser_new(GtkApplication *app) {
 	b->tabs = g_ptr_array_new_with_free_func(NULL);
 	b->active = -1;
 
-	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
-	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
-	b->session = webkit_network_session_new(data, cache);
-	char *cookies = g_build_filename(data, "cookies.sqlite", NULL);
-	webkit_cookie_manager_set_persistent_storage(
-		webkit_network_session_get_cookie_manager(b->session),
-		cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
-	g_signal_connect(b->session, "download-started",
-		G_CALLBACK(on_download_started), b);
-	g_free(cookies);
-	g_free(data);
-	g_free(cache);
-
-	b->content = webkit_user_content_manager_new();
-	WebKitUserStyleSheet *sheet = webkit_user_style_sheet_new(page_css,
-		WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER,
-		NULL, NULL);
-	webkit_user_content_manager_add_style_sheet(b->content, sheet);
-	webkit_user_style_sheet_unref(sheet);
-
-	b->settings = webkit_settings_new();
-	webkit_settings_set_enable_developer_extras(b->settings, TRUE);
-
 	b->window = gtk_application_window_new(app);
 	/* GemWM draws the title bar and frame. */
 	gtk_window_set_decorated(GTK_WINDOW(b->window), FALSE);
 	gtk_window_set_default_size(GTK_WINDOW(b->window), 1000, 700);
 	gtk_widget_add_css_class(b->window, "gemweb");
+	g_object_set_data(G_OBJECT(b->window), "browser", b);
 	g_signal_connect(b->window, "destroy", G_CALLBACK(window_destroyed), b);
 
 	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -1002,17 +1035,28 @@ static struct browser *browser_new(GtkApplication *app) {
 static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 	int argc;
 	char **argv = g_application_command_line_get_arguments(cmdline, &argc);
-	if (the_browser == NULL) {
+	if (shared.app == NULL) {
 		load_css();
-		the_browser = browser_new(GTK_APPLICATION(app));
+		shared_init(GTK_APPLICATION(app));
+	}
+	/* Starting GemWeb opens a new window (tabs are made inside it). Links
+	 * handed over by other programs open as tabs in the last-used window,
+	 * as other browsers do. */
+	struct browser *b = NULL;
+	if (argc >= 2) {
+		GtkWindow *window = gtk_application_get_active_window(shared.app);
+		b = window ? g_object_get_data(G_OBJECT(window), "browser") : NULL;
+	}
+	if (b == NULL) {
+		b = browser_new(shared.app);
 	}
 	if (argc < 2) {
-		tab_new(the_browser, NULL, NULL, true);
+		tab_new(b, NULL, NULL, true);
 	}
 	for (int i = 1; i < argc; i++) {
-		tab_new(the_browser, NULL, argv[i], i == argc - 1);
+		tab_new(b, NULL, argv[i], i == argc - 1);
 	}
-	gtk_window_present(GTK_WINDOW(the_browser->window));
+	gtk_window_present(GTK_WINDOW(b->window));
 	g_strfreev(argv);
 	return 0;
 }
