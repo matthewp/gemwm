@@ -152,7 +152,7 @@ endif
 # The menu apps at the right of the bar (see menu/menu.c).
 foreach app : ['gemwm-clock', 'gemwm-battery']
 	executable(app, ['menu-apps' / app + '.c', 'menu-apps/menu-app.c'],
-		install: true)
+		dependencies: libm, install: true)
 endforeach
 
 # gemwm-bluetooth: the Bluetooth menu app and window. Optional: needs GTK 4.
@@ -162,7 +162,8 @@ if gtk4.found()
 	icondir = get_option('datadir') / 'gemwm' / 'icons'
 	executable(
 		'gemwm-bluetooth',
-		['bluetooth/gemwm-bluetooth.c', 'lib/app-menu.c', client_protocols],
+		['bluetooth/gemwm-bluetooth.c', 'lib/app-menu.c', 'lib/gem-draw.c',
+			client_protocols],
 		dependencies: [gtk4, dependency('gtk4-wayland'), dependency('gio-unix-2.0'),
 			wayland_client, cairo],
 		c_args: ['-DICON_DIR="@0@"'.format(get_option('prefix') / icondir)],
@@ -171,4 +172,20 @@ if gtk4.found()
 	)
 	install_data('bluetooth/icons/bluetooth.png', 'bluetooth/icons/bluetooth-off.png',
 		install_dir: icondir)
+
+	# gemwm-volume: the volume menu app, window and keys. Also needs
+	# libpulse (PulseAudio, or PipeWire's PulseAudio server).
+	pulse = dependency('libpulse-mainloop-glib', required: false)
+	if pulse.found()
+		executable(
+			'gemwm-volume',
+			['volume/gemwm-volume.c', 'lib/app-menu.c', 'lib/gem-draw.c',
+				client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gio-unix-2.0'), pulse, dependency('libpulse'),
+				wayland_client, cairo],
+			include_directories: 'lib',
+			install: true,
+		)
+	endif
 endif

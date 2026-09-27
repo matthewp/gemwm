@@ -24,9 +24,9 @@
 #include <stdio.h>
 #include <string.h>
 #include "app-menu.h"
+#include "gem-draw.h"
 #include "gemwm-scroll-v1-client-protocol.h"
 
-#define FONT_SIZE 14
 #define PAD 8          /* margin, and space inside buttons */
 #define BAR_H 30       /* the top row (power) and the bottom row (scan) */
 #define ROW_H 24       /* one device */
@@ -34,7 +34,6 @@
 #define SCAN_SECONDS 30
 #define AGENT_PATH "/org/gemwm/bluetooth/agent"
 
-static const char *font_family;
 static GDBusObjectManager *bluez; /* org.bluez's objects, kept up to date */
 
 /* ---- BlueZ -------------------------------------------------------------- */
@@ -227,24 +226,31 @@ static void status_print(void) {
 	if (a == NULL) {
 		line = g_strdup(""); /* no Bluetooth here: no item */
 	} else if (!prop_bool(a, "Powered")) {
-		line = g_strdup(ICON_DIR "/bluetooth-off.png\t");
+		line = g_strdup(ICON_DIR "/bluetooth-off.png\t\t\tBluetooth off");
 	} else {
 		GPtrArray *list = devices(g_dbus_proxy_get_object_path(a));
 		int n = 0;
 		const char *name = NULL;
+		GString *names = g_string_new(NULL); /* for the tooltip */
 		for (guint i = 0; i < list->len; i++) {
 			struct device *d = g_ptr_array_index(list, i);
 			if (d->connected) {
 				n++;
 				name = d->name;
+				g_string_append_printf(names, "%s%s", n > 1 ? ", " : "", d->name);
 			}
 		}
 		if (n > 1) {
-			line = g_strdup_printf(ICON_DIR "/bluetooth.png\t%d devices", n);
+			line = g_strdup_printf(ICON_DIR "/bluetooth.png\t%d devices\t\t"
+				"Connected to %s", n, names->str);
+		} else if (n == 1) {
+			line = g_strdup_printf(ICON_DIR "/bluetooth.png\t%s\t\t"
+				"Connected to %s", name, name);
 		} else {
-			line = g_strdup_printf(ICON_DIR "/bluetooth.png\t%s",
-				n == 1 ? name : "");
+			line = g_strdup(ICON_DIR "/bluetooth.png\t\t\t"
+				"Bluetooth on, nothing connected");
 		}
+		g_string_free(names, TRUE);
 		g_ptr_array_unref(list);
 	}
 	g_clear_object(&a);
@@ -684,61 +690,6 @@ static void act(enum action action, const char *path) {
 
 /* ---- The window: drawing ------------------------------------------------ */
 
-static void black(cairo_t *cr) { cairo_set_source_rgb(cr, 0, 0, 0); }
-static void white(cairo_t *cr) { cairo_set_source_rgb(cr, 1, 1, 1); }
-
-static void fill(cairo_t *cr, double x, double y, double w, double h) {
-	if (w > 0 && h > 0) {
-		cairo_rectangle(cr, x, y, w, h);
-		cairo_fill(cr);
-	}
-}
-
-static void frame(cairo_t *cr, int x, int y, int w, int h, int t) {
-	fill(cr, x, y, w, t);
-	fill(cr, x, y + h - t, w, t);
-	fill(cr, x, y, t, h);
-	fill(cr, x + w - t, y, t, h);
-}
-
-static double text_width(cairo_t *cr, const char *s) {
-	cairo_text_extents_t te;
-	cairo_text_extents(cr, s, &te);
-	return te.x_advance;
-}
-
-/* Text vertically centred in a row starting at y. */
-static void text(cairo_t *cr, const char *s, double x, double y, double row_h) {
-	cairo_font_extents_t fe;
-	cairo_font_extents(cr, &fe);
-	cairo_move_to(cr, x,
-		y + (int)((row_h - (fe.ascent + fe.descent)) / 2 + fe.ascent));
-	cairo_show_text(cr, s);
-}
-
-/* GEM's disabled look: every other pixel knocked out. */
-static void grey_out(cairo_t *cr, int x, int y, int w, int h) {
-	static cairo_pattern_t *checker;
-	if (checker == NULL) {
-		cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_A8, 2, 2);
-		unsigned char *px = cairo_image_surface_get_data(s);
-		int stride = cairo_image_surface_get_stride(s);
-		px[0] = 255;
-		px[stride + 1] = 255;
-		cairo_surface_mark_dirty(s);
-		checker = cairo_pattern_create_for_surface(s);
-		cairo_surface_destroy(s);
-		cairo_pattern_set_extend(checker, CAIRO_EXTEND_REPEAT);
-		cairo_pattern_set_filter(checker, CAIRO_FILTER_NEAREST);
-	}
-	cairo_save(cr);
-	cairo_rectangle(cr, x, y, w, h);
-	cairo_clip(cr);
-	white(cr);
-	cairo_mask(cr, checker);
-	cairo_restore(cr);
-}
-
 static void add_hit(int x, int y, int w, int h, enum action action,
 		const char *path) {
 	struct hit hit = { x, y, w, h, action, g_strdup(path) };
@@ -746,7 +697,7 @@ static void add_hit(int x, int y, int w, int h, enum action action,
 }
 
 static int button_width(cairo_t *cr, const char *label) {
-	return (int)text_width(cr, label) + 2 * PAD;
+	return (int)gem_text_width(cr, label) + 2 * PAD;
 }
 
 /* A GEM button: outlined, thicker when it's the default, inverted while
@@ -755,24 +706,24 @@ static void button(cairo_t *cr, int x, int y, int w, const char *label,
 		enum action action, const char *path, bool is_default, bool enabled) {
 	bool pressed = enabled && ui.pressed == action &&
 		g_strcmp0(ui.pressed_path, path) == 0;
-	black(cr);
+	gem_black(cr);
 	if (pressed) {
-		fill(cr, x, y, w, BUTTON_H);
-		white(cr);
+		gem_fill(cr, x, y, w, BUTTON_H);
+		gem_white(cr);
 	} else {
-		frame(cr, x, y, w, BUTTON_H, is_default ? 2 : 1);
+		gem_frame(cr, x, y, w, BUTTON_H, is_default ? 2 : 1);
 	}
-	text(cr, label, x + (w - text_width(cr, label)) / 2, y, BUTTON_H);
+	gem_text(cr, label, x + (w - gem_text_width(cr, label)) / 2, y, BUTTON_H);
 	if (enabled) {
 		add_hit(x, y, w, BUTTON_H, action, path);
 	} else {
-		grey_out(cr, x, y, w, BUTTON_H);
+		gem_grey_out(cr, x, y, w, BUTTON_H);
 	}
 }
 
 /* GEM's menu check mark, for connected devices. */
 static void check_mark(cairo_t *cr, int x, int y) {
-	static const char *rows[] = {
+	static const char *const rows[] = {
 		".......#",
 		"......##",
 		"#....##.",
@@ -780,22 +731,16 @@ static void check_mark(cairo_t *cr, int x, int y) {
 		".####...",
 		"..##....",
 	};
-	black(cr);
-	for (int r = 0; r < 6; r++) {
-		for (int c = 0; c < 8; c++) {
-			if (rows[r][c] == '#') {
-				fill(cr, x + c, y + r, 1, 1);
-			}
-		}
-	}
+	gem_black(cr);
+	gem_bitmap(cr, rows, 6, x, y);
 }
 
 /* A section heading in the list, underlined with a dotted rule. */
 static void heading(cairo_t *cr, const char *label, int y, int w) {
-	black(cr);
-	text(cr, label, PAD, y, ROW_H);
+	gem_black(cr);
+	gem_text(cr, label, PAD, y, ROW_H);
 	for (int x = PAD; x < w - PAD; x += 2) {
-		fill(cr, x, y + ROW_H - 3, 1, 1);
+		gem_fill(cr, x, y + ROW_H - 3, 1, 1);
 	}
 }
 
@@ -824,15 +769,15 @@ static void device_row(cairo_t *cr, struct device *d, int y, int w) {
 	cairo_save(cr);
 	cairo_rectangle(cr, 0, y, x - PAD, ROW_H);
 	cairo_clip(cr);
-	black(cr);
-	text(cr, d->name, PAD + 12, y, ROW_H);
+	gem_black(cr);
+	gem_text(cr, d->name, PAD + 12, y, ROW_H);
 	cairo_restore(cr);
 }
 
 static void list_message(cairo_t *cr, const char *s, int y, int w) {
-	black(cr);
-	text(cr, s, PAD + 12, y, ROW_H);
-	grey_out(cr, 0, y, w, ROW_H);
+	gem_black(cr);
+	gem_text(cr, s, PAD + 12, y, ROW_H);
+	gem_grey_out(cr, 0, y, w, ROW_H);
 }
 
 /* The device list, from y (already scrolled); returns its height. */
@@ -879,7 +824,7 @@ static void paint_alert(cairo_t *cr, int w, int h) {
 	int n = g_strv_length(lines);
 	int tw = 0;
 	for (int i = 0; i < n; i++) {
-		int lw = (int)text_width(cr, lines[i]);
+		int lw = (int)gem_text_width(cr, lines[i]);
 		tw = lw > tw ? lw : tw;
 	}
 	int bw = 0;
@@ -895,13 +840,13 @@ static void paint_alert(cairo_t *cr, int w, int h) {
 	int ah = n * 18 + BUTTON_H + 5 * PAD;
 	int ax = (w - aw) / 2, ay = (h - ah) / 2;
 	/* GEM's alert box: outlined, with a gap, on a white field. */
-	white(cr);
-	fill(cr, ax - 3, ay - 3, aw + 6, ah + 6);
-	black(cr);
-	frame(cr, ax - 3, ay - 3, aw + 6, ah + 6, 1);
-	frame(cr, ax, ay, aw, ah, 2);
+	gem_white(cr);
+	gem_fill(cr, ax - 3, ay - 3, aw + 6, ah + 6);
+	gem_black(cr);
+	gem_frame(cr, ax - 3, ay - 3, aw + 6, ah + 6, 1);
+	gem_frame(cr, ax, ay, aw, ah, 2);
 	for (int i = 0; i < n; i++) {
-		text(cr, lines[i], ax + 2 * PAD, ay + 2 * PAD + i * 18, 18);
+		gem_text(cr, lines[i], ax + 2 * PAD, ay + 2 * PAD + i * 18, 18);
 	}
 	int bx = ax + aw - 2 * PAD - buttons_w;
 	int by = ay + ah - 2 * PAD - BUTTON_H;
@@ -924,7 +869,7 @@ static void report_scroll(void) {
 		ui.scroll, ui.list_h, total > 0 ? total : 1);
 }
 
-static void paint(cairo_t *c, int w, int h) {
+static void paint(cairo_t *c, int w, int h, void *data) {
 	for (guint i = 0; i < ui.hits->len; i++) {
 		g_free(g_array_index(ui.hits, struct hit, i).path);
 	}
@@ -934,8 +879,8 @@ static void paint(cairo_t *c, int w, int h) {
 	bool scanning = powered && prop_bool(a, "Discovering");
 
 	/* Top: the power switch, as a pair of GEM radio buttons. */
-	black(c);
-	text(c, "Bluetooth", PAD, 0, BAR_H);
+	gem_black(c);
+	gem_text(c, "Bluetooth", PAD, 0, BAR_H);
 	int rw = button_width(c, "Off");
 	int by = (BAR_H - BUTTON_H) / 2;
 	int ox = w - PAD - rw, nx = ox - rw + 1;
@@ -943,23 +888,23 @@ static void paint(cairo_t *c, int w, int h) {
 		for (int i = 0; i < 2; i++) {
 			bool on = i == 0, selected = on == powered;
 			int x = on ? nx : ox;
-			black(c);
+			gem_black(c);
 			if (selected) {
-				fill(c, x, by, rw, BUTTON_H);
-				white(c);
+				gem_fill(c, x, by, rw, BUTTON_H);
+				gem_white(c);
 			} else {
-				frame(c, x, by, rw, BUTTON_H, 1);
+				gem_frame(c, x, by, rw, BUTTON_H, 1);
 			}
 			const char *label = on ? "On" : "Off";
-			text(c, label, x + (rw - text_width(c, label)) / 2, by, BUTTON_H);
+			gem_text(c, label, x + (rw - gem_text_width(c, label)) / 2, by, BUTTON_H);
 			if (!selected) {
 				add_hit(x, by, rw, BUTTON_H, on ? ACT_POWER_ON : ACT_POWER_OFF,
 					NULL);
 			}
 		}
 	}
-	black(c);
-	fill(c, 0, BAR_H - 1, w, 1);
+	gem_black(c);
+	gem_fill(c, 0, BAR_H - 1, w, 1);
 
 	/* The list, scrolled, between the bars. */
 	ui.list_h = h - 2 * BAR_H;
@@ -981,14 +926,14 @@ static void paint(cairo_t *c, int w, int h) {
 	}
 
 	/* Bottom: what's happening, and Scan. */
-	black(c);
-	fill(c, 0, h - BAR_H, w, 1);
+	gem_black(c);
+	gem_fill(c, 0, h - BAR_H, w, 1);
 	const char *scan = scanning ? "Stop" : "Scan";
 	int sw = button_width(c, "Scan");
 	cairo_save(c);
 	cairo_rectangle(c, 0, h - BAR_H, w - 2 * PAD - sw, BAR_H);
 	cairo_clip(c);
-	text(c, ui.message != NULL ? ui.message : "", PAD, h - BAR_H, BAR_H);
+	gem_text(c, ui.message != NULL ? ui.message : "", PAD, h - BAR_H, BAR_H);
 	cairo_restore(c);
 	button(c, w - PAD - sw, h - BAR_H + by, sw, scan,
 		scanning ? ACT_STOP_SCAN : ACT_SCAN, NULL, true, powered);
@@ -1002,30 +947,8 @@ static void paint(cairo_t *c, int w, int h) {
 	report_scroll();
 }
 
-/* Draws into a 1x image and pixel-doubles it onto the widget, so the
- * window has the same chunky pixels as GemWM's frames on HiDPI screens. */
 static void draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, void *data) {
-	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-	cairo_t *c = cairo_create(img);
-	cairo_set_antialias(c, CAIRO_ANTIALIAS_NONE);
-	cairo_select_font_face(c, font_family, CAIRO_FONT_SLANT_NORMAL,
-		CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(c, FONT_SIZE);
-	cairo_font_options_t *opts = cairo_font_options_create();
-	cairo_font_options_set_antialias(opts, CAIRO_ANTIALIAS_NONE);
-	cairo_font_options_set_hint_style(opts, CAIRO_HINT_STYLE_FULL);
-	cairo_font_options_set_hint_metrics(opts, CAIRO_HINT_METRICS_ON);
-	cairo_set_font_options(c, opts);
-	cairo_font_options_destroy(opts);
-	white(c);
-	cairo_paint(c);
-	paint(c, w, h);
-	cairo_destroy(c);
-
-	cairo_set_source_surface(cr, img, 0, 0);
-	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-	cairo_paint(cr);
-	cairo_surface_destroy(img);
+	gem_draw_pixelated(cr, w, h, paint, NULL);
 }
 
 /* ---- The window: input -------------------------------------------------- */
@@ -1226,7 +1149,6 @@ static void activate(GtkApplication *app, void *data) {
 }
 
 int main(int argc, char *argv[]) {
-	font_family = g_getenv("GEMWM_FONT") ? g_getenv("GEMWM_FONT") : "monospace";
 	if (argc > 1 && strcmp(argv[1], "--menu-app") == 0) {
 		self = strchr(argv[0], '/') != NULL ? g_strdup(argv[0]) :
 			g_find_program_in_path(argv[0]);

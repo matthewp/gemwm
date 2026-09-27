@@ -46,6 +46,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Print               | screenshot of the whole screen           |
 | Shift+Print         | screenshot of an area you drag out       |
 | Alt+Print           | screenshot of the focused window         |
+| Volume keys         | volume up, down, mute; mic mute          |
 | Super+Q             | close the focused window                 |
 | Super+Z             | maximize the focused window (toggle)     |
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
@@ -79,7 +80,8 @@ Hover a title to drop its menu; click an item to run it. Click the title
 window underneath, as on the ST. At the right are the menu apps (below):
 Bluetooth, the battery and the clock. Click the clock to switch between
 24-hour and 12-hour time. The battery shows a bolt on mains power, and its
-charge turns inverted at 10% or less.
+charge turns inverted at 10% or less; rest the pointer on it for how long
+until it's empty, or full while charging.
 
 As in GEM, the menu bar belongs to what's in front. With a window focused,
 it shows **Desk**, a menu named after the window's application (from its
@@ -134,6 +136,7 @@ defaults:
 
     [Menu Apps]
     Bluetooth = exec gemwm-bluetooth --menu-app
+    Volume = exec gemwm-volume --menu-app
     Battery = exec gemwm-battery
     Clock = exec gemwm-clock          # --12h or --24h, --seconds
 
@@ -146,10 +149,14 @@ stdout:
 - Each line it prints replaces its item: `text`, `icon<TAB>text`, or
   `icon<TAB>text<TAB>inverse` for white text on black (as the battery shows
   when it's low). An empty line hides the item.
+- A fourth field is a tooltip, shown under the item while the pointer
+  rests on it: `icon<TAB>text<TAB>flags<TAB>tooltip`, where flags is
+  `inverse` or empty.
 - The icon is a PNG file, or an inline 1-bit picture, `bitmap:WxH:hex`:
   each row in hex, eight pixels to a byte, the first pixel in the top bit
   and 1 for black. Either way it's drawn 1:1, as it would be on the ST.
-- A click on the item sends it `click 1` (`2` middle, `3` right).
+- A click on the item sends it `click 1` (`2` middle, `3` right), and
+  each notch of the scroll wheel over it `scroll up` or `scroll down`.
 - When its stdin closes, the bar has gone, and it should exit.
 
 If an app exits after running at least 10 seconds, it's restarted; one that
@@ -220,6 +227,17 @@ Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 Apply changes with `gemwm msg reload-config`; `[clock]` and `[battery]`
 are read by the clock and battery menu apps when the menu bar starts them
 (`pkill gemwm-menu; setsid gemwm-menu &`).
+
+## Volume
+
+`gemwm-volume` is a menu app too: a speaker with the output's volume.
+Scroll over it to turn it up and down, right-click to mute, and click for a
+window with every output and input (the round buttons pick the default,
+e.g. your headphones when they connect) and every application playing,
+each with a GEM slider and Mute. The volume keys run `gemwm-volume up`,
+`down`, `mute` and `mic-mute`, in 5% steps up to 100%, and the bar follows
+at once. It uses PulseAudio, or PipeWire's PulseAudio server, and is built
+when GTK 4 and `libpulse` are there.
 
 ## Desktop
 

@@ -6,7 +6,8 @@
  * Without options, [clock] in ~/.config/gemwm/config decides:
  *   mode = 24h | 12h | off
  *   seconds = yes | no
- * A click switches between 24-hour and 12-hour time.
+ * A click switches between 24-hour and 12-hour time; its tooltip is the
+ * date.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -38,12 +39,16 @@ static void arm(int fd) {
 static void show(void) {
 	const char *format = h24 ? (seconds ? "%H:%M:%S" : "%H:%M") :
 		(seconds ? "%l:%M:%S %p" : "%l:%M %p");
-	char now[64];
+	char now[64], date[64], line[160];
 	time_t t = time(NULL);
 	struct tm tm;
-	if (strftime(now, sizeof(now), format, localtime_r(&t, &tm)) > 0) {
-		/* %l pads single-digit hours with a space; drop it. */
-		app_show(now + strspn(now, " "));
+	localtime_r(&t, &tm);
+	if (strftime(now, sizeof(now), format, &tm) > 0 &&
+			strftime(date, sizeof(date), "%A %-d %B %Y", &tm) > 0) {
+		/* No icon, no flags; %l pads single-digit hours with a space. */
+		snprintf(line, sizeof(line), "\t%s\t\t%s", now + strspn(now, " "),
+			date);
+		app_show(line);
 	}
 }
 

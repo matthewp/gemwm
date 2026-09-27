@@ -34,11 +34,14 @@
  *   text
  *   icon<TAB>text
  *   icon<TAB>text<TAB>inverse     the text in white on black
+ *   icon<TAB>text<TAB>flags<TAB>tooltip
  *
  * where icon is a PNG file, or "bitmap:WxH:hex", a 1-bit picture given as
  * rows of bits in hex, the first pixel in the top bit and 1 for black. An
  * empty line hides the item. A click on it sends the app "click 1" (2
- * middle, 3 right). When stdin closes, the bar has gone and the app should
+ * middle, 3 right), and each notch of the scroll wheel over it "scroll up"
+ * or "scroll down". The tooltip (flags is "inverse" or empty) shows in a
+ * box below the item while the pointer rests on it. When stdin closes, the bar has gone and the app should
  * exit. The bar's own directory is put first on their PATH, so GemWM's
  * apps are found even when it runs from a build directory.
  */
@@ -80,6 +83,9 @@
 #define APP_PAD 8      /* space either side of a menu app */
 #define APP_MAX_W 200  /* longer menu-app text is cut off */
 #define APP_RESTART 10 /* seconds an app must have run to be restarted */
+#define SCROLL_STEP 15 /* scroll distance of one wheel notch */
+#define TOOLTIP_DELAY 600 /* ms the pointer rests on an item first */
+#define TOOLTIP_PAD 6
 #define APPS_SECTION "Menu Apps"
 #define DESK_MENU "Desk"       /* the desktop's menus kept while a window */
 #define OPTIONS_MENU "Options" /* has focus */
@@ -159,6 +165,7 @@ static const char default_config[] =
 	"# menu.c.\n"
 	"[" APPS_SECTION "]\n"
 	"Bluetooth = exec gemwm-bluetooth --menu-app\n"
+	"Volume = exec gemwm-volume --menu-app\n"
 	"Battery = exec gemwm-battery\n"
 	"Clock = exec gemwm-clock\n";
 
@@ -193,6 +200,7 @@ struct menu_app {
 	char *text, *icon_spec; /* icon_spec: a PNG's path or "bitmap:..." */
 	cairo_surface_t *icon;
 	bool inverse;
+	char *tooltip;
 	int x, w;              /* where it was drawn, for clicks; w 0: hidden */
 	time_t started;
 	time_t restart_at;     /* 0: not waiting to restart */
@@ -278,6 +286,15 @@ static struct {
 	struct menu_app apps[MAX_APPS];
 	int n_apps;
 	uint32_t button; /* the button being pressed, for menu apps */
+	double scrolled; /* over a menu app, not yet a whole notch */
+
+	/* The tooltip of the menu app under the pointer: due at tip_due (ms,
+	 * monotonic; 0 if not), shown in a subsurface below the bar. */
+	struct menu_app *tip_app;
+	int64_t tip_due;
+	bool tip_shown;
+	struct wl_surface *tip_surface;
+	struct wl_subsurface *tip_subsurface;
 
 	int ipc_fd;
 	char ipc_in[65536];
@@ -1099,6 +1116,86 @@ static void ipc_read(void) {
 
 /* ---- Menu apps ---------------------------------------------------------- */
 
+static struct menu_app *app_at(double x);
+
+static int64_t now_ms(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void tooltip_hide(void) {
+	if (st.tip_shown) {
+		wl_surface_attach(st.tip_surface, NULL, 0, 0);
+		wl_surface_commit(st.tip_surface);
+		st.tip_shown = false;
+	}
+	st.tip_app = NULL;
+	st.tip_due = 0;
+}
+
+/* A box below the item, as GEM draws its menus: white, black outline. It
+ * takes no input, so the pointer goes through to whatever is under it. */
+static void tooltip_show(void) {
+	struct menu_app *a = st.tip_app;
+	st.tip_due = 0;
+	if (a == NULL || a->tooltip == NULL || a->w == 0) {
+		tooltip_hide();
+		return;
+	}
+	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+	cairo_t *cr = begin(scratch);
+	cairo_text_extents_t te;
+	cairo_text_extents(cr, a->tooltip, &te);
+	cairo_destroy(cr);
+	cairo_surface_destroy(scratch);
+	int w = (int)te.x_advance + 2 * TOOLTIP_PAD + 2, h = ITEM_H + 2;
+	struct buffer *buffer = buffer_create(w, h);
+	if (buffer == NULL) {
+		return;
+	}
+	cr = begin(buffer->surface);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_paint(cr);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_set_line_width(cr, 1);
+	cairo_rectangle(cr, 0.5, 0.5, w - 1, h - 1);
+	cairo_stroke(cr);
+	text(cr, a->tooltip, TOOLTIP_PAD + 1, 1, ITEM_H);
+	cairo_destroy(cr);
+
+	if (st.tip_surface == NULL) {
+		st.tip_surface = wl_compositor_create_surface(st.compositor);
+		st.tip_subsurface = wl_subcompositor_get_subsurface(st.subcompositor,
+			st.tip_surface, st.bar);
+		wl_subsurface_set_desync(st.tip_subsurface);
+		struct wl_region *none = wl_compositor_create_region(st.compositor);
+		wl_surface_set_input_region(st.tip_surface, none);
+		wl_region_destroy(none);
+	}
+	/* Under the item, kept on screen; the top edge overlaps the bar's line. */
+	int x = a->x + w > st.bar_w ? st.bar_w - w : a->x;
+	wl_subsurface_set_position(st.tip_subsurface, x < 0 ? 0 : x, BAR_H - 1);
+	submit(st.tip_surface, buffer, w, h);
+	wl_surface_commit(st.bar); /* the position applies with the bar's commit */
+	st.tip_shown = true;
+}
+
+/* Follows the pointer over the bar: resting on a menu app with a tooltip
+ * shows it after a moment. */
+static void tooltip_track(double x, double y) {
+	struct menu_app *a = st.pointer_surface == st.bar && st.open < 0 &&
+		y < BAR_H ? app_at(x) : NULL;
+	if (a == st.tip_app) {
+		return;
+	}
+	tooltip_hide();
+	if (a != NULL && a->tooltip != NULL) {
+		st.tip_app = a;
+		st.tip_due = now_ms() + TOOLTIP_DELAY;
+	}
+}
+
 static void app_start(struct menu_app *a) {
 	int sv[2];
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
@@ -1186,18 +1283,19 @@ static cairo_surface_t *load_icon(const struct menu_app *a, const char *spec) {
 	return s;
 }
 
-/* One line from the app: "text", "icon<TAB>text" or
- * "icon<TAB>text<TAB>inverse". */
+/* One line from the app: "text", or "icon<TAB>text", optionally followed
+ * by "<TAB>flags" and "<TAB>tooltip". */
 static void app_set(struct menu_app *a, char *line) {
-	char *fields[3] = { NULL, line, NULL };
+	char *fields[4] = { NULL, line, NULL, NULL };
 	char *tab = strchr(line, '\t');
 	if (tab != NULL) {
 		*tab = '\0';
 		fields[0] = line;
 		fields[1] = tab + 1;
-		if ((tab = strchr(fields[1], '\t')) != NULL) {
+		for (int i = 2; i < 4 && (tab = strchr(fields[i - 1], '\t')) != NULL;
+				i++) {
 			*tab = '\0';
-			fields[2] = tab + 1;
+			fields[i] = tab + 1;
 		}
 	}
 	const char *spec = fields[0];
@@ -1215,6 +1313,9 @@ static void app_set(struct menu_app *a, char *line) {
 	free(a->text);
 	a->text = strdup(fields[1]);
 	a->inverse = fields[2] != NULL && strcmp(fields[2], "inverse") == 0;
+	free(a->tooltip);
+	a->tooltip = fields[3] != NULL && fields[3][0] != '\0' ?
+		strdup(fields[3]) : NULL;
 }
 
 /* The app exited (or closed its end): its item goes, and it's restarted
@@ -1226,6 +1327,9 @@ static void app_stopped(struct menu_app *a) {
 	waitpid(a->pid, NULL, WNOHANG);
 	free(a->text);
 	a->text = NULL;
+	if (st.tip_app == a) {
+		tooltip_hide();
+	}
 	if (time(NULL) - a->started >= APP_RESTART) {
 		a->restart_at = time(NULL) + 1;
 	} else {
@@ -1259,6 +1363,9 @@ static void app_read(struct menu_app *a) {
 			a->len -= used;
 			app_set(a, line);
 			draw_bar();
+			if (st.tip_shown && st.tip_app == a) {
+				tooltip_show(); /* its text may have changed */
+			}
 		} else if (a->len == sizeof(a->in) - 1) {
 			a->len = 0; /* an absurdly long line: drop it */
 		}
@@ -1654,6 +1761,7 @@ static void open_menu(int index) {
 	if (index == st.open) {
 		return;
 	}
+	tooltip_hide();
 	st.open = index;
 	draw_bar();
 
@@ -1876,6 +1984,7 @@ static void handle_motion(void) {
 	}
 	double x, y;
 	pointer_pos(&x, &y);
+	tooltip_track(x, y);
 	int l = level_at(x, y);
 	if (y < BAR_H && l < 0) {
 		/* GEM menus drop down on hover, no click needed. */
@@ -1918,6 +2027,7 @@ static void handle_motion(void) {
 }
 
 static void handle_press(void) {
+	tooltip_hide();
 	double x, y;
 	pointer_pos(&x, &y);
 	if (st.alert.active) {
@@ -1992,6 +2102,9 @@ static void pointer_leave(void *data, struct wl_pointer *pointer,
 	if (st.pointer_surface == surface) {
 		st.pointer_surface = NULL;
 	}
+	if (surface == st.bar) {
+		tooltip_hide();
+	}
 }
 
 static void pointer_motion(void *data, struct wl_pointer *pointer,
@@ -2009,13 +2122,36 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 	}
 }
 
+/* Scrolling over a menu app tells it, a notch at a time (a touchpad's
+ * smaller steps add up). */
 static void pointer_axis(void *data, struct wl_pointer *pointer,
-		uint32_t time, uint32_t axis, wl_fixed_t value) {}
+		uint32_t time, uint32_t axis, wl_fixed_t value) {
+	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL || st.open >= 0 ||
+			st.pointer_surface != st.bar) {
+		return;
+	}
+	struct menu_app *app = app_at(st.px);
+	if (app == NULL || app->fd < 0) {
+		st.scrolled = 0;
+		return;
+	}
+	st.scrolled += wl_fixed_to_double(value);
+	while (st.scrolled <= -SCROLL_STEP || st.scrolled >= SCROLL_STEP) {
+		bool up = st.scrolled < 0;
+		st.scrolled += up ? SCROLL_STEP : -SCROLL_STEP;
+		static const char up_msg[] = "scroll up\n", down_msg[] = "scroll down\n";
+		send(app->fd, up ? up_msg : down_msg,
+			(up ? sizeof(up_msg) : sizeof(down_msg)) - 1,
+			MSG_NOSIGNAL | MSG_DONTWAIT);
+	}
+}
 static void pointer_frame(void *data, struct wl_pointer *pointer) {}
 static void pointer_axis_source(void *data, struct wl_pointer *pointer,
 		uint32_t source) {}
 static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
-		uint32_t time, uint32_t axis) {}
+		uint32_t time, uint32_t axis) {
+	st.scrolled = 0;
+}
 static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
 		uint32_t axis, int32_t discrete) {}
 
@@ -2113,6 +2249,11 @@ static int dispatch(void) {
 		}
 	}
 	int timeout = wake == 0 ? -1 : wake <= now ? 0 : (int)(wake - now) * 1000;
+	if (st.tip_due != 0) {
+		int64_t in = st.tip_due - now_ms();
+		int tip = in < 0 ? 0 : (int)in;
+		timeout = timeout < 0 || tip < timeout ? tip : timeout;
+	}
 	if (poll(fds, 2 + st.n_apps, timeout) < 0) {
 		wl_display_cancel_read(st.display);
 		return errno == EINTR ? 0 : -1;
@@ -2138,6 +2279,9 @@ static int dispatch(void) {
 		if (a->restart_at != 0 && a->restart_at <= time(NULL)) {
 			app_start(a);
 		}
+	}
+	if (st.tip_due != 0 && now_ms() >= st.tip_due) {
+		tooltip_show();
 	}
 	while (waitpid(-1, NULL, WNOHANG) > 0) {
 		/* reap menu apps that have exited */
