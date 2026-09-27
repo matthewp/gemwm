@@ -30,8 +30,10 @@
  *   exec <shell command>          run a program
  *   reload-config                 re-read ~/.config/gemwm/config
  *   quit                          end the session
- *   subscribe                     stream "workspaces", "windows" and "mode"
- *                                 events
+ *   menu-activate <id> <item>     pick an item of the window's own menus
+ *                                 (gemwm-app-menu-v1; for the menu bar)
+ *   subscribe                     stream "workspaces", "windows", "focus"
+ *                                 and "mode" events
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -173,6 +175,35 @@ static void json_windows(struct server *server, struct strbuf *sb,
 	sb_append(sb, "]}", 2);
 }
 
+/* The focused window, for the menu bar's window menu, flat so it's easy to
+ * read: {"window":3,"workspace":1,"maximized":false,"app_id":"foot"}, or
+ * {"window":0} when no window has focus. A window with menus of its own
+ * adds "menus", their text (see appmenu.c), last. */
+static void json_focus(struct server *server, struct strbuf *sb,
+		const char *event) {
+	sb_append(sb, "{", 1);
+	if (event != NULL) {
+		sb_printf(sb, "\"event\":\"%s\",", event);
+	}
+	struct view *view = server->focused_view;
+	if (view == NULL) {
+		sb_append(sb, "\"window\":0}", 11);
+		return;
+	}
+	bool maximized = view->maximized ||
+		(view->workspace != NULL && view->workspace->zoomed == view);
+	sb_printf(sb, "\"window\":%u,\"workspace\":%d,\"maximized\":%s,"
+		"\"app_id\":", view->id,
+		view->workspace ? workspace_number(view->workspace) : 0,
+		maximized ? "true" : "false");
+	sb_json_string(sb, view->xdg_toplevel->app_id);
+	if (view->app_menus != NULL) {
+		sb_printf(sb, ",\"menus\":");
+		sb_json_string(sb, view->app_menus);
+	}
+	sb_append(sb, "}", 1);
+}
+
 /* {"mode":"tiling"} */
 static void json_mode(struct server *server, struct strbuf *sb,
 		const char *event) {
@@ -262,6 +293,11 @@ void ipc_notify_workspaces(struct server *server) {
 
 void ipc_notify_windows(struct server *server) {
 	broadcast(server, json_windows, "windows");
+	broadcast(server, json_focus, "focus");
+}
+
+void ipc_notify_focus(struct server *server) {
+	broadcast(server, json_focus, "focus");
 }
 
 void ipc_notify_mode(struct server *server) {
@@ -381,6 +417,14 @@ static char *execute(struct server *server, struct ipc_client *client,
 		workspace_prune(server); /* in case "new" went unused */
 		return strdup(ok);
 	}
+	if (strcmp(cmd, "menu-activate") == 0) {
+		struct view *view = view_by_id(server, argv[1]);
+		if (view == NULL || argv[2] == NULL) {
+			return reply_error("usage: menu-activate <window> <item>");
+		}
+		view_menu_activate(view, (uint32_t)strtoul(argv[2], NULL, 10));
+		return strdup(ok);
+	}
 	if (strcmp(cmd, "focus-window") == 0) {
 		struct view *view = view_by_id(server, argv[1]);
 		if (view == NULL) {
@@ -486,6 +530,9 @@ static char *execute(struct server *server, struct ipc_client *client,
 		client_send(client, sb.data);
 		sb.len = 0;
 		json_windows(server, &sb, "windows");
+		client_send(client, sb.data);
+		sb.len = 0;
+		json_focus(server, &sb, "focus");
 		client_send(client, sb.data);
 		sb.len = 0;
 		json_mode(server, &sb, "mode");

@@ -561,6 +561,7 @@ int main(int argc, char *argv[]) {
 
 	view_init_shell(&server);
 	scrollbars_init(&server);
+	app_menus_init(&server);
 	workspaces_init(&server);
 	config_load(&server);
 	layers_init(&server);

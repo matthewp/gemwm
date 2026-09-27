@@ -10,7 +10,8 @@
  * Both talk to BlueZ on the system bus. The window is drawn like GemWeb's
  * chrome, in black and white at 1x and pixel-doubled on HiDPI screens, and
  * under GemWM its device list scrolls with the frame's scroll bar
- * (gemwm-scroll-v1). While it's open it is the BlueZ agent for the pairings
+ * (gemwm-scroll-v1), and its File and Options menus are in the menu bar
+ * (lib/app-menu.c). While it's open it is the BlueZ agent for the pairings
  * it starts, so passkeys are shown and confirmed in GEM alert boxes.
  */
 #include <cairo.h>
@@ -22,6 +23,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include "app-menu.h"
 #include "gemwm-scroll-v1-client-protocol.h"
 
 #define FONT_SIZE 14
@@ -310,6 +312,7 @@ enum action {
 	ACT_REMOVE,
 	ACT_ALERT_0, /* the alert's buttons */
 	ACT_ALERT_1,
+	ACT_CLOSE,
 };
 
 /* Something clickable, as last drawn. */
@@ -337,6 +340,7 @@ static struct {
 	int scroll;          /* the device list's offset */
 	int list_h, content_h;
 
+	struct app_menu *menu;
 	struct gemwm_scroll_manager_v1 *scroll_manager;
 	struct gemwm_scroll_v1 *scroll_bar;
 	int reported[3];
@@ -667,6 +671,9 @@ static void act(enum action action, const char *path) {
 	case ACT_ALERT_0:
 	case ACT_ALERT_1:
 		alert_answer(action == ACT_ALERT_0 ? 0 : 1);
+		break;
+	case ACT_CLOSE:
+		gtk_window_close(GTK_WINDOW(ui.window));
 		break;
 	default:
 		break;
@@ -1072,6 +1079,10 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key,
 		act(ui.alert.buttons[1] != NULL ? ACT_ALERT_1 : ACT_ALERT_0, NULL);
 		return TRUE;
 	}
+	if ((mods & GDK_CONTROL_MASK) && (key == GDK_KEY_w || key == GDK_KEY_W)) {
+		act(ACT_CLOSE, NULL);
+		return TRUE;
+	}
 	if (key == GDK_KEY_Escape) {
 		if (ui.alert.active) {
 			act(ui.alert.buttons[1] != NULL ? ACT_ALERT_1 : ACT_ALERT_0, NULL);
@@ -1139,8 +1150,41 @@ static void window_mapped(GtkWidget *window, void *data) {
 
 /* ---- The window: setup -------------------------------------------------- */
 
+/* The menus in GemWM's menu bar. Options is merged into GemWM's own. */
+static void build_menus(struct app_menu *m, void *data) {
+	GDBusProxy *a = adapter();
+	bool powered = a != NULL && prop_bool(a, "Powered");
+	bool scanning = powered && prop_bool(a, "Discovering");
+	bool present = a != NULL;
+	uint32_t none = present ? 0 : APP_MENU_DISABLED;
+	g_clear_object(&a);
+
+	app_menu_add_menu(m, "File");
+	if (scanning) {
+		app_menu_add_item(m, ACT_STOP_SCAN, "Stop Scanning", "", 0);
+	} else {
+		app_menu_add_item(m, ACT_SCAN, "Scan", "",
+			powered ? 0 : APP_MENU_DISABLED);
+	}
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_CLOSE, "Close", "^W", 0);
+
+	app_menu_add_menu(m, "Options");
+	app_menu_add_item(m, ACT_POWER_ON, "Bluetooth On", "",
+		none | (powered ? APP_MENU_CHECKED : 0));
+	app_menu_add_item(m, ACT_POWER_OFF, "Bluetooth Off", "",
+		none | (present && !powered ? APP_MENU_CHECKED : 0));
+}
+
+static void menu_activate(uint32_t id, void *data) {
+	if (!ui.alert.active) {
+		act((enum action)id, NULL);
+	}
+}
+
 static void redraw(void) {
 	gtk_widget_queue_draw(ui.area);
+	app_menu_update(ui.menu);
 }
 
 static void activate(GtkApplication *app, void *data) {
@@ -1176,6 +1220,7 @@ static void activate(GtkApplication *app, void *data) {
 	g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), NULL);
 	gtk_widget_add_controller(ui.window, keys);
 	g_signal_connect(ui.window, "map", G_CALLBACK(window_mapped), NULL);
+	ui.menu = app_menu_new(ui.window, build_menus, menu_activate, NULL);
 
 	gtk_window_present(GTK_WINDOW(ui.window));
 }

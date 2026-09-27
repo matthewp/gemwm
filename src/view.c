@@ -484,6 +484,7 @@ void view_toggle_maximize(struct view *view) {
 		wlr_xdg_toplevel_set_size(view->xdg_toplevel,
 			s->width - ew, s->height - eh);
 		view_move(view, s->x, s->y);
+		ipc_notify_windows(server);
 		return;
 	}
 
@@ -502,6 +503,7 @@ void view_toggle_maximize(struct view *view) {
 	wlr_xdg_toplevel_set_size(view->xdg_toplevel,
 		area.width - ew, area.height - eh);
 	view_move(view, area.x, area.y);
+	ipc_notify_windows(server);
 }
 
 /* An arrow moves a tenth of the view; the track pages by most of one. */
@@ -730,6 +732,7 @@ static void view_destroy(struct wl_listener *listener, void *data) {
 	}
 	view->xdg_toplevel->base->surface->data = NULL;
 	scrollbars_view_destroyed(view);
+	app_menus_view_destroyed(view);
 
 	wl_list_remove(&view->map.link);
 	wl_list_remove(&view->unmap.link);

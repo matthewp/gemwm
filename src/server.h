@@ -188,6 +188,11 @@ struct view {
 	struct scroll_client *scroll;
 	struct frame_axis scroll_v, scroll_h;
 
+	/* Its own menus for the menu bar (appmenu.c), as the bar reads them;
+	 * NULL when it has none. */
+	struct app_menu *app_menu;
+	char *app_menus;
+
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener commit;
@@ -238,6 +243,9 @@ void highlight_update(struct server *server);
 void scrollbars_init(struct server *server);
 void scrollbars_view_destroyed(struct view *view);
 void view_scroll_to(struct view *view, bool vertical, int position);
+void app_menus_init(struct server *server);
+void app_menus_view_destroyed(struct view *view);
+void view_menu_activate(struct view *view, uint32_t id);
 
 /* tile.c */
 bool view_is_tiled(struct view *view);
@@ -289,6 +297,7 @@ void ipc_finish(struct server *server);
 void ipc_notify_workspaces(struct server *server);
 void ipc_notify_windows(struct server *server);
 void ipc_notify_mode(struct server *server);
+void ipc_notify_focus(struct server *server);
 int ipc_client_main(int argc, char *argv[]);
 void ipc_run_command(struct server *server, const char *command);
 

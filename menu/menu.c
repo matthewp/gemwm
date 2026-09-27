@@ -13,6 +13,13 @@
  * and switch by sending commands on it; without it the bar has no
  * workspace buttons.
  *
+ * While a window has focus, the bar shows Desk, a menu for that window
+ * (named after its application, with what GemWM can do to any window), the
+ * window's own menus if it has any (gemwm-app-menu-v1), and Options, with
+ * the window's own Options items merged in above GemWM's. With no window
+ * focused, it shows the desktop's own menus. The control socket tells us
+ * which window has focus, and its menus.
+ *
  * Menus are built in (default_config below) and can be changed from
  * ~/.config/gemwm/menu, which uses the same format. A section there
  * replaces the built-in menu of the same name; other menus stay as they
@@ -41,6 +48,7 @@
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +81,12 @@
 #define APP_MAX_W 200  /* longer menu-app text is cut off */
 #define APP_RESTART 10 /* seconds an app must have run to be restarted */
 #define APPS_SECTION "Menu Apps"
+#define DESK_MENU "Desk"       /* the desktop's menus kept while a window */
+#define OPTIONS_MENU "Options" /* has focus */
+#define APP_NAME_MAX 24        /* longer application names are cut */
+#define SHORTCUT_GAP 16        /* between an item's label and its shortcut */
+#define APP_MENU_DISABLED 1    /* gemwm-app-menu-v1's item flags */
+#define APP_MENU_CHECKED 2
 
 static const char default_config[] =
 	"# gemwm-menu configuration\n"
@@ -91,6 +105,10 @@ static const char default_config[] =
 	"Internet >\n"
 	"Tools >\n"
 	"Control Panel\n"
+	"-\n"
+	"Logout... = [End this GemWM session?] gemwm msg quit\n"
+	"Restart... = [Restart the computer?] systemctl reboot\n"
+	"Shutdown... = [Shut down the computer?] systemctl poweroff\n"
 	"\n"
 	"[Desk > Internet]\n"
 	"Web Browser = if command -v gemweb >/dev/null; then exec gemweb;"
@@ -108,10 +126,6 @@ static const char default_config[] =
 	"Close Window\n"
 	"-\n"
 	"Format...\n"
-	"-\n"
-	"Logout... = [End this GemWM session?] gemwm msg quit\n"
-	"Restart... = [Restart the computer?] systemctl reboot\n"
-	"Shutdown... = [Shut down the computer?] systemctl poweroff\n"
 	"\n"
 	"[View]\n"
 	"Show as Icons\n"
@@ -156,6 +170,9 @@ struct item {
 	char *confirm;        /* if set, an alert box asks this first */
 	struct menu *submenu; /* opens to the side when hovered */
 	bool separator;
+	bool ipc;             /* command goes to GemWM's control socket */
+	bool checked;
+	char *shortcut;       /* shown at the right, e.g. "^T" */
 };
 
 struct menu {
@@ -222,9 +239,25 @@ static struct {
 	struct level levels[MAX_DEPTH];
 	int depth; /* number of open levels */
 
-	struct menu menus[MAX_MENUS];
+	struct menu menus[MAX_MENUS]; /* the desktop's, from the config */
 	int n_menus;
-	int open; /* index of the open menu in the bar, or -1 */
+	/* What the bar shows: the desktop's menus, or while a window has
+	 * focus, Desk, its window menu and Options. */
+	struct menu *bar_menus[MAX_MENUS];
+	int n_bar_menus;
+	int open; /* index of the open menu in bar_menus, or -1 */
+
+	/* The focused window, from the control socket; 0 when none. */
+	unsigned focus_id;
+	int focus_ws;
+	bool focus_maximized;
+	char focus_app[256];
+	char *focus_menus; /* the window's own menus, as GemWM sends them */
+	struct menu window_menu;
+	struct menu app_menus[MAX_MENUS];
+	int n_app_menus;
+	struct menu options;  /* the window's Options items, then the desktop's */
+	bool rebuild_pending; /* menus changed while one was open */
 
 	struct wl_surface *pointer_surface;
 	double px, py;
@@ -247,7 +280,7 @@ static struct {
 	uint32_t button; /* the button being pressed, for menu apps */
 
 	int ipc_fd;
-	char ipc_in[16384];
+	char ipc_in[65536];
 	size_t ipc_len;
 	int ws_count, ws_active;
 	char wm_mode[16]; /* "window" or "tiling", for the check mark */
@@ -280,6 +313,7 @@ static void clear_menu(struct menu *menu) {
 		free(item->label);
 		free(item->command);
 		free(item->confirm);
+		free(item->shortcut);
 	}
 	memset(menu->items, 0, sizeof(menu->items));
 	menu->n_items = 0;
@@ -482,6 +516,9 @@ static void load_config(void) {
  * one; the compositor tells us the mode over the control socket. */
 static bool item_checked(const struct item *item) {
 	static const char prefix[] = "gemwm msg mode ";
+	if (item->checked) {
+		return true;
+	}
 	return item->command != NULL && st.wm_mode[0] != '\0' &&
 		strncmp(item->command, prefix, sizeof(prefix) - 1) == 0 &&
 		strcmp(item->command + sizeof(prefix) - 1, st.wm_mode) == 0;
@@ -590,15 +627,21 @@ static cairo_pattern_t *checker_mask(void) {
 
 /* Works out a drop-down's size, and those of its submenus. */
 static void layout_drop(cairo_t *cr, struct menu *m) {
-	int widest = 0;
+	int widest = 0, widest_shortcut = 0;
 	bool arrows = false;
 	for (int i = 0; i < m->n_items; i++) {
 		struct item *item = &m->items[i];
+		cairo_text_extents_t te;
 		if (item->label != NULL) {
-			cairo_text_extents_t te;
 			cairo_text_extents(cr, item->label, &te);
 			if ((int)te.x_advance > widest) {
 				widest = (int)te.x_advance;
+			}
+		}
+		if (item->shortcut != NULL && item->shortcut[0] != '\0') {
+			cairo_text_extents(cr, item->shortcut, &te);
+			if ((int)te.x_advance > widest_shortcut) {
+				widest_shortcut = (int)te.x_advance;
 			}
 		}
 		if (item->submenu != NULL) {
@@ -606,7 +649,8 @@ static void layout_drop(cairo_t *cr, struct menu *m) {
 			layout_drop(cr, item->submenu);
 		}
 	}
-	m->drop_w = widest + 2 * ITEM_PAD + 2 + (arrows ? ARROW_W : 0);
+	m->drop_w = widest + 2 * ITEM_PAD + 2 + (arrows ? ARROW_W : 0) +
+		(widest_shortcut > 0 ? SHORTCUT_GAP + widest_shortcut : 0);
 	m->drop_h = m->n_items * ITEM_H + 2;
 }
 
@@ -615,8 +659,8 @@ static void layout_menus(void) {
 	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
 	cairo_t *cr = begin(scratch);
 	int x = TITLE_PAD;
-	for (int i = 0; i < st.n_menus; i++) {
-		struct menu *m = &st.menus[i];
+	for (int i = 0; i < st.n_bar_menus; i++) {
+		struct menu *m = st.bar_menus[i];
 		cairo_text_extents_t te;
 		cairo_text_extents(cr, m->title, &te);
 		m->x = x;
@@ -689,6 +733,262 @@ static int workspace_at(double x) {
 
 /* ---- Control socket ----------------------------------------------------- */
 
+static void close_menu(void);
+
+/* ---- The window menu ---------------------------------------------------- */
+
+/* The Name= of the application's .desktop file, which is usually named
+ * after its app ID ("firefox" -> Firefox); failing that, the ID's last
+ * part ("org.gemwm.GemWeb" -> GemWeb). */
+static void app_name(const char *app_id, char *out, size_t n) {
+	if (app_id[0] == '\0') {
+		snprintf(out, n, "Window");
+		return;
+	}
+	char dirs[4096];
+	const char *home = getenv("HOME");
+	const char *data_home = getenv("XDG_DATA_HOME");
+	const char *data_dirs = getenv("XDG_DATA_DIRS");
+	if (data_home != NULL && data_home[0] != '\0') {
+		snprintf(dirs, sizeof(dirs), "%s:%s", data_home,
+			data_dirs && data_dirs[0] ? data_dirs : "/usr/local/share:/usr/share");
+	} else {
+		snprintf(dirs, sizeof(dirs), "%s/.local/share:%s", home ? home : "",
+			data_dirs && data_dirs[0] ? data_dirs : "/usr/local/share:/usr/share");
+	}
+	char *save = NULL;
+	for (char *dir = strtok_r(dirs, ":", &save); dir != NULL;
+			dir = strtok_r(NULL, ":", &save)) {
+		char path[4096];
+		snprintf(path, sizeof(path), "%s/applications/%s.desktop", dir, app_id);
+		FILE *f = fopen(path, "r");
+		if (f == NULL) {
+			continue;
+		}
+		char *line = NULL;
+		size_t cap = 0;
+		bool found = false, in_entry = false;
+		while (!found && getline(&line, &cap, f) != -1) {
+			char *l = trim(line);
+			if (l[0] == '[') {
+				in_entry = strcmp(l, "[Desktop Entry]") == 0;
+			} else if (in_entry && strncmp(l, "Name=", 5) == 0 && l[5] != '\0') {
+				snprintf(out, n, "%s", l + 5);
+				found = true;
+			}
+		}
+		free(line);
+		fclose(f);
+		if (found) {
+			return;
+		}
+	}
+	const char *dot = strrchr(app_id, '.');
+	snprintf(out, n, "%s", dot != NULL && dot[1] != '\0' ? dot + 1 : app_id);
+	if (out[0] >= 'a' && out[0] <= 'z') {
+		out[0] -= 'a' - 'A';
+	}
+}
+
+static struct item *add_ipc_item(struct menu *m, const char *label,
+		const char *format, ...) {
+	struct item *item = add_item(m);
+	if (item == NULL) {
+		return NULL;
+	}
+	item->label = strdup(label);
+	if (format != NULL) {
+		va_list args;
+		va_start(args, format);
+		if (vasprintf(&item->command, format, args) < 0) {
+			item->command = NULL;
+		}
+		va_end(args);
+		item->ipc = true;
+	}
+	return item;
+}
+
+/* What GemWM can do to any window, for the focused one. */
+static void build_window_menu(void) {
+	struct menu *m = &st.window_menu;
+	clear_menu(m);
+	free(m->title);
+	char name[256];
+	app_name(st.focus_app, name, sizeof(name));
+	if (strlen(name) > APP_NAME_MAX) {
+		strcpy(name + APP_NAME_MAX - 3, "...");
+	}
+	m->title = strdup(name);
+
+	unsigned id = st.focus_id;
+	add_ipc_item(m, "Close Window", "close-window %u", id);
+	struct item *full = add_ipc_item(m, "Full Size", "maximize %u", id);
+	if (full != NULL) {
+		full->checked = st.focus_maximized;
+	}
+	struct item *sep = add_item(m);
+	if (sep != NULL) {
+		sep->separator = true;
+	}
+	struct item *move = add_ipc_item(m, "Move to Workspace", NULL);
+	if (move == NULL) {
+		return;
+	}
+	make_submenu(move);
+	for (int i = 1; i <= st.ws_count && i < MAX_ITEMS - 1; i++) {
+		char label[32];
+		snprintf(label, sizeof(label), "Workspace %d", i);
+		/* Where it is now: checked, and nothing to do. */
+		struct item *ws = add_ipc_item(move->submenu, label,
+			i == st.focus_ws ? NULL : "move-window %u %d", id, i);
+		if (ws != NULL) {
+			ws->checked = i == st.focus_ws;
+		}
+	}
+	add_ipc_item(move->submenu, "New Workspace", "move-window %u new", id);
+}
+
+/* The contents of a JSON string, from just after its opening quote, as
+ * the control socket writes them: the only escapes are \" \\ and \u00XX. */
+static char *json_unescape(const char *s) {
+	char *out = malloc(strlen(s) + 1), *o = out;
+	for (; *s != '\0' && *s != '"'; s++) {
+		unsigned c;
+		if (*s != '\\' || s[1] == '\0') {
+			*o++ = *s;
+		} else if (*++s == 'u' && sscanf(s + 1, "%4x", &c) == 1) {
+			*o++ = (char)c;
+			s += 4;
+		} else {
+			*o++ = *s;
+		}
+	}
+	*o = '\0';
+	return out;
+}
+
+/* A string strcmp that allows NULL. */
+static int strcmp_null(const char *a, const char *b) {
+	return a == NULL || b == NULL ? (a != NULL) - (b != NULL) : strcmp(a, b);
+}
+
+/* The window's own menus, from the text GemWM sends (src/appmenu.c). */
+static void build_app_menus(void) {
+	for (int i = 0; i < st.n_app_menus; i++) {
+		clear_menu(&st.app_menus[i]);
+		free(st.app_menus[i].title);
+	}
+	memset(st.app_menus, 0, sizeof(st.app_menus));
+	st.n_app_menus = 0;
+	if (st.focus_menus == NULL) {
+		return;
+	}
+	char *text = strdup(st.focus_menus), *save = NULL;
+	struct menu *m = NULL;
+	for (char *line = strtok_r(text, "\n", &save); line != NULL;
+			line = strtok_r(NULL, "\n", &save)) {
+		char *f[5] = { 0 };
+		int n = 0;
+		for (char *p = line; n < 5; n++) {
+			f[n] = p;
+			char *tab = strchr(p, '\t');
+			if (tab == NULL) {
+				n++;
+				break;
+			}
+			*tab = '\0';
+			p = tab + 1;
+		}
+		if (strcmp(f[0], "M") == 0 && n >= 2) {
+			m = st.n_app_menus < MAX_MENUS - 3 ? /* room for Desk and co. */
+				&st.app_menus[st.n_app_menus++] : NULL;
+			if (m != NULL) {
+				m->title = strdup(f[1]);
+			}
+		} else if (strcmp(f[0], "S") == 0 && m != NULL) {
+			struct item *item = add_item(m);
+			if (item != NULL) {
+				item->separator = true;
+			}
+		} else if (strcmp(f[0], "I") == 0 && n >= 4 && m != NULL) {
+			unsigned flags = (unsigned)strtoul(f[2], NULL, 10);
+			struct item *item = add_ipc_item(m, f[3],
+				flags & APP_MENU_DISABLED ? NULL : "menu-activate %u %s",
+				st.focus_id, f[1]);
+			if (item != NULL) {
+				item->checked = flags & APP_MENU_CHECKED;
+				item->shortcut = n >= 5 ? strdup(f[4]) : NULL;
+			}
+		}
+	}
+	free(text);
+}
+
+/* Options: the window's own Options items (if it has that menu), a
+ * separator, then GemWM's. Items are shared with both, not copied. */
+static struct menu *merge_options(struct menu *app, struct menu *desktop) {
+	if (app == NULL || desktop == NULL) {
+		return app != NULL ? app : desktop;
+	}
+	struct menu *m = &st.options;
+	memset(m, 0, sizeof(*m));
+	m->title = desktop->title;
+	for (int i = 0; i < app->n_items && m->n_items < MAX_ITEMS; i++) {
+		m->items[m->n_items++] = app->items[i];
+	}
+	if (m->n_items < MAX_ITEMS) {
+		m->items[m->n_items++].separator = true;
+	}
+	for (int i = 0; i < desktop->n_items && m->n_items < MAX_ITEMS; i++) {
+		m->items[m->n_items++] = desktop->items[i];
+	}
+	return m;
+}
+
+static struct menu *desktop_menu(const char *title) {
+	for (int i = 0; i < st.n_menus; i++) {
+		if (strcmp(st.menus[i].title, title) == 0) {
+			return &st.menus[i];
+		}
+	}
+	return NULL;
+}
+
+/* Works out what the bar shows, after the focus changed. */
+static void rebuild_bar(void) {
+	close_menu(); /* its menu may be gone */
+	st.n_bar_menus = 0;
+	if (st.focus_id == 0) {
+		for (int i = 0; i < st.n_menus; i++) {
+			st.bar_menus[st.n_bar_menus++] = &st.menus[i];
+		}
+	} else {
+		build_window_menu();
+		build_app_menus();
+		struct menu *desk = desktop_menu(DESK_MENU);
+		struct menu *app_options = NULL;
+		if (desk != NULL) {
+			st.bar_menus[st.n_bar_menus++] = desk;
+		}
+		st.bar_menus[st.n_bar_menus++] = &st.window_menu;
+		for (int i = 0; i < st.n_app_menus; i++) {
+			if (strcmp(st.app_menus[i].title, OPTIONS_MENU) == 0) {
+				app_options = &st.app_menus[i];
+			} else {
+				st.bar_menus[st.n_bar_menus++] = &st.app_menus[i];
+			}
+		}
+		struct menu *options = merge_options(app_options,
+			desktop_menu(OPTIONS_MENU));
+		if (options != NULL) {
+			st.bar_menus[st.n_bar_menus++] = options;
+		}
+	}
+	layout_menus();
+	draw_bar();
+}
+
 static void ipc_send(const char *command) {
 	if (st.ipc_fd < 0) {
 		return;
@@ -732,13 +1032,14 @@ static void ipc_read(void) {
 		close(st.ipc_fd);
 		st.ipc_fd = -1;
 		st.ws_count = 0;
-		draw_bar();
+		st.focus_id = 0;
+		rebuild_bar();
 		return;
 	}
 	st.ipc_len += n;
 	st.ipc_in[st.ipc_len] = '\0';
 
-	bool changed = false;
+	bool changed = false, menus_changed = false;
 	char *start = st.ipc_in, *nl;
 	while ((nl = strchr(start, '\n')) != NULL) {
 		*nl = '\0';
@@ -746,8 +1047,37 @@ static void ipc_read(void) {
 		if (sscanf(start, "{\"event\":\"workspaces\",\"active\":%d,\"count\":%d",
 				&active, &count) == 2) {
 			changed |= active != st.ws_active || count != st.ws_count;
+			/* The window menu lists the workspaces. */
+			menus_changed |= st.focus_id != 0 && count != st.ws_count;
 			st.ws_active = active;
 			st.ws_count = count;
+		}
+		unsigned id;
+		int ws;
+		char maximized[8], app[sizeof(st.focus_app)] = "";
+		int n = sscanf(start, "{\"event\":\"focus\",\"window\":%u,"
+			"\"workspace\":%d,\"maximized\":%7[a-z],\"app_id\":\"%255[^\"]",
+			&id, &ws, maximized, app);
+		if (n >= 1) {
+			bool max = n >= 3 && strcmp(maximized, "true") == 0;
+			ws = n >= 2 ? ws : 0;
+			static const char key[] = ",\"menus\":\"";
+			char *menus_at = strstr(start, key);
+			char *menus = menus_at != NULL ?
+				json_unescape(menus_at + sizeof(key) - 1) : NULL;
+			if (id != st.focus_id || ws != st.focus_ws ||
+					max != st.focus_maximized || strcmp(app, st.focus_app) != 0 ||
+					strcmp_null(menus, st.focus_menus) != 0) {
+				st.focus_id = id;
+				st.focus_ws = ws;
+				st.focus_maximized = max;
+				snprintf(st.focus_app, sizeof(st.focus_app), "%s", app);
+				free(st.focus_menus);
+				st.focus_menus = menus;
+				menus_changed = true;
+			} else {
+				free(menus);
+			}
 		}
 		sscanf(start, "{\"event\":\"mode\",\"mode\":\"%15[a-z]\"", st.wm_mode);
 		start = nl + 1;
@@ -757,7 +1087,12 @@ static void ipc_read(void) {
 	if (st.ipc_len == sizeof(st.ipc_in) - 1) {
 		st.ipc_len = 0; /* a line too long to be ours; drop it */
 	}
-	if (changed) {
+	if (menus_changed && st.open >= 0) {
+		/* Not under the pointer: when the open menu closes. */
+		st.rebuild_pending = true;
+	} else if (menus_changed) {
+		rebuild_bar(); /* draws it too */
+	} else if (changed) {
 		draw_bar();
 	}
 }
@@ -1010,8 +1345,8 @@ static void draw_bar(void) {
 	cairo_rectangle(cr, 0, BAR_H - 1, st.bar_w, 1);
 	cairo_fill(cr);
 
-	for (int i = 0; i < st.n_menus; i++) {
-		struct menu *m = &st.menus[i];
+	for (int i = 0; i < st.n_bar_menus; i++) {
+		struct menu *m = st.bar_menus[i];
 		if (i == st.open) {
 			/* The open menu's title is shown inverted. */
 			cairo_set_source_rgb(cr, 0, 0, 0);
@@ -1033,8 +1368,9 @@ static void draw_bar(void) {
 }
 
 static int title_at(double x) {
-	for (int i = 0; i < st.n_menus; i++) {
-		if (x >= st.menus[i].x && x < st.menus[i].x + st.menus[i].w) {
+	for (int i = 0; i < st.n_bar_menus; i++) {
+		struct menu *m = st.bar_menus[i];
+		if (x >= m->x && x < m->x + m->w) {
 			return i;
 		}
 	}
@@ -1089,6 +1425,12 @@ static void draw_level(int l) {
 			cairo_set_source_rgb(cr, 0, 0, 0);
 		}
 		text(cr, item->label, ITEM_PAD, y, ITEM_H);
+		if (item->shortcut != NULL && item->shortcut[0] != '\0') {
+			cairo_text_extents_t te;
+			cairo_text_extents(cr, item->shortcut, &te);
+			text(cr, item->shortcut, m->drop_w - ITEM_PAD - (int)te.x_advance,
+				y, ITEM_H);
+		}
 		if (item_checked(item)) {
 			/* GEM's check mark, in the indent left of the label. */
 			cairo_set_line_width(cr, 2);
@@ -1241,7 +1583,7 @@ static void overlay_configure(void *data, struct zwlr_layer_surface_v1 *layer,
 		if (st.alert.active) {
 			show_alert(); /* commits the overlay too */
 		} else {
-			struct menu *m = &st.menus[st.open];
+			struct menu *m = st.bar_menus[st.open];
 			/* The menu's top edge overlaps the bar's bottom line. */
 			open_level(0, m, m->x, BAR_H - 1);
 		}
@@ -1318,7 +1660,7 @@ static void open_menu(int index) {
 	if (st.overlay == NULL) {
 		overlay_create(false);
 	} else if (st.overlay_configured) {
-		struct menu *m = &st.menus[index];
+		struct menu *m = st.bar_menus[index];
 		open_level(0, m, m->x, BAR_H - 1);
 	}
 }
@@ -1330,7 +1672,12 @@ static void close_menu(void) {
 	close_levels(0);
 	overlay_destroy();
 	st.open = -1;
-	draw_bar();
+	if (st.rebuild_pending) {
+		st.rebuild_pending = false;
+		rebuild_bar();
+	} else {
+		draw_bar();
+	}
 }
 
 static void run(const char *command) {
@@ -1623,7 +1970,11 @@ static void handle_press(void) {
 			ask(item);
 			return;
 		}
-		run(item->command);
+		if (item->ipc) {
+			ipc_send(item->command);
+		} else {
+			run(item->command);
+		}
 	}
 	close_menu();
 }
@@ -1863,7 +2214,7 @@ int main(void) {
 		fprintf(stderr, "gemwm-menu: compositor lacks wlr-layer-shell\n");
 		return 1;
 	}
-	layout_menus();
+	rebuild_bar();
 
 	st.bar = wl_compositor_create_surface(st.compositor);
 	st.bar_layer = zwlr_layer_shell_v1_get_layer_surface(st.layer_shell,

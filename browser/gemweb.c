@@ -11,6 +11,9 @@
  *   toolbar    | < | > | R | H | https://example.com           |
  *   info line  | Loading... 45%                                  |
  *   page       (a WebKitWebView per tab, in a GtkStack)
+ *
+ * Under GemWM, its File, View and Go menus are in the menu bar
+ * (lib/app-menu.c).
  */
 #include <cairo.h>
 #include <gdk/wayland/gdkwayland.h>
@@ -18,6 +21,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <webkit/webkit.h>
+#include "app-menu.h"
 #include "gemwm-scroll-v1-client-protocol.h"
 
 #define TAB_H 20       /* 19px of tabs plus a 1px line */
@@ -53,6 +57,7 @@ struct browser {
 	bool entry_edited;     /* the user typed in the address field */
 	bool entry_setting;    /* we are changing it, not the user */
 	struct gemwm_scroll_v1 *scroll; /* GemWM draws our scroll bars */
+	struct app_menu *menu;          /* and shows our menus */
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -590,6 +595,7 @@ static void sync_all(struct browser *b) {
 	sync_entry(b);
 	sync_tabbar(b);
 	report_scroll(b);
+	app_menu_update(b->menu);
 	gtk_widget_queue_draw(b->buttons);
 	gtk_widget_queue_draw(b->info);
 }
@@ -949,17 +955,26 @@ static gboolean entry_key(GtkEventControllerKey *ctrl, guint keyval,
 	return TRUE;
 }
 
+/* Keyboard shortcuts and menu items; the values are the menu item ids. */
 enum action {
 	ACT_NEW_TAB, ACT_CLOSE_TAB, ACT_FOCUS_URL, ACT_NEXT_TAB, ACT_PREV_TAB,
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
-	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME,
+	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW,
 };
+
+static struct browser *browser_new(GtkApplication *app);
 
 static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	struct browser *b = g_object_get_data(G_OBJECT(widget), "browser");
 	struct tab *t = active_tab(b);
 	int n = b->tabs->len;
 	switch (GPOINTER_TO_INT(data)) {
+	case ACT_NEW_WINDOW: {
+		struct browser *nb = browser_new(shared.app);
+		tab_new(nb, NULL, NULL, true);
+		gtk_window_present(GTK_WINDOW(nb->window));
+		break;
+	}
 	case ACT_NEW_TAB:
 		tab_new(b, NULL, NULL, true);
 		break;
@@ -1007,8 +1022,52 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	return TRUE;
 }
 
+/* The menus in GemWM's menu bar. The shortcuts shown are GEM style: ^T is
+ * Ctrl+T. */
+static void build_menus(struct app_menu *m, void *data) {
+	struct browser *b = data;
+	struct tab *t = active_tab(b);
+	bool back = t != NULL && webkit_web_view_can_go_back(t->view);
+	bool forward = t != NULL && webkit_web_view_can_go_forward(t->view);
+	uint32_t one_tab = b->tabs->len < 2 ? APP_MENU_DISABLED : 0;
+
+	app_menu_add_menu(m, "File");
+	app_menu_add_item(m, ACT_NEW_WINDOW, "New Window", "^N", 0);
+	app_menu_add_item(m, ACT_NEW_TAB, "New Tab", "^T", 0);
+	app_menu_add_item(m, ACT_FOCUS_URL, "Open Location...", "^L", 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_CLOSE_TAB, "Close Tab", "^W", 0);
+	app_menu_add_item(m, ACT_QUIT, "Close Window", "^Q", 0);
+
+	app_menu_add_menu(m, "View");
+	app_menu_add_item(m, ACT_RELOAD, "Reload", "^R", 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_ZOOM_IN, "Zoom In", "^+", 0);
+	app_menu_add_item(m, ACT_ZOOM_OUT, "Zoom Out", "^-", 0);
+	app_menu_add_item(m, ACT_ZOOM_RESET, "Actual Size", "^0", 0);
+
+	app_menu_add_menu(m, "Go");
+	app_menu_add_item(m, ACT_BACK, "Back", "Alt+Left",
+		back ? 0 : APP_MENU_DISABLED);
+	app_menu_add_item(m, ACT_FORWARD, "Forward", "Alt+Right",
+		forward ? 0 : APP_MENU_DISABLED);
+	app_menu_add_item(m, ACT_HOME, "Home", "Alt+Home", 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_NEXT_TAB, "Next Tab", "^Tab", one_tab);
+	app_menu_add_item(m, ACT_PREV_TAB, "Previous Tab", "^Shift+Tab", one_tab);
+}
+
+static void menu_activate(uint32_t id, void *data) {
+	struct browser *b = data;
+	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
+			id == ACT_QUIT) {
+		shortcut(b->window, NULL, GINT_TO_POINTER(id));
+	}
+}
+
 static void add_shortcuts(GtkWidget *window) {
 	static const struct { const char *trigger; enum action action; } keys[] = {
+		{ "<Control>n", ACT_NEW_WINDOW },
 		{ "<Control>t", ACT_NEW_TAB },
 		{ "<Control>w", ACT_CLOSE_TAB },
 		{ "<Control>l", ACT_FOCUS_URL },
@@ -1191,6 +1250,7 @@ static struct browser *browser_new(GtkApplication *app) {
 	gtk_box_append(GTK_BOX(box), b->stack);
 	gtk_window_set_child(GTK_WINDOW(b->window), box);
 	add_shortcuts(b->window);
+	b->menu = app_menu_new(b->window, build_menus, menu_activate, b);
 	return b;
 }
 

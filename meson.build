@@ -33,10 +33,11 @@ xdg_shell_xml = wl_protocol_dir / 'stable/xdg-shell/xdg-shell.xml'
 viewporter_xml = wl_protocol_dir / 'stable/viewporter/viewporter.xml'
 layer_shell_xml = 'protocols/wlr-layer-shell-unstable-v1.xml'
 scroll_xml = 'protocols/gemwm-scroll-v1.xml'
+app_menu_xml = 'protocols/gemwm-app-menu-v1.xml'
 
 # Headers for the compositor.
 server_protocols = []
-foreach p : [xdg_shell_xml, layer_shell_xml, scroll_xml]
+foreach p : [xdg_shell_xml, layer_shell_xml, scroll_xml, app_menu_xml]
 	server_protocols += custom_target(
 		p.underscorify() + '_server_h',
 		input: p,
@@ -44,16 +45,20 @@ foreach p : [xdg_shell_xml, layer_shell_xml, scroll_xml]
 		command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
 	)
 endforeach
-# Our own protocol's glue code, for the compositor side.
-server_protocols += custom_target('gemwm_scroll_server_c',
-	input: scroll_xml,
-	output: 'gemwm-scroll-v1-server-protocol.c',
-	command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
-)
+# Our own protocols' glue code, for the compositor side.
+foreach p : [scroll_xml, app_menu_xml]
+	server_protocols += custom_target(
+		p.underscorify() + '_server_c',
+		input: p,
+		output: '@BASENAME@-server-protocol.c',
+		command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+	)
+endforeach
 
 # Headers and glue code for clients (the menu bar).
 client_protocols = []
-foreach p : [xdg_shell_xml, viewporter_xml, layer_shell_xml, scroll_xml]
+foreach p : [xdg_shell_xml, viewporter_xml, layer_shell_xml, scroll_xml,
+		app_menu_xml]
 	client_protocols += custom_target(
 		p.underscorify() + '_client_h',
 		input: p,
@@ -78,6 +83,7 @@ executable(
 		'src/tile.c',
 		'src/scroll.c',
 		'src/scrollbar.c',
+		'src/appmenu.c',
 		'src/ipc.c',
 		'src/config.c',
 		'src/frame.c',
@@ -129,9 +135,10 @@ webkit = dependency('webkitgtk-6.0', required: false)
 if webkit.found()
 	executable(
 		'gemweb',
-		['browser/gemweb.c', client_protocols],
+		['browser/gemweb.c', 'lib/app-menu.c', client_protocols],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
 			wayland_client, cairo],
+		include_directories: 'lib',
 		install: true,
 	)
 	install_data('browser/gemweb.desktop',
@@ -151,10 +158,11 @@ if gtk4.found()
 	icondir = get_option('datadir') / 'gemwm' / 'icons'
 	executable(
 		'gemwm-bluetooth',
-		['bluetooth/gemwm-bluetooth.c', client_protocols],
+		['bluetooth/gemwm-bluetooth.c', 'lib/app-menu.c', client_protocols],
 		dependencies: [gtk4, dependency('gtk4-wayland'), dependency('gio-unix-2.0'),
 			wayland_client, cairo],
 		c_args: ['-DICON_DIR="@0@"'.format(get_option('prefix') / icondir)],
+		include_directories: 'lib',
 		install: true,
 	)
 	install_data('bluetooth/icons/bluetooth.png', 'bluetooth/icons/bluetooth-off.png',

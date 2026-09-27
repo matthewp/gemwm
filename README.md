@@ -70,6 +70,17 @@ Bluetooth, the battery and the clock. Click the clock to switch between
 24-hour and 12-hour time. The battery shows a bolt on mains power, and its
 charge turns inverted at 10% or less.
 
+As in GEM, the menu bar belongs to what's in front. With a window focused,
+it shows **Desk**, a menu named after the window's application (from its
+`.desktop` file: Firefox, Foot...), and **Options**. That menu has Close
+Window, Full Size (checked when it is), and Move to Workspace. GemWM's own
+applications add their menus after it: GemWeb's File, View and Go, and
+Bluetooth's File, with its On/Off merged into the top of Options. Any
+application can do the same with the `gemwm-app-menu-v1` Wayland protocol
+(`protocols/gemwm-app-menu-v1.xml`). With no window focused, the bar shows the desktop's menus: Desk, File, View and
+Options. Logout, Restart and Shutdown are at the bottom of Desk, so they're
+always there.
+
 The menus are built in, and `~/.config/gemwm/menu` changes them. You only
 write what you want to change: a section replaces the built-in menu with the
 same name, and every other menu stays as it is.
