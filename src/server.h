@@ -1,6 +1,7 @@
 #ifndef GEMWM_SERVER_H
 #define GEMWM_SERVER_H
 
+#include <cairo.h>
 #include <stdbool.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_scene.h>
@@ -65,6 +66,15 @@ struct server {
 	enum { DIM_OFF, DIM_TILING, DIM_ALWAYS } dim; /* grey out unfocused windows */
 	float dim_opacity;
 
+	/* The desktop background (desktop.c): a colour or the ST's dither,
+	 * with an image over it if one is set. */
+	uint32_t desktop_color;
+	bool desktop_dither;
+	char *desktop_image;              /* path, NULL for none */
+	enum image_mode { IMAGE_FILL, IMAGE_FIT, IMAGE_CENTER, IMAGE_TILE,
+		IMAGE_STRETCH } desktop_image_mode;
+	cairo_surface_t *desktop_picture; /* desktop_image, loaded */
+
 	/* Window cycling (Super+Tab): the windows in most-recently-used order
 	 * as it started, walked while the modifier stays down. */
 	struct view **cycle_views;
@@ -123,7 +133,7 @@ struct output {
 	struct wl_list link;
 	struct server *server;
 	struct wlr_output *wlr_output;
-	struct wlr_scene_buffer *desktop; /* background pattern */
+	struct wlr_scene_buffer *desktop; /* the background (desktop.c) */
 	struct wlr_box usable_area; /* layout coords, minus panels like the menu bar */
 	struct wl_listener frame;
 	struct wl_listener request_state;
@@ -311,5 +321,7 @@ bool output_usable_area_at(struct server *server, double lx, double ly,
 
 /* desktop.c */
 void desktop_update_output(struct output *output);
+bool desktop_parse_color(const char *value, uint32_t *argb, bool *dither);
+void desktop_configure(struct server *server);
 
 #endif

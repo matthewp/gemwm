@@ -1,11 +1,13 @@
 /*
- * ~/.config/gemwm/config: key bindings and the focus highlight.
+ * ~/.config/gemwm/config: key bindings, the focus highlight, the layout,
+ * and the desktop background.
  *
  * The built-in defaults below are loaded first; the user's file then
  * changes them one key at a time ("Key = none" removes a binding). A
  * binding's action is a command in the control socket's language (see
  * ipc.c), so a key can do anything `gemwm msg` can.
  */
+#define _GNU_SOURCE /* asprintf */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,9 @@ static const char default_config[] =
 	"Super+Shift+Tab = cycle-windows prev\n"
 	"Super+T = exec ${TERMINAL:-gemwm-terminal}\n"
 	"Super+B = exec gtk-launch \"$(xdg-settings get default-web-browser)\"\n"
+	"Print = exec gemwm-screenshot screen\n"
+	"Shift+Print = exec gemwm-screenshot area\n"
+	"Alt+Print = exec gemwm-screenshot window\n"
 	"Super+1 = workspace 1\n"
 	"Super+2 = workspace 2\n"
 	"Super+3 = workspace 3\n"
@@ -85,7 +90,12 @@ static const char default_config[] =
 	"[layout]\n"
 	"mode = window\n"
 	"gap = 8\n"
-	"column-width = 0.5\n";
+	"column-width = 0.5\n"
+	"\n"
+	"[desktop]\n"
+	"color = green\n"
+	"image =\n"
+	"image-mode = fill\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -259,6 +269,32 @@ static void parse(struct server *server, FILE *f, const char *name) {
 				strcmp(key, "column-width") == 0) {
 			double w = strtod(value, NULL);
 			server->column_width = w < 0.1 ? 0.1 : w > 1 ? 1 : w;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "color") == 0) {
+			if (!desktop_parse_color(value, &server->desktop_color,
+					&server->desktop_dither)) {
+				wlr_log(WLR_ERROR, "%s:%d: colours are a name (green, blue, "
+					"grey...), mono, or like #00ff00", name, lineno);
+			}
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "image") == 0) {
+			free(server->desktop_image);
+			server->desktop_image = NULL;
+			const char *home = getenv("HOME");
+			if (value[0] == '~' && value[1] == '/' && home != NULL) {
+				if (asprintf(&server->desktop_image, "%s%s", home, value + 1) < 0) {
+					server->desktop_image = NULL;
+				}
+			} else if (value[0] != '\0') {
+				server->desktop_image = strdup(value);
+			}
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "image-mode") == 0) {
+			server->desktop_image_mode =
+				strcmp(value, "fit") == 0 ? IMAGE_FIT :
+				strcmp(value, "center") == 0 ? IMAGE_CENTER :
+				strcmp(value, "tile") == 0 ? IMAGE_TILE :
+				strcmp(value, "stretch") == 0 ? IMAGE_STRETCH : IMAGE_FILL;
 		} else if (strcmp(section, "clock") != 0 &&
 				strcmp(section, "battery") != 0) { /* the menu bar's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);
@@ -290,6 +326,7 @@ void config_load(struct server *server) {
 	server->mode_configured = true;
 	highlight_update(server);
 	tile_arrange(server); /* the gap may have changed */
+	desktop_configure(server);
 }
 
 void config_finish(struct server *server) {
@@ -298,6 +335,8 @@ void config_finish(struct server *server) {
 	}
 	free(server->bindings);
 	server->bindings = NULL;
+	free(server->desktop_image);
+	server->desktop_image = NULL;
 	server->n_bindings = 0;
 }
 

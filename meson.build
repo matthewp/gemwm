@@ -21,6 +21,8 @@ wayland_client = dependency('wayland-client')
 wayland_protos = dependency('wayland-protocols')
 xkbcommon = dependency('xkbcommon')
 cairo = dependency('cairo')
+gdk_pixbuf = dependency('gdk-pixbuf-2.0')
+libm = meson.get_compiler('c').find_library('m')
 libdrm = dependency('libdrm').partial_dependency(compile_args: true, includes: true)
 
 wayland_scanner = find_program(
@@ -91,7 +93,8 @@ executable(
 		'src/cairo_buffer.c',
 		server_protocols,
 	],
-	dependencies: [wlroots, wayland_server, xkbcommon, cairo, libdrm],
+	dependencies: [wlroots, wayland_server, xkbcommon, cairo, libdrm, gdk_pixbuf,
+		libm],
 	install: true,
 )
 
@@ -102,8 +105,8 @@ executable(
 	install: true,
 )
 
-install_data('session/gemwm-session', install_dir: get_option('bindir'),
-	install_mode: 'rwxr-xr-x')
+install_data('session/gemwm-session', 'session/gemwm-screenshot',
+	install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')
 configure_file(
 	input: 'session/gemwm.desktop.in',
 	output: 'gemwm.desktop',

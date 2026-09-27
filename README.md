@@ -1,5 +1,7 @@
 # GemWM
 
+![GemWM: the GEM menu bar, a terminal and the Bluetooth window on the green desktop](docs/screenshot.png)
+
 A Wayland compositor (wlroots 0.19, C) that looks like Atari TOS/GEM:
 the green colour-ST desktop, a GEM menu bar, and black and white GEM
 window frames.
@@ -41,6 +43,9 @@ stay crisp); `-S 2` forces pixel doubling.
 |---------------------|------------------------------------------|
 | Super+T, Alt+Return | open a terminal (`$TERMINAL`, or the GEM one) |
 | Super+B             | open the default browser                 |
+| Print               | screenshot of the whole screen           |
+| Shift+Print         | screenshot of an area you drag out       |
+| Alt+Print           | screenshot of the focused window         |
 | Super+Q             | close the focused window                 |
 | Super+Z             | maximize the focused window (toggle)     |
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
@@ -55,10 +60,16 @@ stay crisp); `-S 2` forces pixel doubling.
 
 While Super is held, the focused window gets a thick pink border.
 
+Screenshots (also Options > Print Screen) are taken by `gemwm-screenshot
+[screen|area|window]`, which needs `grim`, and `slurp` for areas. They're
+saved to `~/Pictures/Screenshots` (or `$GEMWM_SCREENSHOT_DIR`), copied to
+the clipboard if `wl-copy` is installed, and announced by your notification
+daemon if one is running.
+
 Environment:
 
-- `GEMWM_DESKTOP`: unset for colour-ST green, `mono` for the ST
-  high-resolution dither, or any `RRGGBB` colour.
+- `GEMWM_DESKTOP`: overrides the desktop colour from the config (see
+  [Desktop](#desktop)).
 - `GEMWM_FONT`: font for titles and menus (a fontconfig family name).
 
 ## Menu bar
@@ -195,12 +206,35 @@ each line adds or replaces one binding, and `none` removes one.
     gap = 8                              # pixels between tiles and columns
     column-width = 0.5                   # scrolling: new columns' share of the screen
 
+    [desktop]                            # see Desktop
+    color = green
+    image =
+    image-mode = fill
+
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
 `gemwm msg` command (see below), plus `exec <command>` and `quit`.
 Apply changes with `gemwm msg reload-config`; `[clock]` and `[battery]`
 are read by the clock and battery menu apps when the menu bar starts them
 (`pkill gemwm-menu; setsid gemwm-menu &`).
+
+## Desktop
+
+The desktop is set in `[desktop]` in `~/.config/gemwm/config`:
+
+    [desktop]
+    color = green             # or a name below, mono, or #rrggbb
+    image = ~/Pictures/atari.png
+    image-mode = fill         # fit, center, tile or stretch
+
+The named colours are ST palette entries, colours a real ST could show:
+`green` (the colour desktop's own), `dark-green`, `blue`, `navy`, `cyan`,
+`teal`, `amber`, `red`, `purple`, `grey`, `dark-grey`, `white` and `black`.
+`mono` is the high-resolution ST's 50% dither. An image (PNG, JPEG, WebP...)
+is drawn over the colour; `center` and `tile` show it at one desktop pixel
+per image pixel, and pixel art blown up 2x or more keeps its square pixels.
+
+Changes apply with `gemwm msg reload-config`.
 
 ## Workspaces
 

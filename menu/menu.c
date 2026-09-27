@@ -144,7 +144,7 @@ static const char default_config[] =
 	"Install Application...\n"
 	"Set Preferences...\n"
 	"Save Desktop\n"
-	"Print Screen\n"
+	"Print Screen = gemwm-screenshot screen\n"
 	"\n"
 	"[Options > Mode]\n"
 	"Window = gemwm msg mode window\n"

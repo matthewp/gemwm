@@ -1,0 +1,69 @@
+#!/bin/sh
+# gemwm-screenshot: screenshots in GemWM, with grim and slurp.
+#
+#   gemwm-screenshot [screen]   the whole screen (Print)
+#   gemwm-screenshot area       drag out an area (Shift+Print)
+#   gemwm-screenshot window     the focused window, frame and all (Alt+Print)
+#
+# Each is saved to ~/Pictures/Screenshots (or $GEMWM_SCREENSHOT_DIR), put
+# on the clipboard if wl-copy is there, and announced if a notification
+# daemon is running.
+
+# notify SUMMARY [BODY [ICON]]
+notify() {
+	command -v notify-send >/dev/null &&
+		notify-send -a GemWM ${3:+-i "$3"} "$1" "${2:-}" 2>/dev/null
+}
+
+need() {
+	if ! command -v "$1" >/dev/null; then
+		echo "gemwm-screenshot: needs $1" >&2
+		notify "Screenshots need $1"
+		exit 1
+	fi
+}
+
+need grim
+[ "${1:-screen}" = area ] && need slurp
+
+case "${1:-screen}" in
+screen)
+	geometry=
+	;;
+area)
+	# Escape or a click without dragging cancels.
+	geometry=$(slurp) || exit 0
+	;;
+window)
+	# The focused window's frame, from the control socket's window list.
+	geometry=$(gemwm msg windows | grep -oE \
+		'"focused":true,"tiled":[a-z]+,"maximized":[a-z]+,"x":-?[0-9]+,"y":-?[0-9]+,"width":[0-9]+,"height":[0-9]+' |
+		sed -E 's/.*"x":(-?[0-9]+),"y":(-?[0-9]+),"width":([0-9]+),"height":([0-9]+)/\1,\2 \3x\4/')
+	if [ -z "$geometry" ]; then
+		notify "No window to take"
+		exit 1
+	fi
+	;;
+*)
+	echo "usage: gemwm-screenshot [screen|area|window]" >&2
+	exit 2
+	;;
+esac
+
+dir=${GEMWM_SCREENSHOT_DIR:-$HOME/Pictures/Screenshots}
+mkdir -p "$dir" || exit 1
+base="$dir/Screenshot $(date '+%Y-%m-%d %H-%M-%S')"
+file="$base.png"
+n=2
+while [ -e "$file" ]; do # two in one second
+	file="$base ($n).png"
+	n=$((n + 1))
+done
+if [ -n "$geometry" ]; then
+	grim -g "$geometry" "$file" || exit 1
+else
+	grim "$file" || exit 1
+fi
+
+command -v wl-copy >/dev/null && wl-copy --type image/png < "$file"
+notify "Screenshot saved" "$file" "$file"
