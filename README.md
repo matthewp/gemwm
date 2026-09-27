@@ -214,3 +214,9 @@ with `$GEMWEB_SEARCH` (`%s` marks the query). Downloads go to
 - Closer (top left) closes, fuller (top right) toggles full screen size.
 - Scroll arrows send wheel scrolls to the application.
 - Clicking a background window only brings it to the top.
+
+## License
+
+BSD 3-Clause, see [LICENSE](LICENSE). The vendored
+`protocols/wlr-layer-shell-unstable-v1.xml` keeps its own license (in the
+file).
