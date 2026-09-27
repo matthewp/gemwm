@@ -51,6 +51,12 @@ void spawn(const char *cmd) {
 	pid_t pid = fork();
 	if (pid == 0) {
 		setsid();
+		/* The event loop blocks SIGTERM and SIGINT to receive them (see
+		 * main); a blocked mask is inherited, so unblock them for the
+		 * program, or it could never be told to quit. */
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
 			_exit(127);
