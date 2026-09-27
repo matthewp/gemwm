@@ -74,10 +74,21 @@ struct server {
 	enum image_mode { IMAGE_FILL, IMAGE_FIT, IMAGE_CENTER, IMAGE_TILE,
 		IMAGE_STRETCH } desktop_image_mode;
 	cairo_surface_t *desktop_picture; /* desktop_image, loaded */
+
+	/* [font], for titles and everything GemWM starts (via GEMWM_FONT and
+	 * GEMWM_FONT_SIZE); NULL and 0 when the config doesn't say. */
+	char *font_family;
+	int font_size;
 	/* Shown as an ST would (dither.c), in big pixels of pixel_size. */
-	enum dither_palette { DITHER_OFF, DITHER_ST, DITHER_ST16 } desktop_palette;
+	enum dither_palette { DITHER_OFF, DITHER_ST, DITHER_ST16, DITHER_ATARI16 }
+		desktop_palette;
 	enum dither_style { DITHER_DIFFUSE, DITHER_ORDERED } desktop_dither_style;
 	int desktop_pixel_size;
+	int desktop_res_w, desktop_res_h; /* instead of pixel_size; 0 if not */
+	/* A black pattern over the colour (desktop.c). */
+	enum desktop_pattern { PATTERN_NONE, PATTERN_DOTS, PATTERN_LINES,
+		PATTERN_VLINES, PATTERN_CROSSHATCH, PATTERN_DIAGONAL,
+		PATTERN_CHECKERBOARD, PATTERN_BRICKS } desktop_pattern;
 
 	/* Window cycling (Super+Tab): the windows in most-recently-used order
 	 * as it started, walked while the modifier stays down. */
@@ -327,7 +338,7 @@ bool output_usable_area_at(struct server *server, double lx, double ly,
 void desktop_update_output(struct output *output);
 bool desktop_parse_color(const char *value, uint32_t *argb, bool *mono);
 void desktop_configure(struct server *server);
-void dither_surface(cairo_surface_t *surface, int block,
+void dither_surface(cairo_surface_t *surface, double block,
 	enum dither_palette palette, enum dither_style style);
 
 #endif

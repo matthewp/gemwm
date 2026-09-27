@@ -71,7 +71,8 @@ Environment:
 
 - `GEMWM_DESKTOP`: overrides the desktop colour from the config (see
   [Desktop](#desktop)).
-- `GEMWM_FONT`: font for titles and menus (a fontconfig family name).
+- `GEMWM_FONT`, `GEMWM_FONT_SIZE`: the font, if `[font]` in the config
+  doesn't set it (see [Font](#font)).
 
 ## Menu bar
 
@@ -135,6 +136,7 @@ ones you want to keep), and an empty section removes them all. The
 defaults:
 
     [Menu Apps]
+    Wi-Fi = exec gemwm-wifi --menu-app
     Bluetooth = exec gemwm-bluetooth --menu-app
     Volume = exec gemwm-volume --menu-app
     Battery = exec gemwm-battery
@@ -220,6 +222,12 @@ each line adds or replaces one binding, and `none` removes one.
     dither = off
     dither-style = diffuse
     pixel-size = 2
+    resolution = off
+    pattern = none
+
+    [font]                               # see Font
+    family = Atari ST 8x16
+    size = 16
 
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
@@ -227,6 +235,17 @@ Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 Apply changes with `gemwm msg reload-config`; `[clock]` and `[battery]`
 are read by the clock and battery menu apps when the menu bar starts them
 (`pkill gemwm-menu; setsid gemwm-menu &`).
+
+## Wi-Fi
+
+`gemwm-wifi` is a menu app for iwd: signal bars in the bar, greyed when
+Wi-Fi is off, with what it's connected to in the tooltip. A click opens a
+window listing the networks in range, strongest first, with their signal,
+a lock on those with a password, and Connect, Disconnect and Forget (for
+saved ones); turn Wi-Fi on and off, and Scan. A new network's password is
+asked for in a GEM alert box (Ctrl+V pastes). Enterprise (802.1X) networks
+need setting up in iwd itself. Your user needs to be allowed to talk to
+iwd: on Arch, being in `wheel` or `network` is enough.
 
 ## Volume
 
@@ -259,16 +278,42 @@ To see the desktop as an ST would have shown it, turn on dithering:
 
     [desktop]
     dither = st16             # st: the ST's 512 colours; st16: 16 of them,
-                              # picked for the picture, as in low-res; off
+                              # picked for the picture, as in low-res;
+                              # atari16: a fixed, bold 16; off
     dither-style = diffuse    # diffuse: a fine speckle; ordered: the
                               # regular crosshatch of 80s computer art
     pixel-size = 2            # how big its pixels are, in desktop pixels
+    resolution = 640x400      # or: size them so the screen is about this
+                              # many across and down (overrides pixel-size)
+
+`atari16` with `resolution = 640x400` is the busy, colourful look of a
+photo on an ST in medium resolution.
 
 The picture is redrawn in big pixels, in those colours, with patterns of
 dots for the shades between them. It's done once, when the desktop
 changes, so it costs nothing while you work, and windows stay sharp.
 
+A GEM fill pattern can go over the colour, in black:
+
+    [desktop]
+    pattern = dots            # lines, vertical-lines, crosshatch, diagonal,
+                              # checkerboard, bricks; none
+
 Changes apply with `gemwm msg reload-config`.
+
+## Font
+
+Titles, menus and GemWM's own applications use the Atari ST's 8x16 system
+font, at 16, the size it's drawn in whole pixels. If it's a bit much:
+
+    [font]
+    family = monospace        # any fontconfig family
+    size = 14                 # 14 unless it's the ST font, which is 16
+
+Window titles change on `gemwm msg reload-config`; programs already
+running (the menu bar, GemWeb, Bluetooth...) keep their font until they're
+started again (`pkill gemwm-menu; setsid gemwm-menu &` for the bar). The
+terminal's font is set separately, in its theme.
 
 ## Workspaces
 

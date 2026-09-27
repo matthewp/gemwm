@@ -8,8 +8,6 @@
 #include <cairo.h>
 #include <gtk/gtk.h>
 
-#define GEM_FONT_SIZE 14
-
 void gem_black(cairo_t *cr);
 void gem_white(cairo_t *cr);
 void gem_fill(cairo_t *cr, double x, double y, double w, double h);

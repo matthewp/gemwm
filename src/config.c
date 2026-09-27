@@ -102,7 +102,9 @@ static const char default_config[] =
 	"image-mode = fill\n"
 	"dither = off\n"
 	"dither-style = diffuse\n"
-	"pixel-size = 2\n";
+	"pixel-size = 2\n"
+	"resolution = off\n"
+	"pattern = none\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -305,7 +307,8 @@ static void parse(struct server *server, FILE *f, const char *name) {
 		} else if (strcmp(section, "desktop") == 0 &&
 				strcmp(key, "dither") == 0) {
 			server->desktop_palette = strcmp(value, "st") == 0 ? DITHER_ST :
-				strcmp(value, "st16") == 0 ? DITHER_ST16 : DITHER_OFF;
+				strcmp(value, "st16") == 0 ? DITHER_ST16 :
+				strcmp(value, "atari16") == 0 ? DITHER_ATARI16 : DITHER_OFF;
 		} else if (strcmp(section, "desktop") == 0 &&
 				strcmp(key, "dither-style") == 0) {
 			server->desktop_dither_style = strcmp(value, "ordered") == 0 ?
@@ -314,6 +317,32 @@ static void parse(struct server *server, FILE *f, const char *name) {
 				strcmp(key, "pixel-size") == 0) {
 			int size = atoi(value);
 			server->desktop_pixel_size = size < 1 ? 1 : size > 16 ? 16 : size;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "resolution") == 0) {
+			/* "640x400": big pixels sized for that many across and down. */
+			int rw = 0, rh = 0;
+			if (sscanf(value, "%dx%d", &rw, &rh) != 2 || rw < 16 || rh < 16) {
+				rw = rh = 0;
+			}
+			server->desktop_res_w = rw;
+			server->desktop_res_h = rh;
+		} else if (strcmp(section, "desktop") == 0 &&
+				strcmp(key, "pattern") == 0) {
+			static const char *const names[] = { "none", "dots", "lines",
+				"vertical-lines", "crosshatch", "diagonal", "checkerboard",
+				"bricks" };
+			server->desktop_pattern = PATTERN_NONE;
+			for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+				if (strcmp(value, names[i]) == 0) {
+					server->desktop_pattern = (enum desktop_pattern)i;
+				}
+			}
+		} else if (strcmp(section, "font") == 0 && strcmp(key, "family") == 0) {
+			free(server->font_family);
+			server->font_family = value[0] != '\0' ? strdup(value) : NULL;
+		} else if (strcmp(section, "font") == 0 && strcmp(key, "size") == 0) {
+			int size = atoi(value);
+			server->font_size = size < 6 ? 0 : size > 48 ? 48 : size;
 		} else if (strcmp(section, "clock") != 0 &&
 				strcmp(section, "battery") != 0) { /* the menu bar's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);
@@ -321,6 +350,8 @@ static void parse(struct server *server, FILE *f, const char *name) {
 	}
 	free(line);
 }
+
+static void font_configure(struct server *server);
 
 void config_load(struct server *server) {
 	config_finish(server);
@@ -346,6 +377,41 @@ void config_load(struct server *server) {
 	highlight_update(server);
 	tile_arrange(server); /* the gap may have changed */
 	desktop_configure(server);
+	font_configure(server);
+}
+
+/* The ST's own system font, installed with GemWM (extras/fonts). It's
+ * drawn in whole pixels at 16. */
+#define ST_FONT "Atari ST 8x16"
+
+/* [font] in the config, else GEMWM_FONT from the session's environment,
+ * else the ST font; the size likewise, else 16 for the ST font and 14 for
+ * others. It goes to everything we start through the environment, and
+ * the window titles are drawn again. Running programs keep theirs. */
+static void font_configure(struct server *server) {
+	static char *env_family, *env_size;
+	static bool saved;
+	if (!saved) {
+		saved = true;
+		env_family = getenv("GEMWM_FONT") ? strdup(getenv("GEMWM_FONT")) : NULL;
+		env_size = getenv("GEMWM_FONT_SIZE") ? strdup(getenv("GEMWM_FONT_SIZE")) :
+			NULL;
+	}
+	const char *family = server->font_family ? server->font_family :
+		env_family ? env_family : ST_FONT;
+	int size = server->font_size ? server->font_size :
+		env_size ? atoi(env_size) : strcmp(family, ST_FONT) == 0 ? 16 : 14;
+	char size_text[16];
+	snprintf(size_text, sizeof(size_text), "%d", size > 0 ? size : 14);
+	setenv("GEMWM_FONT", family, 1);
+	setenv("GEMWM_FONT_SIZE", size_text, 1);
+
+	struct view *view;
+	wl_list_for_each(view, &server->views, link) {
+		free(view->drawn_title); /* redraw, in the new font */
+		view->drawn_title = NULL;
+		view_update_frame(view);
+	}
 }
 
 void config_finish(struct server *server) {
@@ -356,6 +422,9 @@ void config_finish(struct server *server) {
 	server->bindings = NULL;
 	free(server->desktop_image);
 	server->desktop_image = NULL;
+	free(server->font_family);
+	server->font_family = NULL;
+	server->font_size = 0;
 	server->n_bindings = 0;
 }
 

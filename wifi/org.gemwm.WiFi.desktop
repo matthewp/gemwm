@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Wi-Fi
+Comment=Connect to Wi-Fi networks
+Exec=gemwm-wifi
+Categories=Settings;
+StartupNotify=false

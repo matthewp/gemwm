@@ -260,10 +260,12 @@ static void draw_title(cairo_t *cr, const struct frame_layout *l,
 		return;
 	}
 
+	/* [font] in the config, which puts it in our environment. */
 	const char *font = getenv("GEMWM_FONT");
+	const char *size = getenv("GEMWM_FONT_SIZE");
 	cairo_select_font_face(cr, font ? font : "monospace",
 		CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(cr, 14);
+	cairo_set_font_size(cr, size && atoi(size) > 0 ? atoi(size) : 14);
 	cairo_font_options_t *opts = cairo_font_options_create();
 	cairo_font_options_set_antialias(opts, CAIRO_ANTIALIAS_NONE);
 	cairo_font_options_set_hint_style(opts, CAIRO_HINT_STYLE_FULL);

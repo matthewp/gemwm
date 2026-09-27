@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Volume
+Comment=Sound volume and devices
+Exec=gemwm-volume
+Categories=Settings;
+StartupNotify=false

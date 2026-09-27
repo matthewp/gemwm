@@ -31,11 +31,12 @@
 #define TAB_MIN_W 90
 #define TAB_MAX_W 220
 #define PLUS_W 24      /* the "+" new-tab box */
-#define FONT_SIZE 14
+#define FONT_SIZE font_size /* GEMWM_FONT_SIZE, else 14 */
 #define BUTTONS 4      /* back, forward, reload, home */
 #define DEFAULT_HOME "https://www.google.com/"
 
 static const char *font_family;
+static int font_size;
 
 struct browser;
 
@@ -1287,6 +1288,8 @@ static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 
 int main(int argc, char *argv[]) {
 	font_family = g_getenv("GEMWM_FONT") ? g_getenv("GEMWM_FONT") : "monospace";
+	font_size = g_getenv("GEMWM_FONT_SIZE") ? atoi(g_getenv("GEMWM_FONT_SIZE")) : 0;
+	font_size = font_size > 0 ? font_size : 14;
 	GtkApplication *app = gtk_application_new("org.gemwm.GemWeb",
 		G_APPLICATION_HANDLES_COMMAND_LINE);
 	g_signal_connect(app, "command-line", G_CALLBACK(command_line), NULL);

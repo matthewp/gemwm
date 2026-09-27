@@ -65,16 +65,20 @@ void gem_bitmap(cairo_t *cr, const char *const rows[], int n_rows, int x, int y)
 
 void gem_draw_pixelated(cairo_t *cr, int w, int h,
 		void (*paint)(cairo_t *cr, int w, int h, void *data), void *data) {
+	/* [font] in GemWM's config reaches us as GEMWM_FONT(_SIZE). */
 	static const char *font;
+	static int size;
 	if (font == NULL) {
 		font = g_getenv("GEMWM_FONT") ? g_getenv("GEMWM_FONT") : "monospace";
+		size = g_getenv("GEMWM_FONT_SIZE") ? atoi(g_getenv("GEMWM_FONT_SIZE")) : 0;
+		size = size > 0 ? size : 14;
 	}
 	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
 	cairo_t *c = cairo_create(img);
 	cairo_set_antialias(c, CAIRO_ANTIALIAS_NONE);
 	cairo_select_font_face(c, font, CAIRO_FONT_SLANT_NORMAL,
 		CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(c, GEM_FONT_SIZE);
+	cairo_set_font_size(c, size);
 	cairo_font_options_t *opts = cairo_font_options_create();
 	cairo_font_options_set_antialias(opts, CAIRO_ANTIALIAS_NONE);
 	cairo_font_options_set_hint_style(opts, CAIRO_HINT_STYLE_FULL);

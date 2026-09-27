@@ -172,6 +172,22 @@ if gtk4.found()
 	)
 	install_data('bluetooth/icons/bluetooth.png', 'bluetooth/icons/bluetooth-off.png',
 		install_dir: icondir)
+	# Named after the app IDs, so the menu bar finds their names.
+	install_data('bluetooth/org.gemwm.Bluetooth.desktop',
+		'wifi/org.gemwm.WiFi.desktop',
+		install_dir: get_option('datadir') / 'applications')
+
+	# gemwm-wifi: the Wi-Fi menu app and window. It talks to iwd over
+	# D-Bus, so there's nothing else to build against.
+	executable(
+		'gemwm-wifi',
+		['wifi/gemwm-wifi.c', 'lib/app-menu.c', 'lib/gem-draw.c',
+			client_protocols],
+		dependencies: [gtk4, dependency('gtk4-wayland'), dependency('gio-unix-2.0'),
+			wayland_client, cairo],
+		include_directories: 'lib',
+		install: true,
+	)
 
 	# gemwm-volume: the volume menu app, window and keys. Also needs
 	# libpulse (PulseAudio, or PipeWire's PulseAudio server).
@@ -187,5 +203,7 @@ if gtk4.found()
 			include_directories: 'lib',
 			install: true,
 		)
+		install_data('volume/org.gemwm.Volume.desktop',
+			install_dir: get_option('datadir') / 'applications')
 	endif
 endif

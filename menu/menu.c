@@ -71,7 +71,7 @@
 #define ITEM_H 18      /* one menu row */
 #define TITLE_PAD 8    /* space either side of a bar title */
 #define ITEM_PAD 16    /* GEM indents items by two characters */
-#define FONT_SIZE 14
+#define FONT_SIZE st.font_size /* GEMWM_FONT_SIZE, else 14 */
 #define MAX_MENUS 16
 #define MAX_ITEMS 32
 #define ARROW_W 12     /* room for a submenu's arrow */
@@ -164,6 +164,7 @@ static const char default_config[] =
 	"# Programs at the right of the bar, left to right; see the top of\n"
 	"# menu.c.\n"
 	"[" APPS_SECTION "]\n"
+	"Wi-Fi = exec gemwm-wifi --menu-app\n"
 	"Bluetooth = exec gemwm-bluetooth --menu-app\n"
 	"Volume = exec gemwm-volume --menu-app\n"
 	"Battery = exec gemwm-battery\n"
@@ -270,6 +271,7 @@ static struct {
 	struct wl_surface *pointer_surface;
 	double px, py;
 	const char *font;
+	int font_size;
 	int quiet_title; /* title just clicked shut: no hover-open until left */
 
 	/* Workspaces, from the control socket. ws_count 0: no buttons. */
@@ -2342,6 +2344,8 @@ static const struct wl_registry_listener registry_listener = {
 int main(void) {
 	st.open = -1;
 	st.font = getenv("GEMWM_FONT") ? getenv("GEMWM_FONT") : "monospace";
+	st.font_size = getenv("GEMWM_FONT_SIZE") ? atoi(getenv("GEMWM_FONT_SIZE")) : 0;
+	st.font_size = st.font_size > 0 ? st.font_size : 14;
 	st.quiet_title = -1;
 	load_config();
 

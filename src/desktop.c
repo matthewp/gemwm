@@ -135,6 +135,29 @@ static void draw_picture(cairo_t *cr, cairo_surface_t *pic,
 	cairo_restore(cr);
 }
 
+/* Whether a desktop pixel is black in the pattern: a GEM fill pattern,
+ * repeating every few pixels. */
+static bool pattern_at(enum desktop_pattern pattern, int x, int y) {
+	switch (pattern) {
+	case PATTERN_DOTS:
+		return x % 8 == 0 && y % 8 == 0;
+	case PATTERN_LINES:
+		return y % 4 == 3;
+	case PATTERN_VLINES:
+		return x % 4 == 3;
+	case PATTERN_CROSSHATCH:
+		return x % 8 == 7 || y % 8 == 7;
+	case PATTERN_DIAGONAL:
+		return (x + y) % 6 == 5;
+	case PATTERN_CHECKERBOARD:
+		return ((x / 4) + (y / 4)) % 2 == 1;
+	case PATTERN_BRICKS: /* 16x8 bricks, each row half a brick along */
+		return y % 8 == 7 || (x + (y / 8) % 2 * 8) % 16 == 15;
+	default:
+		return false;
+	}
+}
+
 void desktop_update_output(struct output *output) {
 	struct server *server = output->server;
 	struct wlr_output *wlr_output = output->wlr_output;
@@ -156,10 +179,12 @@ void desktop_update_output(struct output *output) {
 	for (int y = 0; y < h; y++) {
 		int dy = (int)(y / scale);
 		for (int x = 0; x < w; x++) {
-			/* The dither's pixels are desktop pixels, not device ones. */
-			px[y * stride + x] = !server->desktop_mono ?
-				server->desktop_color :
-				(((int)(x / scale) + dy) & 1) ? 0xffffffff : 0xff000000;
+			/* Patterns are in desktop pixels, not device ones. */
+			int dx = (int)(x / scale);
+			px[y * stride + x] = server->desktop_mono ?
+				((dx + dy) & 1 ? 0xffffffff : 0xff000000) :
+				pattern_at(server->desktop_pattern, dx, dy) ? 0xff000000 :
+				server->desktop_color;
 		}
 	}
 	cairo_surface_mark_dirty(surface);
@@ -170,8 +195,14 @@ void desktop_update_output(struct output *output) {
 		cairo_destroy(cr);
 	}
 	if (server->desktop_palette != DITHER_OFF) {
-		dither_surface(surface, (int)lround(server->desktop_pixel_size * scale),
-			server->desktop_palette, server->desktop_dither_style);
+		/* A resolution sizes the big pixels to cover the screen with that
+		 * many (keeping them square); otherwise they're pixel-size. */
+		double block = server->desktop_res_w > 0 ?
+			fmax((double)w / server->desktop_res_w,
+				(double)h / server->desktop_res_h) :
+			server->desktop_pixel_size * scale;
+		dither_surface(surface, block, server->desktop_palette,
+			server->desktop_dither_style);
 	}
 	cairo_surface_flush(surface);
 
