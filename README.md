@@ -65,9 +65,10 @@ Environment:
 
 Hover a title to drop its menu; click an item to run it. Click the title
 (or anywhere outside) to close it again; a click outside never reaches the
-window underneath, as on the ST. Click the clock to switch between 24-hour
-and 12-hour time. On a laptop the battery sits left of the clock: a bolt
-means it's on mains power, and the charge turns inverted at 10% or less.
+window underneath, as on the ST. At the right are the menu apps (below):
+Bluetooth, the battery and the clock. Click the clock to switch between
+24-hour and 12-hour time. The battery shows a bolt on mains power, and its
+charge turns inverted at 10% or less.
 
 The menus are built in, and `~/.config/gemwm/menu` changes them. You only
 write what you want to change: a section replaces the built-in menu with the
@@ -100,6 +101,56 @@ Desk: **Internet > Web Browser** opens GemWeb (or your default browser if
 GemWeb isn't installed), and **Tools > Terminal** opens `$TERMINAL` (foot
 if unset). The menu bar reads
 its config at startup; restart it with `pkill gemwm-menu; setsid gemwm-menu &`.
+
+### Menu apps
+
+Everything at the right of the bar is a menu app: a small program with an
+item there. They're listed in the same file, under `[Menu Apps]`, left to
+right. As with menus, your section replaces the built-in one (so list the
+ones you want to keep), and an empty section removes them all. The
+defaults:
+
+    [Menu Apps]
+    Bluetooth = exec gemwm-bluetooth --menu-app
+    Battery = exec gemwm-battery
+    Clock = exec gemwm-clock          # --12h or --24h, --seconds
+
+`gemwm-clock` and `gemwm-battery` also take their settings from `[clock]`
+and `[battery]` in `~/.config/gemwm/config` (see Key bindings).
+
+A menu app runs as long as the bar does, and talks over its stdin and
+stdout:
+
+- Each line it prints replaces its item: `text`, `icon<TAB>text`, or
+  `icon<TAB>text<TAB>inverse` for white text on black (as the battery shows
+  when it's low). An empty line hides the item.
+- The icon is a PNG file, or an inline 1-bit picture, `bitmap:WxH:hex`:
+  each row in hex, eight pixels to a byte, the first pixel in the top bit
+  and 1 for black. Either way it's drawn 1:1, as it would be on the ST.
+- A click on the item sends it `click 1` (`2` middle, `3` right).
+- When its stdin closes, the bar has gone, and it should exit.
+
+If an app exits after running at least 10 seconds, it's restarted; one that
+dies right away is left alone (look in the session log).
+
+A shell script is enough:
+
+    #!/bin/sh
+    # The load average, every 5 seconds; a click opens htop.
+    while :; do cut -d' ' -f1 /proc/loadavg; sleep 5; done &
+    ticker=$!
+    while read -r click; do setsid foot -e htop & done
+    kill $ticker
+
+## Bluetooth
+
+`gemwm-bluetooth` is a menu app. The bar shows the Bluetooth
+rune, greyed when Bluetooth is off, and the name of what's connected. A click
+opens a small window: turn Bluetooth on or off, **Scan** for devices, and
+**Pair**, **Connect**, **Disconnect** or **Forget** them. Pairing codes are
+shown, or asked about, in GEM alert boxes. It uses BlueZ (`bluetoothd`)
+over D-Bus and needs GTK 4 to build; without a Bluetooth adapter, there's
+no item.
 
 ## Key bindings
 
@@ -137,7 +188,8 @@ Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
 `gemwm msg` command (see below), plus `exec <command>` and `quit`.
 Apply changes with `gemwm msg reload-config`; `[clock]` and `[battery]`
-are read by the menu bar when it starts (`pkill gemwm-menu; setsid gemwm-menu &`).
+are read by the clock and battery menu apps when the menu bar starts them
+(`pkill gemwm-menu; setsid gemwm-menu &`).
 
 ## Workspaces
 

@@ -137,3 +137,26 @@ if webkit.found()
 	install_data('browser/gemweb.desktop',
 		install_dir: get_option('datadir') / 'applications')
 endif
+
+# The menu apps at the right of the bar (see menu/menu.c).
+foreach app : ['gemwm-clock', 'gemwm-battery']
+	executable(app, ['menu-apps' / app + '.c', 'menu-apps/menu-app.c'],
+		install: true)
+endforeach
+
+# gemwm-bluetooth: the Bluetooth menu app and window. Optional: needs GTK 4.
+# It talks to BlueZ over D-Bus, so there's nothing else to build against.
+gtk4 = dependency('gtk4', required: false)
+if gtk4.found()
+	icondir = get_option('datadir') / 'gemwm' / 'icons'
+	executable(
+		'gemwm-bluetooth',
+		['bluetooth/gemwm-bluetooth.c', client_protocols],
+		dependencies: [gtk4, dependency('gtk4-wayland'), dependency('gio-unix-2.0'),
+			wayland_client, cairo],
+		c_args: ['-DICON_DIR="@0@"'.format(get_option('prefix') / icondir)],
+		install: true,
+	)
+	install_data('bluetooth/icons/bluetooth.png', 'bluetooth/icons/bluetooth-off.png',
+		install_dir: icondir)
+endif

@@ -18,11 +18,29 @@
  * replaces the built-in menu of the same name; other menus stay as they
  * are. Submenus, which GEM gained with AES 3.30 on the Falcon, open to the
  * side of their item.
+ *
+ * Everything at the right of the bar (Bluetooth, the battery, the clock)
+ * is a menu app, listed under [Menu Apps]. Each is a program that runs as
+ * long as the bar does, with a socket for its stdin and stdout. Every line
+ * it prints replaces its item:
+ *
+ *   text
+ *   icon<TAB>text
+ *   icon<TAB>text<TAB>inverse     the text in white on black
+ *
+ * where icon is a PNG file, or "bitmap:WxH:hex", a 1-bit picture given as
+ * rows of bits in hex, the first pixel in the top bit and 1 for black. An
+ * empty line hides the item. A click on it sends the app "click 1" (2
+ * middle, 3 right). When stdin closes, the bar has gone and the app should
+ * exit. The bar's own directory is put first on their PATH, so GemWM's
+ * apps are found even when it runs from a build directory.
  */
 #define _GNU_SOURCE /* memfd_create */
 #include <cairo.h>
-#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <linux/input-event-codes.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +49,6 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -46,14 +63,16 @@
 #define FONT_SIZE 14
 #define MAX_MENUS 16
 #define MAX_ITEMS 32
-#define CLOCK_PAD 8    /* space right of the clock */
-#define BATTERY_PAD 8  /* space either side of the battery */
-#define BATTERY_LOW 10 /* percent at which the charge is shown inverted */
 #define ARROW_W 12     /* room for a submenu's arrow */
 #define MAX_DEPTH 6    /* menu plus nested submenus open at once */
 #define WS_PAD 6       /* space either side of a workspace number */
 #define WS_GAP 3       /* space either side of the | between numbers */
 #define MAX_WS 32      /* matches the compositor's limit */
+#define MAX_APPS 8     /* menu apps */
+#define APP_PAD 8      /* space either side of a menu app */
+#define APP_MAX_W 200  /* longer menu-app text is cut off */
+#define APP_RESTART 10 /* seconds an app must have run to be restarted */
+#define APPS_SECTION "Menu Apps"
 
 static const char default_config[] =
 	"# gemwm-menu configuration\n"
@@ -120,7 +139,14 @@ static const char default_config[] =
 	"\n"
 	"[Options > Terminal Theme]\n"
 	"Light = gemwm-terminal theme light\n"
-	"Dark = gemwm-terminal theme dark\n";
+	"Dark = gemwm-terminal theme dark\n"
+	"\n"
+	"# Programs at the right of the bar, left to right; see the top of\n"
+	"# menu.c.\n"
+	"[" APPS_SECTION "]\n"
+	"Bluetooth = exec gemwm-bluetooth --menu-app\n"
+	"Battery = exec gemwm-battery\n"
+	"Clock = exec gemwm-clock\n";
 
 struct menu;
 
@@ -138,6 +164,21 @@ struct menu {
 	int n_items;
 	int x, w;          /* title position in the bar (top-level menus) */
 	int drop_w, drop_h;
+};
+
+/* A program with an item at the right of the bar. */
+struct menu_app {
+	char *name, *command;
+	pid_t pid;
+	int fd;                /* its stdin and stdout; -1 when not running */
+	char in[1024];         /* output not yet a whole line */
+	size_t len;
+	char *text, *icon_spec; /* icon_spec: a PNG's path or "bitmap:..." */
+	cairo_surface_t *icon;
+	bool inverse;
+	int x, w;              /* where it was drawn, for clicks; w 0: hidden */
+	time_t started;
+	time_t restart_at;     /* 0: not waiting to restart */
 };
 
 /* One open drop-down: the menu itself, or a submenu beside it. */
@@ -188,16 +229,7 @@ static struct {
 	struct wl_surface *pointer_surface;
 	double px, py;
 	const char *font;
-	/* The clock, set up by [clock] in ~/.config/gemwm/config; clicking it
-	 * switches between 24h and 12h. */
-	bool clock_on, clock_24h, clock_seconds;
-	int clock_x, clock_w; /* where it was drawn, for clicks */
-	int quiet_title;      /* title just clicked shut: no hover-open until left */
-	int clock_fd;             /* timerfd that fires when the clock changes */
-	/* The battery, left of the clock: [battery] in the config. Shown only
-	 * on machines with one. */
-	bool battery_on, battery_present, battery_plugged;
-	int battery_percent;
+	int quiet_title; /* title just clicked shut: no hover-open until left */
 
 	/* Workspaces, from the control socket. ws_count 0: no buttons. */
 	/* A GEM alert box asking before a command runs. */
@@ -209,6 +241,10 @@ static struct {
 		int x, y, w, h;
 		int button_x[2], button_y, button_w[2], button_h; /* action, Cancel */
 	} alert;
+
+	struct menu_app apps[MAX_APPS];
+	int n_apps;
+	uint32_t button; /* the button being pressed, for menu apps */
 
 	int ipc_fd;
 	char ipc_in[16384];
@@ -411,6 +447,25 @@ static void load_config(void) {
 		fclose(f);
 	}
 
+	/* [Menu Apps] isn't a menu: its items are the programs to run. */
+	for (int i = 0; i < st.n_menus; i++) {
+		struct menu *m = &st.menus[i];
+		if (strcmp(m->title, APPS_SECTION) != 0) {
+			continue;
+		}
+		for (int j = 0; j < m->n_items && st.n_apps < MAX_APPS; j++) {
+			struct item *item = &m->items[j];
+			if (item->command == NULL) {
+				continue;
+			}
+			struct menu_app *a = &st.apps[st.n_apps++];
+			a->name = strdup(item->label);
+			a->command = strdup(item->command);
+			a->fd = -1;
+		}
+		clear_menu(m);
+	}
+
 	/* An emptied menu disappears from the bar. */
 	int kept = 0;
 	for (int i = 0; i < st.n_menus; i++) {
@@ -421,63 +476,6 @@ static void load_config(void) {
 		}
 	}
 	st.n_menus = kept;
-}
-
-/* [clock] and [battery] in ~/.config/gemwm/config (the compositor reads
- * the rest):
- *   [clock]    mode = 24h | 12h | off
- *              seconds = yes | no
- *   [battery]  mode = on | off */
-static void load_clock_config(void) {
-	st.clock_on = true;
-	st.clock_24h = true;
-	st.clock_seconds = false;
-	st.battery_on = true;
-
-	char path[4096];
-	const char *xdg = getenv("XDG_CONFIG_HOME");
-	const char *home = getenv("HOME");
-	if (xdg != NULL && xdg[0] != '\0') {
-		snprintf(path, sizeof(path), "%s/gemwm/config", xdg);
-	} else {
-		snprintf(path, sizeof(path), "%s/.config/gemwm/config",
-			home ? home : "");
-	}
-	FILE *f = fopen(path, "r");
-	if (f == NULL) {
-		return;
-	}
-	char *line = NULL;
-	size_t cap = 0;
-	bool in_clock = false, in_battery = false;
-	while (getline(&line, &cap, f) != -1) {
-		char *s = trim(line);
-		if (s[0] == '[') {
-			in_clock = strncmp(s, "[clock]", 7) == 0;
-			in_battery = strncmp(s, "[battery]", 9) == 0;
-			continue;
-		}
-		char *eq = strchr(s, '=');
-		if ((!in_clock && !in_battery) || s[0] == '#' || eq == NULL) {
-			continue;
-		}
-		*eq = '\0';
-		char *key = trim(s), *value = trim(eq + 1);
-		value[strcspn(value, " \t#")] = '\0'; /* a trailing # comment */
-		if (in_battery) {
-			if (strcmp(key, "mode") == 0) {
-				st.battery_on = strcmp(value, "off") != 0;
-			}
-		} else if (strcmp(key, "mode") == 0) {
-			st.clock_on = strcmp(value, "off") != 0;
-			st.clock_24h = strcmp(value, "12h") != 0;
-		} else if (strcmp(key, "seconds") == 0) {
-			st.clock_seconds = strcmp(value, "yes") == 0 ||
-				strcmp(value, "true") == 0;
-		}
-	}
-	free(line);
-	fclose(f);
 }
 
 /* Items that switch GemWM's window mode show a check mark on the current
@@ -635,13 +633,6 @@ static void layout_menus(void) {
 
 /* ---- The bar ------------------------------------------------------------ */
 
-static const char *clock_format(void) {
-	if (st.clock_24h) {
-		return st.clock_seconds ? "%H:%M:%S" : "%H:%M";
-	}
-	return st.clock_seconds ? "%l:%M:%S %p" : "%l:%M %p";
-}
-
 static void draw_bar(void);
 
 /* "1 | 2 | 3 | +", centred. The active workspace is inverted like an open
@@ -771,154 +762,236 @@ static void ipc_read(void) {
 	}
 }
 
-/* ---- Battery ------------------------------------------------------------ */
+/* ---- Menu apps ---------------------------------------------------------- */
 
-/* The first line of a sysfs attribute, or "" if it can't be read. */
-static void read_attr(const char *dir, const char *name, char *out, size_t n) {
-	char path[512];
-	snprintf(path, sizeof(path), "/sys/class/power_supply/%s/%s", dir, name);
-	out[0] = '\0';
-	FILE *f = fopen(path, "r");
-	if (f == NULL) {
+static void app_start(struct menu_app *a) {
+	int sv[2];
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
 		return;
 	}
-	if (fgets(out, (int)n, f) == NULL) {
-		out[0] = '\0';
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		dup2(sv[1], STDIN_FILENO);
+		dup2(sv[1], STDOUT_FILENO);
+		char self[4096];
+		ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+		char *slash = n > 0 ? memrchr(self, '/', n) : NULL;
+		if (slash != NULL) {
+			*slash = '\0';
+			const char *path = getenv("PATH");
+			char *new_path;
+			if (asprintf(&new_path, "%s:%s", self,
+					path ? path : "/usr/bin:/bin") > 0) {
+				setenv("PATH", new_path, 1);
+			}
+		}
+		execl("/bin/sh", "/bin/sh", "-c", a->command, (void *)NULL);
+		_exit(127);
 	}
-	out[strcspn(out, "\n")] = '\0';
-	fclose(f);
+	close(sv[1]);
+	if (pid < 0) {
+		close(sv[0]);
+		return;
+	}
+	fcntl(sv[0], F_SETFL, O_NONBLOCK);
+	a->pid = pid;
+	a->fd = sv[0];
+	a->len = 0;
+	a->started = time(NULL);
+	a->restart_at = 0;
 }
 
-static long read_long(const char *dir, const char *name) {
-	char v[32];
-	read_attr(dir, name, v, sizeof(v));
-	return v[0] != '\0' ? atol(v) : -1;
-}
-
-/* Reads the system's batteries from sysfs (a laptop's own; not a mouse's or
- * a phone's). With two, the charge is their combined one. Returns whether
- * anything changed. */
-static bool battery_update(void) {
-	bool present = false, plugged = false;
-	long now = 0, full = 0, percents = 0, count = 0;
-	DIR *d = opendir("/sys/class/power_supply");
-	struct dirent *e;
-	while (d != NULL && (e = readdir(d)) != NULL) {
-		char v[32];
-		if (e->d_name[0] == '.') {
-			continue;
-		}
-		read_attr(e->d_name, "type", v, sizeof(v));
-		if (strcmp(v, "Battery") != 0) {
-			continue;
-		}
-		read_attr(e->d_name, "scope", v, sizeof(v));
-		if (strcmp(v, "Device") == 0 || read_long(e->d_name, "present") == 0) {
-			continue;
-		}
-		present = true;
-		read_attr(e->d_name, "status", v, sizeof(v));
-		/* "Not charging" is plugged in but held, e.g. by a charge limit. */
-		if (strcmp(v, "Charging") == 0 || strcmp(v, "Full") == 0 ||
-				strcmp(v, "Not charging") == 0) {
-			plugged = true;
-		}
-		long n = read_long(e->d_name, "energy_now");
-		long f = read_long(e->d_name, "energy_full");
-		if (n < 0 || f <= 0) {
-			n = read_long(e->d_name, "charge_now");
-			f = read_long(e->d_name, "charge_full");
-		}
-		if (n >= 0 && f > 0) {
-			now += n;
-			full += f;
-		}
-		long c = read_long(e->d_name, "capacity");
-		if (c >= 0) {
-			percents += c;
-			count++;
-		}
+/* "bitmap:WxH:hex" as an image: black where a bit is set, else clear. */
+static cairo_surface_t *load_bitmap(const char *spec) {
+	int w, h, offset;
+	if (sscanf(spec, "bitmap:%dx%d:%n", &w, &h, &offset) != 2 ||
+			w <= 0 || h <= 0 || w > 256 || h > BAR_H) {
+		return NULL;
 	}
-	if (d != NULL) {
-		closedir(d);
+	const char *hex = spec + offset;
+	int row_bytes = (w + 7) / 8;
+	if (strlen(hex) != (size_t)(row_bytes * h * 2)) {
+		return NULL;
 	}
-	/* The kernel's capacity for one battery; our own sum for several. */
-	int percent = count == 1 ? (int)percents :
-		full > 0 ? (int)((now * 100 + full / 2) / full) :
-		count > 0 ? (int)(percents / count) : 0;
-	percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
-	bool changed = present != st.battery_present ||
-		plugged != st.battery_plugged || percent != st.battery_percent;
-	st.battery_present = present;
-	st.battery_plugged = plugged;
-	st.battery_percent = percent;
-	return changed;
-}
-
-/* A 1-bit battery, filled to the charge, with a lightning bolt over it on
- * mains power; then the percentage. Its right edge is at right; returns its
- * left edge. */
-static int draw_battery(cairo_t *cr, int right) {
-	enum { BODY_W = 18, BODY_H = 10, NUB_W = 2, NUB_H = 4, IN_W = 14, IN_H = 6 };
-	static const char *bolt[IN_H] = {
-		"....##.",
-		"...##..",
-		"..#####",
-		"#####..",
-		"..##...",
-		".##....",
-	};
-	char label[8];
-	snprintf(label, sizeof(label), "%d%%", st.battery_percent);
-	cairo_text_extents_t te;
-	cairo_text_extents(cr, label, &te);
-	int text_w = (int)te.x_advance;
-	int low = !st.battery_plugged && st.battery_percent <= BATTERY_LOW;
-
-	int text_x = right - BATTERY_PAD - text_w;
-	int x = text_x - 4 - NUB_W - BODY_W;
-	int y = (BAR_H - 1 - BODY_H) / 2;
-
-	cairo_set_source_rgb(cr, 0, 0, 0);
-	cairo_rectangle(cr, x + 0.5, y + 0.5, BODY_W - 1, BODY_H - 1);
-	cairo_set_line_width(cr, 1);
-	cairo_stroke(cr);
-	cairo_rectangle(cr, x + BODY_W, y + (BODY_H - NUB_H) / 2, NUB_W, NUB_H);
-	cairo_fill(cr);
-	int in_x = x + 2, in_y = y + 2;
-	int fill = (IN_W * st.battery_percent + 50) / 100;
-	if (fill == 0 && st.battery_percent > 0) {
-		fill = 1;
-	}
-	cairo_rectangle(cr, in_x, in_y, fill, IN_H);
-	cairo_fill(cr);
-	if (st.battery_plugged) {
-		/* Drawn in the opposite colour to what's under it. */
-		int bx = in_x + (IN_W - 7) / 2;
-		for (int r = 0; r < IN_H; r++) {
-			for (int c = 0; c < 7; c++) {
-				if (bolt[r][c] != '#') {
-					continue;
-				}
-				double v = bx + c < in_x + fill ? 1 : 0;
-				cairo_set_source_rgb(cr, v, v, v);
-				cairo_rectangle(cr, bx + c, in_y + r, 1, 1);
-				cairo_fill(cr);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	uint32_t *px = (uint32_t *)cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s) / 4;
+	for (int y = 0; y < h; y++) {
+		for (int b = 0; b < row_bytes; b++) {
+			unsigned byte;
+			if (sscanf(hex + (y * row_bytes + b) * 2, "%2x", &byte) != 1) {
+				cairo_surface_destroy(s);
+				return NULL;
+			}
+			for (int bit = 0; bit < 8 && b * 8 + bit < w; bit++) {
+				px[y * stride + b * 8 + bit] =
+					byte & (0x80 >> bit) ? 0xff000000 : 0;
 			}
 		}
 	}
+	cairo_surface_mark_dirty(s);
+	return s;
+}
 
-	if (low) {
-		/* Running out: the percentage inverted, as a selected item. */
-		cairo_set_source_rgb(cr, 0, 0, 0);
-		cairo_rectangle(cr, text_x - 2, 0, text_w + 4, BAR_H - 1);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 1, 1, 1);
+static cairo_surface_t *load_icon(const struct menu_app *a, const char *spec) {
+	cairo_surface_t *s;
+	if (strncmp(spec, "bitmap:", 7) == 0) {
+		s = load_bitmap(spec);
 	} else {
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		s = cairo_image_surface_create_from_png(spec);
+		if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+			cairo_surface_destroy(s);
+			s = NULL;
+		}
 	}
-	text(cr, label, text_x, 0, BAR_H - 1);
-	return x - BATTERY_PAD;
+	if (s == NULL) {
+		fprintf(stderr, "gemwm-menu: %s: bad icon %s\n", a->name, spec);
+	}
+	return s;
+}
+
+/* One line from the app: "text", "icon<TAB>text" or
+ * "icon<TAB>text<TAB>inverse". */
+static void app_set(struct menu_app *a, char *line) {
+	char *fields[3] = { NULL, line, NULL };
+	char *tab = strchr(line, '\t');
+	if (tab != NULL) {
+		*tab = '\0';
+		fields[0] = line;
+		fields[1] = tab + 1;
+		if ((tab = strchr(fields[1], '\t')) != NULL) {
+			*tab = '\0';
+			fields[2] = tab + 1;
+		}
+	}
+	const char *spec = fields[0];
+	if (spec == NULL || a->icon_spec == NULL || strcmp(spec, a->icon_spec) != 0) {
+		if (a->icon != NULL) {
+			cairo_surface_destroy(a->icon);
+			a->icon = NULL;
+		}
+		free(a->icon_spec);
+		a->icon_spec = spec != NULL ? strdup(spec) : NULL;
+		if (spec != NULL && spec[0] != '\0') {
+			a->icon = load_icon(a, spec);
+		}
+	}
+	free(a->text);
+	a->text = strdup(fields[1]);
+	a->inverse = fields[2] != NULL && strcmp(fields[2], "inverse") == 0;
+}
+
+/* The app exited (or closed its end): its item goes, and it's restarted
+ * unless it died right away, which would only repeat. */
+static void app_stopped(struct menu_app *a) {
+	close(a->fd);
+	a->fd = -1;
+	kill(-a->pid, SIGTERM);
+	waitpid(a->pid, NULL, WNOHANG);
+	free(a->text);
+	a->text = NULL;
+	if (time(NULL) - a->started >= APP_RESTART) {
+		a->restart_at = time(NULL) + 1;
+	} else {
+		fprintf(stderr, "gemwm-menu: menu app %s exited\n", a->name);
+	}
+	draw_bar();
+}
+
+static void app_read(struct menu_app *a) {
+	for (;;) {
+		ssize_t n = read(a->fd, a->in + a->len, sizeof(a->in) - 1 - a->len);
+		if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+			break;
+		}
+		if (n <= 0) {
+			app_stopped(a);
+			return;
+		}
+		a->len += n;
+		/* Only the latest whole line matters. */
+		char *last = NULL, *nl;
+		a->in[a->len] = '\0';
+		for (char *p = a->in; (nl = strchr(p, '\n')) != NULL; p = nl + 1) {
+			*nl = '\0';
+			last = p;
+		}
+		if (last != NULL) {
+			app_set(a, last);
+			size_t used = (size_t)(last + strlen(last) + 1 - a->in);
+			memmove(a->in, a->in + used, a->len - used);
+			a->len -= used;
+			draw_bar();
+		} else if (a->len == sizeof(a->in) - 1) {
+			a->len = 0; /* an absurdly long line: drop it */
+		}
+	}
+}
+
+static void app_click(struct menu_app *a, uint32_t button) {
+	int n = button == BTN_RIGHT ? 3 : button == BTN_MIDDLE ? 2 : 1;
+	char msg[16];
+	int len = snprintf(msg, sizeof(msg), "click %d\n", n);
+	if (a->fd >= 0) {
+		send(a->fd, msg, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+	}
+}
+
+/* Draws the menu apps right to left, ending at right, in their listed
+ * order; returns the left edge. */
+static int draw_apps(cairo_t *cr, int right) {
+	for (int i = st.n_apps - 1; i >= 0; i--) {
+		struct menu_app *a = &st.apps[i];
+		a->w = 0;
+		bool has_text = a->text != NULL && a->text[0] != '\0';
+		if (a->fd < 0 || (a->icon == NULL && !has_text)) {
+			continue;
+		}
+		int icon_w = a->icon ? cairo_image_surface_get_width(a->icon) : 0;
+		int text_w = 0;
+		if (has_text) {
+			cairo_text_extents_t te;
+			cairo_text_extents(cr, a->text, &te);
+			text_w = (int)te.x_advance < APP_MAX_W ? (int)te.x_advance : APP_MAX_W;
+		}
+		int gap = icon_w > 0 && text_w > 0 ? 4 : 0;
+		a->w = APP_PAD + icon_w + gap + text_w + APP_PAD;
+		a->x = right - a->w;
+		right = a->x;
+		if (a->icon != NULL) {
+			int ih = cairo_image_surface_get_height(a->icon);
+			cairo_set_source_surface(cr, a->icon, a->x + APP_PAD,
+				(BAR_H - 1 - ih) / 2);
+			cairo_paint(cr);
+		}
+		if (has_text) {
+			int tx = a->x + APP_PAD + icon_w + gap;
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			if (a->inverse) {
+				/* As a selected item: to catch the eye (a low battery). */
+				cairo_rectangle(cr, tx - 2, 0, text_w + 4, BAR_H - 1);
+				cairo_fill(cr);
+				cairo_set_source_rgb(cr, 1, 1, 1);
+			}
+			cairo_save(cr);
+			cairo_rectangle(cr, tx, 0, text_w, BAR_H - 1);
+			cairo_clip(cr);
+			text(cr, a->text, tx, 0, BAR_H - 1);
+			cairo_restore(cr);
+		}
+	}
+	return right;
+}
+
+static struct menu_app *app_at(double x) {
+	for (int i = 0; i < st.n_apps; i++) {
+		struct menu_app *a = &st.apps[i];
+		if (a->w > 0 && x >= a->x && x < a->x + a->w) {
+			return a;
+		}
+	}
+	return NULL;
 }
 
 static void draw_bar(void) {
@@ -952,24 +1025,7 @@ static void draw_bar(void) {
 
 	draw_workspaces(cr);
 
-	char now[64];
-	time_t t = time(NULL);
-	struct tm tm;
-	st.clock_w = 0;
-	if (st.clock_on && strftime(now, sizeof(now), clock_format(),
-			localtime_r(&t, &tm)) > 0) {
-		/* %l pads single-digit hours with a space; drop it. */
-		const char *shown = now + strspn(now, " ");
-		cairo_text_extents_t te;
-		cairo_text_extents(cr, shown, &te);
-		st.clock_w = (int)te.x_advance + 2 * CLOCK_PAD;
-		st.clock_x = st.bar_w - st.clock_w;
-		cairo_set_source_rgb(cr, 0, 0, 0);
-		text(cr, shown, st.clock_x + CLOCK_PAD, 0, BAR_H - 1);
-	}
-	if (st.battery_on && st.battery_present) {
-		draw_battery(cr, st.clock_w > 0 ? st.clock_x : st.bar_w);
-	}
+	draw_apps(cr, st.bar_w);
 
 	cairo_destroy(cr);
 	submit(st.bar, buffer, st.bar_w, BAR_H);
@@ -1547,10 +1603,10 @@ static void handle_press(void) {
 		}
 		return;
 	}
-	if (l < 0 && y < BAR_H && st.clock_w > 0 && x >= st.clock_x) {
+	struct menu_app *app = l < 0 && y < BAR_H ? app_at(x) : NULL;
+	if (app != NULL) {
 		close_menu();
-		st.clock_24h = !st.clock_24h;
-		draw_bar();
+		app_click(app, st.button);
 		return;
 	}
 	if (st.open < 0) {
@@ -1596,6 +1652,7 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
 static void pointer_button(void *data, struct wl_pointer *pointer,
 		uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
 	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		st.button = button;
 		handle_press();
 	}
 }
@@ -1639,7 +1696,6 @@ static void keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
 /* Escape, Return and Enter all pick Cancel, the alert's default. */
 static void keyboard_key(void *data, struct wl_keyboard *keyboard,
 		uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
-	enum { KEY_ESC = 1, KEY_ENTER = 28, KEY_KPENTER = 96 };
 	if (st.alert.active && state == WL_KEYBOARD_KEY_STATE_PRESSED &&
 			(key == KEY_ESC || key == KEY_ENTER || key == KEY_KPENTER)) {
 		dismiss_alert();
@@ -1681,55 +1737,7 @@ static const struct wl_seat_listener seat_listener = {
 	.name = seat_name,
 };
 
-/* ---- Clock -------------------------------------------------------------- */
-
-/* Formats that show seconds need a redraw every second, not every minute. */
-static bool clock_has_seconds(void) {
-	return st.clock_seconds;
-}
-
-/* The timer's period: the clock's, but a battery is checked every few
- * seconds so plugging in shows promptly. Divides a minute, so the clock
- * still turns over on the minute. */
-static long tick_period(void) {
-	if (st.clock_on && clock_has_seconds()) {
-		return 1;
-	}
-	return st.battery_on && st.battery_present ? 5 : 60;
-}
-
-/* Arms the timer for the next whole minute (or second), on the wall clock.
- * CANCEL_ON_SET wakes us if the time jumps (resume, NTP, timezone), so we
- * re-arm instead of drifting. */
-static void clock_arm(void) {
-	struct timespec now;
-	clock_gettime(CLOCK_REALTIME, &now);
-	long period = tick_period();
-	struct itimerspec spec = {
-		.it_value = { .tv_sec = (now.tv_sec / period + 1) * period },
-		.it_interval = { .tv_sec = period },
-	};
-	timerfd_settime(st.clock_fd,
-		TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &spec, NULL);
-}
-
-static void clock_tick(void) {
-	uint64_t expirations;
-	bool jumped = read(st.clock_fd, &expirations, sizeof(expirations)) < 0 &&
-		errno == ECANCELED;
-	if (jumped) {
-		clock_arm();
-	}
-	/* Between the clock's minutes, only a battery change needs drawing. */
-	bool changed = st.battery_on && battery_update();
-	bool minute = st.clock_on && (jumped || tick_period() == 1 ||
-		time(NULL) % 60 < tick_period());
-	if (st.bar_w > 0 && (changed || minute)) {
-		draw_bar();
-	}
-}
-
-/* wl_display_dispatch() plus the clock timer. */
+/* wl_display_dispatch() plus the control socket and the menu apps. */
 static int dispatch(void) {
 	while (wl_display_prepare_read(st.display) != 0) {
 		wl_display_dispatch_pending(st.display);
@@ -1739,12 +1747,21 @@ static int dispatch(void) {
 		return -1;
 	}
 	/* poll() skips negative fds, so absent ones just stay -1. */
-	struct pollfd fds[3] = {
+	struct pollfd fds[2 + MAX_APPS] = {
 		{ .fd = wl_display_get_fd(st.display), .events = POLLIN },
-		{ .fd = st.clock_fd, .events = POLLIN },
 		{ .fd = st.ipc_fd, .events = POLLIN },
 	};
-	if (poll(fds, 3, -1) < 0) {
+	/* Wake up for menu apps waiting to be restarted. */
+	time_t now = time(NULL), wake = 0;
+	for (int i = 0; i < st.n_apps; i++) {
+		fds[2 + i] = (struct pollfd){ .fd = st.apps[i].fd, .events = POLLIN };
+		time_t at = st.apps[i].restart_at;
+		if (at != 0 && (wake == 0 || at < wake)) {
+			wake = at;
+		}
+	}
+	int timeout = wake == 0 ? -1 : wake <= now ? 0 : (int)(wake - now) * 1000;
+	if (poll(fds, 2 + st.n_apps, timeout) < 0) {
 		wl_display_cancel_read(st.display);
 		return errno == EINTR ? 0 : -1;
 	}
@@ -1758,11 +1775,20 @@ static int dispatch(void) {
 	if (fds[0].revents & (POLLERR | POLLHUP)) {
 		return -1;
 	}
-	if (st.clock_fd >= 0 && (fds[1].revents & POLLIN)) {
-		clock_tick();
-	}
-	if (st.ipc_fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP | POLLERR))) {
+	if (st.ipc_fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
 		ipc_read();
+	}
+	for (int i = 0; i < st.n_apps; i++) {
+		struct menu_app *a = &st.apps[i];
+		if (a->fd >= 0 && (fds[2 + i].revents & (POLLIN | POLLHUP | POLLERR))) {
+			app_read(a);
+		}
+		if (a->restart_at != 0 && a->restart_at <= time(NULL)) {
+			app_start(a);
+		}
+	}
+	while (waitpid(-1, NULL, WNOHANG) > 0) {
+		/* reap menu apps that have exited */
 	}
 	return wl_display_dispatch_pending(st.display);
 }
@@ -1821,7 +1847,6 @@ int main(void) {
 	st.open = -1;
 	st.font = getenv("GEMWM_FONT") ? getenv("GEMWM_FONT") : "monospace";
 	st.quiet_title = -1;
-	load_clock_config();
 	load_config();
 
 	st.display = wl_display_connect(NULL);
@@ -1853,19 +1878,17 @@ int main(void) {
 
 	ipc_connect();
 
-	if (st.battery_on) {
-		battery_update();
-	}
-	st.clock_fd = -1;
-	if (st.clock_on || (st.battery_on && st.battery_present)) {
-		st.clock_fd = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC);
-		if (st.clock_fd >= 0) {
-			clock_arm();
-		}
+	for (int i = 0; i < st.n_apps; i++) {
+		app_start(&st.apps[i]);
 	}
 
 	st.running = true;
 	while (st.running && dispatch() != -1) {
+	}
+	for (int i = 0; i < st.n_apps; i++) {
+		if (st.apps[i].fd >= 0) {
+			kill(-st.apps[i].pid, SIGTERM);
+		}
 	}
 	wl_display_disconnect(st.display);
 	return 0;
