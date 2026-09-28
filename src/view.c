@@ -20,8 +20,14 @@ void view_frame_style(struct view *view, struct frame_style *style) {
 	style->sizer = !view_is_tiled(view);
 }
 
+/* Whether we draw a frame round it: not if the client does its own, nor
+ * while it's fullscreen. */
+static bool framed(struct view *view) {
+	return view->ssd && !view->fullscreen;
+}
+
 void view_extents(struct view *view, int *w, int *h) {
-	if (!view->ssd) {
+	if (!framed(view)) {
 		*w = *h = 0;
 		return;
 	}
@@ -140,8 +146,8 @@ void highlight_update(struct server *server) {
 
 void view_update_frame(struct view *view) {
 	struct wlr_box *geo = &view->xdg_toplevel->base->geometry;
-	int ox = view->ssd ? FRAME_LEFT : 0;
-	int oy = view->ssd ? FRAME_TOP : 0;
+	int ox = framed(view) ? FRAME_LEFT : 0;
+	int oy = framed(view) ? FRAME_TOP : 0;
 	/* The xdg scene tree already shifts the surface by the geometry's
 	 * offset, so its origin is the geometry's top-left. Popups are placed
 	 * relative to that too. */
@@ -152,10 +158,10 @@ void view_update_frame(struct view *view) {
 	 * frame) outside it, which would otherwise spill over ours. */
 	struct wlr_box clip = { geo->x, geo->y, geo->width, geo->height };
 	wlr_scene_subsurface_tree_set_clip(&view->content->node,
-		view->ssd ? &clip : NULL);
-	wlr_scene_node_set_enabled(&view->frame->node, view->ssd);
+		framed(view) ? &clip : NULL);
+	wlr_scene_node_set_enabled(&view->frame->node, framed(view));
 	view_update_highlight(view);
-	if (!view->ssd || geo->width <= 0 || geo->height <= 0) {
+	if (!framed(view) || geo->width <= 0 || geo->height <= 0) {
 		return;
 	}
 
@@ -194,6 +200,15 @@ void focus_view(struct view *view) {
 		/* Switching focuses the top window there; this one follows. */
 		workspace_switch(server, view->workspace);
 		prev = server->focused_view;
+	}
+	/* Nor behind a fullscreen window: that one leaves fullscreen. */
+	struct view *other;
+	wl_list_for_each(other, &server->views, link) {
+		if (other != view && other->fullscreen &&
+				other->workspace == view->workspace) {
+			view_set_fullscreen(other, false);
+			break;
+		}
 	}
 	/* Focus can't land on a tile hidden behind a zoomed one. */
 	if (view->workspace != NULL && view->workspace->zoomed != NULL &&
@@ -641,6 +656,10 @@ static void view_map(struct wl_listener *listener, void *data) {
 	view_update_frame(view);
 	tile_arrange(server);
 	focus_view(view);
+	/* Games and players may ask to start fullscreen. */
+	if (view->xdg_toplevel->requested.fullscreen) {
+		view_set_fullscreen(view, true);
+	}
 	cursor_rebase(server);
 	ipc_notify_workspaces(server);
 }
@@ -654,6 +673,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 		end_interactive(server);
 	}
 	view_cycle_end(server);
+	view->fullscreen = false; /* its node goes back among the others below */
 	if (view->workspace != NULL && view->workspace->zoomed == view) {
 		tile_unzoom(view->workspace); /* re-shows the other tiles */
 	}
@@ -743,12 +763,77 @@ static void view_request_maximize(struct wl_listener *listener, void *data) {
 	}
 }
 
-static void view_request_fullscreen(struct wl_listener *listener, void *data) {
-	/* Not supported yet, but xdg-shell requires a configure in reply. */
-	struct view *view = wl_container_of(listener, view, request_fullscreen);
-	if (view->xdg_toplevel->base->initialized) {
-		wlr_xdg_surface_schedule_configure(view->xdg_toplevel->base);
+/* Shows only the fullscreen windows of the active workspace: they live
+ * in their own layer, above the menu bar, not in their workspace's. */
+void fullscreen_update(struct server *server) {
+	struct view *view;
+	wl_list_for_each(view, &server->views, link) {
+		if (view->fullscreen) {
+			wlr_scene_node_set_enabled(&view->tree->node,
+				view->workspace == server->active_workspace);
+		}
 	}
+}
+
+/* A window asks to fill its screen (a video, F11, a game), or to stop:
+ * it loses its frame and covers the output it's on, menu bar and all; on
+ * the way back it gets its frame and its place again. */
+void view_set_fullscreen(struct view *view, bool fullscreen) {
+	struct server *server = view->server;
+	struct wlr_xdg_toplevel *toplevel = view->xdg_toplevel;
+	if (!toplevel->base->initialized) {
+		return;
+	}
+	if (fullscreen == view->fullscreen || view->workspace == NULL) {
+		wlr_xdg_surface_schedule_configure(toplevel->base);
+		return;
+	}
+	if (fullscreen) {
+		struct wlr_box frame;
+		view_frame_box(view, &frame);
+		struct wlr_output *output = wlr_output_layout_output_at(
+			server->output_layout, frame.x + frame.width / 2.0,
+			frame.y + frame.height / 2.0);
+		if (output == NULL) {
+			output = wlr_output_layout_output_at(server->output_layout,
+				server->cursor->x, server->cursor->y);
+		}
+		struct wlr_box box;
+		wlr_output_layout_get_box(server->output_layout, output, &box);
+		if (wlr_box_empty(&box)) {
+			wlr_xdg_surface_schedule_configure(toplevel->base);
+			return;
+		}
+		view->fullscreen_box = frame;
+		view->fullscreen = true;
+		wlr_scene_node_reparent(&view->tree->node, server->layer_fullscreen);
+		view_move(view, box.x, box.y);
+		wlr_xdg_toplevel_set_fullscreen(toplevel, true);
+		wlr_xdg_toplevel_set_size(toplevel, box.width, box.height);
+	} else {
+		view->fullscreen = false;
+		wlr_scene_node_reparent(&view->tree->node, view->workspace->tree);
+		wlr_scene_node_raise_to_top(&view->tree->node);
+		wlr_xdg_toplevel_set_fullscreen(toplevel, false);
+		if (view_is_tiled(view)) {
+			tile_arrange(server); /* back into its place in the layout */
+		} else {
+			struct wlr_box *b = &view->fullscreen_box;
+			int ew, eh;
+			view_extents(view, &ew, &eh);
+			view_move(view, b->x, b->y);
+			wlr_xdg_toplevel_set_size(toplevel, b->width - ew, b->height - eh);
+		}
+	}
+	fullscreen_update(server);
+	view_update_frame(view);
+	cursor_rebase(server);
+	ipc_notify_windows(server);
+}
+
+static void view_request_fullscreen(struct wl_listener *listener, void *data) {
+	struct view *view = wl_container_of(listener, view, request_fullscreen);
+	view_set_fullscreen(view, view->xdg_toplevel->requested.fullscreen);
 }
 
 static void view_destroy(struct wl_listener *listener, void *data) {

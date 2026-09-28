@@ -110,6 +110,7 @@ void workspace_switch(struct server *server, struct workspace *ws) {
 	wlr_scene_node_set_enabled(&server->active_workspace->tree->node, false);
 	wlr_scene_node_set_enabled(&ws->tree->node, true);
 	server->active_workspace = ws;
+	fullscreen_update(server);
 	workspace_focus_top(server);
 	cursor_rebase(server);
 	workspace_prune(server);
@@ -131,6 +132,7 @@ void view_set_workspace(struct view *view, struct workspace *ws) {
 	scroll_remove_view(view);
 	view->workspace = ws;
 	view->tile_column = -1; /* the layout there finds it a column */
+	fullscreen_update(server);
 	wlr_scene_node_reparent(&view->tree->node, ws->tree);
 	if (server->mode == MODE_SCROLLING) {
 		scroll_add_view(view); /* joins the end of the strip there */

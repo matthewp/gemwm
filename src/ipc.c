@@ -16,6 +16,7 @@
  *   focus-window <id>             switches to its workspace if needed
  *   maximize <id>|focused         toggle: a tile fills the screen, or a
  *                                 window maximizes (the fuller gadget)
+ *   fullscreen <id>|focused       toggle: the window fills its screen
  *   close-window <id>|focused
  *   cycle-windows next|prev       focus the next/previous window (window mode)
  *   mode [window|tiling|scrolling|toggle]  report or change the window
@@ -442,6 +443,14 @@ static char *execute(struct server *server, struct ipc_client *client,
 			return reply_error("no such window");
 		}
 		view_toggle_maximize_or_zoom(view);
+		return strdup(ok);
+	}
+	if (strcmp(cmd, "fullscreen") == 0) {
+		struct view *view = view_by_id(server, argv[1]);
+		if (view == NULL) {
+			return reply_error("no such window");
+		}
+		view_set_fullscreen(view, !view->fullscreen);
 		return strdup(ok);
 	}
 	if (strcmp(cmd, "close-window") == 0) {

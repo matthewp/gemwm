@@ -49,6 +49,9 @@ static int workspace_tiles(struct workspace *ws, struct view **out, int max) {
 }
 
 void tile_place(struct view *view, int x, int y, int w, int h) {
+	if (view->fullscreen) {
+		return; /* its place waits for it */
+	}
 	int ew, eh;
 	view_extents(view, &ew, &eh);
 	if (w - ew < 1 || h - eh < 1) {

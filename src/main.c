@@ -556,6 +556,7 @@ int main(int argc, char *argv[]) {
 	server.layers[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM] = wlr_scene_tree_create(root);
 	server.layer_views = wlr_scene_tree_create(root);
 	server.layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP] = wlr_scene_tree_create(root);
+	server.layer_fullscreen = wlr_scene_tree_create(root);
 	server.layers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY] = wlr_scene_tree_create(root);
 	server.layer_drag = wlr_scene_tree_create(root);
 

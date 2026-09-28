@@ -49,6 +49,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Volume keys         | volume up, down, mute; mic mute          |
 | Super+Q             | close the focused window                 |
 | Super+Z             | maximize the focused window (toggle)     |
+| Super+F             | fullscreen the focused window (toggle)   |
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
 | Alt+Tab             | the same                                 |
 | Super+Arrows        | focus the neighbouring tile or column    |
@@ -388,6 +389,7 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
     gemwm msg move-window 12 3        # window id or "focused"; 3 or "new"
     gemwm msg focus-window 12         # switches to its workspace if needed
     gemwm msg maximize focused        # or an id; toggles, like Super+Z
+    gemwm msg fullscreen focused      # or an id; toggles, like Super+F
     gemwm msg close-window focused
     gemwm msg cycle-windows next      # or prev, like Super+Tab
     gemwm msg mode scrolling          # window, tiling, toggle; alone: report
@@ -462,6 +464,9 @@ built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
   moves on release, as in GEM.
 - Sizer (bottom right) resizes the same way.
 - Closer (top left) closes, fuller (top right) toggles full screen size.
+- Fullscreen (a video, a browser's F11, a game, or Super+F) covers the
+  whole screen, menu bar and all, without a frame. Focusing another window
+  on that workspace brings it back out, into its old place.
 - Scroll bars are real GEM ones, for applications that drive them through
   the `gemwm-scroll-v1` protocol (`protocols/gemwm-scroll-v1.xml`), as GemWeb
   does: drag the slider, click the arrows to step, or click the track to

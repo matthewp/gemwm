@@ -36,6 +36,7 @@ struct server {
 	struct wlr_scene_tree *layer_desktop;
 	struct wlr_scene_tree *layers[4]; /* indexed by zwlr_layer_shell_v1_layer */
 	struct wlr_scene_tree *layer_views;
+	struct wlr_scene_tree *layer_fullscreen; /* above the menu bar */
 	struct wlr_scene_tree *layer_drag;
 
 	struct wlr_xdg_shell *xdg_shell;
@@ -203,6 +204,9 @@ struct view {
 
 	bool maximized;
 	struct wlr_box saved_box; /* frame box before maximizing */
+	/* Fullscreen: the whole output, frameless, above everything else. */
+	bool fullscreen;
+	struct wlr_box fullscreen_box; /* frame box to go back to */
 
 	/* What the frame was last drawn with, to skip redundant redraws. */
 	int drawn_w, drawn_h;
@@ -258,6 +262,8 @@ void view_update_frame(struct view *view);
 void view_begin_interactive(struct view *view, enum cursor_mode mode,
 	uint32_t edges);
 void view_toggle_maximize(struct view *view);
+void view_set_fullscreen(struct view *view, bool fullscreen);
+void fullscreen_update(struct server *server);
 void view_frame_click(struct view *view, double fx, double fy, uint32_t time);
 void process_interactive_motion(struct server *server);
 void end_interactive(struct server *server);
