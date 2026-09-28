@@ -27,6 +27,8 @@ struct puzzle {
 /* Reads a .puz file; NULL, with error set, if it isn't one. */
 struct puzzle *puz_load(const char *path, GError **error);
 void puz_free(struct puzzle *p);
+/* A copy of all of it, board and all. */
+struct puzzle *puz_copy(const struct puzzle *p);
 
 static inline bool puz_black(const struct puzzle *p, int row, int col) {
 	return p->solution[row * p->width + col] == '.';

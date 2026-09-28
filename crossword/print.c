@@ -15,7 +15,9 @@
  * it, then further pages. A clue never splits, and a heading never ends a
  * column. GTK draws it onto whatever the printer (or PDF) needs, with
  * Pango for proper print fonts, since the screen's pixel font isn't one.
+ * Where it goes is asked in GemWM's print dialog (lib/gem-print.c).
  */
+#include "gem-print.h"
 #include "print.h"
 
 #define COLUMNS 4
@@ -38,7 +40,7 @@ struct placed {
 };
 
 struct job {
-	const struct puzzle *puz;
+	struct puzzle *puz;  /* a copy: the app may open another meanwhile */
 	char *subtitle;
 	bool answers;
 	GArray *items;   /* struct item */
@@ -46,7 +48,6 @@ struct job {
 	int pages;
 	double width, height, col_w, header_h, grid_size;
 	int grid_cols;
-	char *message;   /* for done */
 	void (*done)(const char *message, void *data);
 	void *data;
 };
@@ -57,8 +58,8 @@ static void job_free(struct job *job) {
 	}
 	g_clear_pointer(&job->items, g_array_unref);
 	g_clear_pointer(&job->placed, g_array_unref);
+	puz_free(job->puz);
 	g_free(job->subtitle);
-	g_free(job->message);
 	g_free(job);
 }
 
@@ -274,89 +275,39 @@ static void draw_page(GtkPrintOperation *op, GtkPrintContext *ctx, int page,
 	}
 }
 
-/* The print dialog's extra tab: blank grid or the board as it stands. */
-static GtkWidget *custom_widget(GtkPrintOperation *op, struct job *job) {
-	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-	gtk_widget_set_margin_start(box, 12);
-	gtk_widget_set_margin_top(box, 12);
-	GtkWidget *check = gtk_check_button_new_with_label("Include my answers");
-	gtk_check_button_set_active(GTK_CHECK_BUTTON(check), job->answers);
-	gtk_box_append(GTK_BOX(box), check);
-	return box;
-}
-
-static void custom_apply(GtkPrintOperation *op, GtkWidget *widget,
-		struct job *job) {
-	GtkWidget *check = gtk_widget_get_first_child(widget);
-	job->answers = gtk_check_button_get_active(GTK_CHECK_BUTTON(check));
-}
-
 static struct job *job_new(const struct puzzle *p, const char *subtitle,
 		bool answers, GtkPrintOperation *op) {
 	struct job *job = g_new0(struct job, 1);
-	job->puz = p;
+	job->puz = puz_copy(p);
 	job->subtitle = g_strdup(subtitle ? subtitle : "");
 	job->answers = answers;
 	gtk_print_operation_set_job_name(op, p->title);
 	gtk_print_operation_set_unit(op, GTK_UNIT_POINTS);
-	gtk_print_operation_set_embed_page_setup(op, TRUE);
 	g_signal_connect(op, "begin-print", G_CALLBACK(begin_print), job);
 	g_signal_connect(op, "draw-page", G_CALLBACK(draw_page), job);
 	return job;
 }
 
-/* The dialog remembers its printer and choices for the session. */
-static GtkPrintSettings *settings;
-static bool with_answers = true;
-
-static void print_done(GtkPrintOperation *op, GtkPrintOperationResult result,
-		struct job *job) {
-	if (result == GTK_PRINT_OPERATION_RESULT_APPLY) {
-		g_clear_object(&settings);
-		settings = g_object_ref(gtk_print_operation_get_print_settings(op));
-		with_answers = job->answers;
-		if (job->done) {
-			job->done("Sent to the printer.", job->data);
-		}
-	} else if (result == GTK_PRINT_OPERATION_RESULT_ERROR && job->done) {
-		GError *error = NULL;
-		gtk_print_operation_get_error(op, &error);
-		char *message = g_strdup_printf("Couldn't print: %s",
-			error ? error->message : "unknown error");
+static void print_done(const char *message, void *data) {
+	struct job *job = data;
+	if (message != NULL && job->done != NULL) {
 		job->done(message, job->data);
-		g_free(message);
-		g_clear_error(&error);
 	}
 	job_free(job);
-	g_object_unref(op);
 }
 
 void print_puzzle(GtkWindow *parent, const struct puzzle *p,
 		const char *subtitle, void (*done)(const char *message, void *data),
 		void *data) {
 	GtkPrintOperation *op = gtk_print_operation_new();
-	struct job *job = job_new(p, subtitle, with_answers, op);
+	struct job *job = job_new(p, subtitle, true, op);
 	job->done = done;
 	job->data = data;
-	if (settings != NULL) {
-		gtk_print_operation_set_print_settings(op, settings);
-	}
-	gtk_print_operation_set_custom_tab_label(op, "Crossword");
-	g_signal_connect(op, "create-custom-widget", G_CALLBACK(custom_widget), job);
-	g_signal_connect(op, "custom-widget-apply", G_CALLBACK(custom_apply), job);
-	g_signal_connect(op, "done", G_CALLBACK(print_done), job);
-	gtk_print_operation_set_allow_async(op, TRUE);
-	GError *error = NULL;
-	GtkPrintOperationResult result = gtk_print_operation_run(op,
-		GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG, parent, &error);
-	if (result == GTK_PRINT_OPERATION_RESULT_ERROR) {
-		if (done) {
-			char *message = g_strdup_printf("Couldn't print: %s", error->message);
-			done(message, data);
-			g_free(message);
-		}
-		g_error_free(error);
-	}
+	const struct gem_print_choice choices[] = {
+		{ "Include my answers", &job->answers },
+	};
+	gem_print_dialog(parent, op, choices, G_N_ELEMENTS(choices), print_done,
+		job);
 }
 
 bool print_puzzle_pdf(const struct puzzle *p, const char *subtitle,

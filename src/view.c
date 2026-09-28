@@ -632,17 +632,49 @@ static void tile_insert(struct view *view) {
 	}
 }
 
+/* A dialog's window, if it's showing here. */
+static struct view *view_parent(struct view *view) {
+	struct wlr_xdg_toplevel *parent = view->xdg_toplevel->parent;
+	struct view *v;
+	wl_list_for_each(v, &view->server->views, link) {
+		if (parent != NULL && v->xdg_toplevel == parent &&
+				v->workspace == view->server->active_workspace) {
+			return v;
+		}
+	}
+	return NULL;
+}
+
+/* lo wins over hi: a window too big for the screen keeps its top-left. */
+static int clamp(int v, int lo, int hi) {
+	return v > hi ? (hi > lo ? hi : lo) : v < lo ? lo : v;
+}
+
 static void view_map(struct wl_listener *listener, void *data) {
 	struct view *view = wl_container_of(listener, view, map);
 	struct server *server = view->server;
 
 	/* Cascade new windows from the top-left of the usable area under the
-	 * pointer, like GEM's desktop opening drive windows. */
+	 * pointer, like GEM's desktop opening drive windows. A dialog goes in
+	 * the middle of its window instead, as GEM centred its forms, kept on
+	 * screen. */
 	struct wlr_box area = {0};
 	output_usable_area_at(server, server->cursor->x, server->cursor->y, &area);
-	int step = server->cascade++ % 8;
-	view_move(view, area.x + 32 + step * GEM_GADGET,
-		area.y + 16 + step * GEM_GADGET);
+	struct view *parent = view_parent(view);
+	if (parent != NULL) {
+		struct wlr_box pb, b;
+		view_frame_box(parent, &pb);
+		view_frame_box(view, &b);
+		int x = pb.x + (pb.width - b.width) / 2;
+		int y = pb.y + (pb.height - b.height) / 2;
+		x = clamp(x, area.x, area.x + area.width - b.width);
+		y = clamp(y, area.y, area.y + area.height - b.height);
+		view_move(view, x, y);
+	} else {
+		int step = server->cascade++ % 8;
+		view_move(view, area.x + 32 + step * GEM_GADGET,
+			area.y + 16 + step * GEM_GADGET);
+	}
 
 	view->workspace = server->active_workspace;
 	wlr_scene_node_reparent(&view->tree->node, view->workspace->tree);

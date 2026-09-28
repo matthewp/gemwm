@@ -38,6 +38,30 @@ void puz_free(struct puzzle *p) {
 	g_free(p);
 }
 
+static GPtrArray *clues_copy(GPtrArray *clues) {
+	GPtrArray *copy = g_ptr_array_new_with_free_func(clue_free);
+	for (guint i = 0; i < clues->len; i++) {
+		struct clue *c = g_memdup2(clues->pdata[i], sizeof(struct clue));
+		c->text = g_strdup(c->text);
+		g_ptr_array_add(copy, c);
+	}
+	return copy;
+}
+
+struct puzzle *puz_copy(const struct puzzle *p) {
+	struct puzzle *c = g_memdup2(p, sizeof(*p));
+	size_t cells = (size_t)p->width * p->height;
+	c->title = g_strdup(p->title);
+	c->author = g_strdup(p->author);
+	c->copyright = g_strdup(p->copyright);
+	c->solution = g_strndup(p->solution, cells);
+	c->grid = g_strndup(p->grid, cells);
+	c->numbers = g_memdup2(p->numbers, cells * sizeof(int));
+	c->across = clues_copy(p->across);
+	c->down = clues_copy(p->down);
+	return c;
+}
+
 static char *to_utf8(const char *s) {
 	char *u = g_convert(s, -1, "UTF-8", "WINDOWS-1252", NULL, NULL, NULL);
 	return u != NULL ? u : g_utf8_make_valid(s, -1);

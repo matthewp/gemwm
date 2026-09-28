@@ -1,5 +1,5 @@
 /*
- * Printing a crossword: a newspaper-style page, through GTK's print
+ * Printing a crossword: a newspaper-style page, through GemWM's print
  * dialog (or straight to a PDF).
  */
 #ifndef GEMWM_CROSSWORD_PRINT_H
@@ -9,7 +9,8 @@
 #include "puz.h"
 
 /* The print dialog, then the printer. subtitle goes under the title (the
- * source and date, say). done gets a message to show when it's over. */
+ * source and date, say). done gets a message to show when it's over (not
+ * if the dialog was cancelled). */
 void print_puzzle(GtkWindow *parent, const struct puzzle *p,
 	const char *subtitle, void (*done)(const char *message, void *data),
 	void *data);

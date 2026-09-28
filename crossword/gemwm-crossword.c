@@ -22,6 +22,7 @@
 #include <string.h>
 #include "app-menu.h"
 #include "gem-draw.h"
+#include "gem-print.h"
 #include "print.h"
 #include "puz.h"
 
@@ -1233,7 +1234,6 @@ static void act(enum action action, const struct hit *hit) {
 		if (ui.playing) {
 			save();
 			char *sub = subtitle(ui.id, ui.puz);
-			set_message("Printing...");
 			print_puzzle(GTK_WINDOW(ui.window), ui.puz, sub, printed, NULL);
 			g_free(sub);
 		}
@@ -1495,6 +1495,7 @@ static int export_pdf(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+	gem_print_setup();
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--pdf") == 0) {
 			return export_pdf(argc, argv);

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Printing
+Comment=See what's printing, and cancel it
+Exec=gemwm-printing
+Categories=Settings;
+StartupNotify=false

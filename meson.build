@@ -198,13 +198,30 @@ if gtk4.found()
 			'gemwm-crossword',
 			['crossword/gemwm-crossword.c', 'crossword/puz.c',
 				'crossword/print.c', 'lib/app-menu.c',
-				'lib/gem-draw.c', client_protocols],
-			dependencies: [gtk4, dependency('gtk4-wayland'), soup, wayland_client,
-				cairo],
+				'lib/gem-draw.c', 'lib/gem-print.c', client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gtk4-unix-print'), soup, wayland_client, cairo],
 			include_directories: 'lib',
 			install: true,
 		)
 		install_data('crossword/org.gemwm.Crossword.desktop',
+			install_dir: get_option('datadir') / 'applications')
+	endif
+
+	# gemwm-printing: the printing menu app and window. Also needs libcups,
+	# which it asks about the jobs and printers.
+	cups = dependency('cups', required: false)
+	if cups.found()
+		executable(
+			'gemwm-printing',
+			['printing/gemwm-printing.c', 'lib/app-menu.c', 'lib/gem-draw.c',
+				client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gio-unix-2.0'), cups, wayland_client, cairo],
+			include_directories: 'lib',
+			install: true,
+		)
+		install_data('printing/org.gemwm.Printing.desktop',
 			install_dir: get_option('datadir') / 'applications')
 	endif
 

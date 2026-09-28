@@ -125,8 +125,9 @@ same name, and every other menu stays as it is.
 
 The defaults are the TOS 1.0 desktop menus, plus two working items under
 Desk: **Internet > Web Browser** opens GemWeb (or your default browser if
-GemWeb isn't installed), and **Tools > Terminal** opens `$TERMINAL` (foot
-if unset). The menu bar reads
+GemWeb isn't installed), **Tools > Terminal** opens `$TERMINAL` (foot
+if unset), and **Tools > Printing** opens the printing window (see
+Printing). The menu bar reads
 its config at startup; restart it with `pkill gemwm-menu; setsid gemwm-menu &`.
 
 ### Menu apps
@@ -138,6 +139,7 @@ ones you want to keep), and an empty section removes them all. The
 defaults:
 
     [Menu Apps]
+    Printing = exec gemwm-printing --menu-app
     Wi-Fi = exec gemwm-wifi --menu-app
     Bluetooth = exec gemwm-bluetooth --menu-app
     Volume = exec gemwm-volume --menu-app
@@ -253,6 +255,26 @@ asked for in a GEM alert box (Ctrl+V pastes). Enterprise (802.1X) networks
 need setting up in iwd itself. Your user needs to be allowed to talk to
 iwd: on Arch, being in `wheel` or `network` is enough.
 
+## Printing
+
+GemWM's own apps print through a GEM print dialog: pick the printer,
+the copies and the pages (and the app's own options, like the crossword's
+answers), or **PDF file** to save it in your Documents folder. Return
+prints, Escape cancels, and the arrow keys go through the printers. It
+remembers your choice until the app quits. Printers come from CUPS, and
+the job goes straight to it: GemWM's apps skip xdg-desktop-portal, whose
+print dialog GTK would otherwise show.
+
+`gemwm-printing` is a menu app for whatever's printing, from any app. While
+a job is printing, a printer shows in the bar, with the job in its tooltip;
+if the printer needs you (out of paper, a jam, paused), that's shown in
+inverse beside it. After the last job it stays half a minute, saying how it
+went, then goes. A click (or Desk > Tools > Printing, any time) opens a
+window: what's printing, with **Cancel**, what finished lately, and how each
+printer is. It listens for CUPS's own signals on the system bus and asks
+CUPS every couple of seconds only while something's printing. It's built
+when GTK 4 and libcups are there.
+
 ## Volume
 
 `gemwm-volume` is a menu app too: a speaker with the output's volume.
@@ -306,9 +328,8 @@ Progress is saved as you type. Puzzles and saves are in
 
 File > Print... (Ctrl+P) prints the open puzzle the way a newspaper would:
 the title and byline, the grid, and the clues in columns around it (going
-on to a second page if they need to). The print dialog's Crossword tab has
-"Include my answers" to print what you've filled in. To make a PDF without
-the dialog: `gemwm-crossword --pdf OUT.pdf [--blank] FILE.puz` (with your
+on to a second page if they need to). The print dialog has "Include my
+answers" to print what you've filled in. To make a PDF without the dialog: `gemwm-crossword --pdf OUT.pdf [--blank] FILE.puz` (with your
 saved answers, unless `--blank`).
 
 ## Desktop
