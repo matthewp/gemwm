@@ -258,6 +258,20 @@ each with a GEM slider and Mute. The volume keys run `gemwm-volume up`,
 at once. It uses PulseAudio, or PipeWire's PulseAudio server, and is built
 when GTK 4 and `libpulse` are there.
 
+## Crossword Puzzle
+
+Desk > Games > Crossword Puzzle (`gemwm-crossword`, after MPOS's). The
+library lists your puzzles by date with how far along each is; its
+Download tab has the week's Wall Street Journal (Monday to Saturday) and
+Universal (daily) puzzles, as Across Lite `.puz` files from the archive at
+herbach.dnsalias.com. A puzzle opens between its Across and Down clues:
+type to fill, arrows move (and turn), Space or clicking the current square
+switches direction, Tab jumps to the next clue. Check Puzzle turns the
+border green or red, and filling it in right turns it green by itself.
+Progress is saved as you type. Puzzles and saves are in
+`~/.local/share/gemwm/crossword/`; `gemwm-crossword FILE.puz` opens any
+`.puz`. It needs GTK 4 and libsoup 3 to build.
+
 ## Desktop
 
 The desktop is set in `[desktop]` in `~/.config/gemwm/config`:

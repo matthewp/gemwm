@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Crossword Puzzle
+Comment=Download and solve crossword puzzles
+Exec=gemwm-crossword %f
+MimeType=application/x-crossword;
+Categories=Game;LogicGame;
+StartupNotify=false

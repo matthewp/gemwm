@@ -189,6 +189,23 @@ if gtk4.found()
 		install: true,
 	)
 
+	# gemwm-crossword: crossword puzzles, after MPOS's. Also needs libsoup
+	# (for downloading them), which WebKitGTK uses too.
+	soup = dependency('libsoup-3.0', required: false)
+	if soup.found()
+		executable(
+			'gemwm-crossword',
+			['crossword/gemwm-crossword.c', 'crossword/puz.c', 'lib/app-menu.c',
+				'lib/gem-draw.c', client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'), soup, wayland_client,
+				cairo],
+			include_directories: 'lib',
+			install: true,
+		)
+		install_data('crossword/org.gemwm.Crossword.desktop',
+			install_dir: get_option('datadir') / 'applications')
+	endif
+
 	# gemwm-volume: the volume menu app, window and keys. Also needs
 	# libpulse (PulseAudio, or PipeWire's PulseAudio server).
 	pulse = dependency('libpulse-mainloop-glib', required: false)
