@@ -153,15 +153,19 @@ void view_update_frame(struct view *view) {
 	 * relative to that too. */
 	wlr_scene_node_set_position(&view->content->node, ox, oy);
 	wlr_scene_node_set_position(&view->popups->node, ox, oy);
+	/* While it grows or shrinks (animate.c), it's drawn at the size it's
+	 * got to, not the client's. */
+	int cw = view->sizing ? view->anim_w : geo->width;
+	int ch = view->sizing ? view->anim_h : geo->height;
 	/* Inside our frame, show only the window geometry. Clients that draw
 	 * their own decorations put shadows (or, like Chromium, parts of their
 	 * frame) outside it, which would otherwise spill over ours. */
-	struct wlr_box clip = { geo->x, geo->y, geo->width, geo->height };
+	struct wlr_box clip = { geo->x, geo->y, cw, ch };
 	wlr_scene_subsurface_tree_set_clip(&view->content->node,
-		framed(view) ? &clip : NULL);
+		framed(view) || view->sizing ? &clip : NULL);
 	wlr_scene_node_set_enabled(&view->frame->node, framed(view));
 	view_update_highlight(view);
-	if (!framed(view) || geo->width <= 0 || geo->height <= 0) {
+	if (!framed(view) || cw <= 0 || ch <= 0) {
 		return;
 	}
 
@@ -170,16 +174,16 @@ void view_update_frame(struct view *view) {
 		view->xdg_toplevel->title : "";
 	struct frame_style style;
 	view_frame_style(view, &style);
-	if (view->drawn_w == geo->width && view->drawn_h == geo->height &&
+	if (view->drawn_w == cw && view->drawn_h == ch &&
 			view->drawn_active == active && view->drawn_title != NULL &&
 			strcmp(view->drawn_title, title) == 0 &&
 			memcmp(&view->drawn_style, &style, sizeof(style)) == 0) {
 		return;
 	}
-	frame_draw(view->frame, &style, geo->width, geo->height, title, active);
+	frame_draw(view->frame, &style, cw, ch, title, active);
 	view->drawn_style = style;
-	view->drawn_w = geo->width;
-	view->drawn_h = geo->height;
+	view->drawn_w = cw;
+	view->drawn_h = ch;
 	view->drawn_active = active;
 	free(view->drawn_title);
 	view->drawn_title = strdup(title);

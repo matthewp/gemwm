@@ -88,9 +88,22 @@ void tile_place(struct view *view, int x, int y, int w, int h) {
 		}
 	} else if (first) {
 		animate_appear(view);
-	} else if (moved) {
-		wlr_scene_node_set_position(node, drawn_x, drawn_y);
-		animate_move(view);
+	} else {
+		if (moved) {
+			wlr_scene_node_set_position(node, drawn_x, drawn_y);
+			animate_move(view);
+		}
+		/* A new size grows or shrinks into place too, from the size it's
+		 * drawn at now. */
+		struct wlr_box *geo = &view->xdg_toplevel->base->geometry;
+		int now_w = view->sizing ? view->anim_w : geo->width;
+		int now_h = view->sizing ? view->anim_h : geo->height;
+		int to_w = w - ew, to_h = h - eh;
+		if (now_w > 0 && now_h > 0 && (now_w != to_w || now_h != to_h) &&
+				(!view->sizing || view->size_to_w != to_w ||
+					view->size_to_h != to_h)) {
+			animate_resize(view, now_w, now_h, to_w, to_h);
+		}
 	}
 	/* Arranging runs often (every focus change when scrolling): only ask
 	 * the client to resize when the size actually changes. */

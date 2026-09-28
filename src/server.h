@@ -218,6 +218,10 @@ struct view {
 	 * than appears. */
 	int slide_from_x, slide_from_y;
 	int64_t slide_start, fade_start;
+	/* slide, resizing: its frame and what shows of its contents go from
+	 * size_from to size_to (content sizes); anim_w, anim_h now. */
+	bool sizing;
+	int size_from_w, size_from_h, size_to_w, size_to_h, anim_w, anim_h;
 	bool anim_hidden;
 	bool tile_box_valid;
 	struct wlr_box tile_box;
@@ -282,6 +286,8 @@ void view_begin_interactive(struct view *view, enum cursor_mode mode,
 void view_toggle_maximize(struct view *view);
 void view_set_fullscreen(struct view *view, bool fullscreen);
 void animate_move(struct view *view);
+void animate_resize(struct view *view, int from_w, int from_h, int to_w,
+	int to_h);
 void animate_appear(struct view *view);
 void animate_box(struct view *view, const struct wlr_box *from,
 	const struct wlr_box *to);

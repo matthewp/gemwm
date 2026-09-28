@@ -3,10 +3,11 @@
  *
  * slide (the default): when the tiling or scrolling layout gives a window
  * a new place, it glides there, easing out, instead of jumping; in
- * scrolling mode that's the whole strip sliding along. A new window fades
- * in, rising a little into its place. Sizes don't animate: a resized
- * window slides to its new place and takes its new size when its client
- * draws it.
+ * scrolling mode that's the whole strip sliding along. A new size grows or
+ * shrinks into place as well: the frame is drawn at the sizes in between,
+ * and only that much of the window shows (nothing is stretched; the client
+ * redraws at its new size meanwhile). A new window fades in, rising a
+ * little into its place.
  *
  * outline: the way GEM did it, which didn't slide windows but drew
  * outlines. Opening a window drew a box growing to its size (graf_growbox),
@@ -90,6 +91,27 @@ void animate_move(struct view *view) {
 		view->slide_start = 0;
 		return;
 	}
+	view->slide_from_x = node->x;
+	view->slide_from_y = node->y;
+	view->slide_start = now_ms();
+	schedule_frames(server);
+}
+
+/* The window's size changed: its frame grows or shrinks from from to to
+ * (content sizes), alongside any slide. */
+void animate_resize(struct view *view, int from_w, int from_h, int to_w,
+		int to_h) {
+	struct server *server = view->server;
+	struct wlr_scene_node *node = &view->tree->node;
+	if (server->anim_mode == ANIM_OFF || !node->enabled ||
+			view->workspace != server->active_workspace) {
+		return;
+	}
+	view->sizing = true;
+	view->size_from_w = view->anim_w = from_w;
+	view->size_from_h = view->anim_h = from_h;
+	view->size_to_w = to_w;
+	view->size_to_h = to_h;
 	view->slide_from_x = node->x;
 	view->slide_from_y = node->y;
 	view->slide_start = now_ms();
@@ -225,6 +247,7 @@ void animate_grow(struct view *view, const struct wlr_box *to) {
 /* The window is going: stop moving it, and drop its outline. */
 void animate_view_gone(struct view *view) {
 	view->slide_start = view->fade_start = 0;
+	view->sizing = false;
 	struct box_anim *a = find(view->server, view);
 	if (a != NULL) {
 		finish(a, false);
@@ -258,6 +281,10 @@ bool animate_tick(struct server *server) {
 				view->slide_start = 0;
 				wlr_scene_node_set_position(&view->tree->node,
 					view->x, view->y);
+				if (view->sizing) {
+					view->sizing = false;
+					view_update_frame(view); /* the client's size again */
+				}
 				/* Scrolling hides columns off screen; one that slid off
 				 * can go now. */
 				relayout |= server->mode == MODE_SCROLLING;
@@ -265,6 +292,14 @@ bool animate_tick(struct server *server) {
 				int x, y;
 				slide_position(view, t, &x, &y);
 				wlr_scene_node_set_position(&view->tree->node, x, y);
+				if (view->sizing) {
+					double e = ease_out(t);
+					view->anim_w = view->size_from_w + (int)lround(
+						(view->size_to_w - view->size_from_w) * e);
+					view->anim_h = view->size_from_h + (int)lround(
+						(view->size_to_h - view->size_from_h) * e);
+					view_update_frame(view);
+				}
 				moving = true;
 			}
 		}

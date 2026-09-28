@@ -276,9 +276,9 @@ styles:
     duration = 200            # ms, how long each takes
 
 - **slide** (the default): windows glide to their new places, quick to
-  start and gentle to stop, and a new window fades in, rising into its
-  place. Only positions glide; a window that changes size takes its new
-  size when its application redraws.
+  start and gentle to stop, and grow or shrink to their new sizes (the
+  frame moves out or in, showing as much of the window as fits: nothing is
+  stretched). A new window fades in, rising into its place.
 - **outline**: the way GEM did it. Windows don't move: in tiling mode a
   window the layout moves or resizes is hidden while its outline (the one
   you drag windows by) steps from its old place to its new one, then it
