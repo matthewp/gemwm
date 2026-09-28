@@ -23,7 +23,10 @@
  *   focus-direction left|right|up|down  focus the neighbouring window
  *                                 (tiling and scrolling)
  *   move-direction left|right|up|down   scrolling: move the column (left,
- *                                 right) or the window in its column
+ *                                 right) or the window in its column;
+ *                                 tiling: swap with the tile that way
+ *   push-direction left|right     tiling: move the window into the other
+ *                                 column (if its own keeps another)
  *   consume-or-expel left|right   scrolling: join the neighbouring column,
  *                                 or leave a shared one
  *   column-width cycle|<fraction> scrolling: the focused column's width
@@ -502,7 +505,17 @@ static char *execute(struct server *server, struct ipc_client *client,
 			} else {
 				scroll_move(server, argv[1]);
 			}
+		} else if (server->mode == MODE_TILING && !consume) {
+			tile_swap(server, argv[1]); /* tiling: trade places */
 		}
+		return strdup(ok);
+	}
+	if (strcmp(cmd, "push-direction") == 0) {
+		if (argv[1] == NULL || (strcmp(argv[1], "left") != 0 &&
+				strcmp(argv[1], "right") != 0)) {
+			return reply_error("directions are left and right");
+		}
+		tile_push(server, argv[1]);
 		return strdup(ok);
 	}
 	if (strcmp(cmd, "column-width") == 0) {

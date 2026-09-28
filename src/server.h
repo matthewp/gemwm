@@ -279,6 +279,8 @@ void tile_arrange(struct server *server);
 void tile_set_mode(struct server *server, enum layout_mode mode);
 void tile_place(struct view *view, int x, int y, int w, int h);
 bool tile_focus_direction(struct server *server, const char *dir);
+bool tile_swap(struct server *server, const char *dir);
+bool tile_push(struct server *server, const char *dir);
 void tile_toggle_zoom(struct view *view);
 void tile_unzoom(struct workspace *ws);
 void view_toggle_maximize_or_zoom(struct view *view);

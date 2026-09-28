@@ -52,7 +52,8 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
 | Alt+Tab             | the same                                 |
 | Super+Arrows        | focus the neighbouring tile or column    |
-| Super+Ctrl+Arrows   | scrolling: move the column / the window  |
+| Super+Ctrl+Arrows   | tiling: swap with the window that way; scrolling: move the column / the window |
+| Super+Shift+Left/Right | tiling: push the window into the other column |
 | Super+[ / Super+]   | scrolling: consume or expel the window   |
 | Super+R             | scrolling: column width ⅓ → ½ → ⅔        |
 | Super+1..9, Alt+1..9 | switch workspace                        |
@@ -345,7 +346,11 @@ share the screen in two columns, each stacking its windows top to bottom,
 `gap` pixels apart; dialogs float on top. A new window opens where you're
 working, as in i3 and sway: the second window starts the right column, and
 after that a new window splits the focused window's column, just below it.
-A column left empty gives the other the whole width. Super+Arrows move focus between tiles, and the
+A column left empty gives the other the whole width. Super+Ctrl+Arrows swap
+the focused window with its neighbour that way; Super+Shift+Left/Right push
+it into the other column, below the window beside it (only if its own
+column keeps another; from a single column, it starts a second).
+Super+Arrows move focus between tiles, and the
 focused tile keeps the pink focus border,
 while the others are greyed out with GEM's dotted "disabled" pattern (clicks
 go straight through it). Super+Z (or a tile's fuller) makes the focused
@@ -387,7 +392,9 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
     gemwm msg cycle-windows next      # or prev, like Super+Tab
     gemwm msg mode scrolling          # window, tiling, toggle; alone: report
     gemwm msg focus-direction left    # right, up, down (tiling, scrolling)
-    gemwm msg move-direction right    # scrolling: move column / window
+    gemwm msg move-direction right    # scrolling: move column / window;
+                                      # tiling: swap with that neighbour
+    gemwm msg push-direction left     # tiling: into the other column
     gemwm msg consume-or-expel left   # scrolling
     gemwm msg column-width 0.33       # scrolling: or "cycle"
     gemwm msg exec foot               # run a program

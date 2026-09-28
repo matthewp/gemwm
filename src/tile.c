@@ -259,23 +259,12 @@ void tile_set_mode(struct server *server, enum layout_mode mode) {
 	ipc_notify_mode(server);
 }
 
-/* Moves focus to the nearest tile in a direction ("left", "right", "up",
- * "down"). Only windows wholly past that edge of the focused one count, so
- * Down from a full-height master goes nowhere, as in i3. */
-bool tile_focus_direction(struct server *server, const char *dir) {
+/* The nearest tile to from in a direction ("left", "right", "up", "down"),
+ * or NULL. Only windows wholly past that edge of it count, so Down from a
+ * full-height tile finds nothing, as in i3. */
+static struct view *neighbour(struct view *from, const char *dir) {
 	struct view *tiles[256];
-	int n = workspace_tiles(server->active_workspace, tiles, 256);
-	struct view *from = server->focused_view;
-	if (n == 0) {
-		return false;
-	}
-	if (from == NULL || !view_is_tiled(from)) {
-		focus_view(tiles[0]);
-		return true;
-	}
-	if (server->active_workspace->zoomed != NULL) {
-		tile_unzoom(server->active_workspace);
-	}
+	int n = workspace_tiles(from->workspace, tiles, 256);
 	struct wlr_box f;
 	view_frame_box(from, &f);
 	struct view *best = NULL;
@@ -309,8 +298,121 @@ bool tile_focus_direction(struct server *server, const char *dir) {
 			best_score = score;
 		}
 	}
+	return best;
+}
+
+/* Moves focus to the nearest tile in a direction. */
+bool tile_focus_direction(struct server *server, const char *dir) {
+	struct view *tiles[256];
+	int n = workspace_tiles(server->active_workspace, tiles, 256);
+	struct view *from = server->focused_view;
+	if (n == 0) {
+		return false;
+	}
+	if (from == NULL || !view_is_tiled(from)) {
+		focus_view(tiles[0]);
+		return true;
+	}
+	if (server->active_workspace->zoomed != NULL) {
+		tile_unzoom(server->active_workspace);
+	}
+	struct view *best = neighbour(from, dir);
 	if (best != NULL) {
 		focus_view(best);
 	}
 	return best != NULL;
+}
+
+/* The focused tile, if tiling and it's arranged: what swap and push move. */
+static struct view *focused_tile(struct server *server) {
+	struct view *view = server->focused_view;
+	if (server->mode != MODE_TILING || view == NULL || !view_is_tiled(view) ||
+			view->tile_column < 0) {
+		return NULL;
+	}
+	tile_unzoom(view->workspace);
+	return view;
+}
+
+static void moved(struct view *view) {
+	tile_arrange(view->server);
+	focus_view(view);
+	cursor_rebase(view->server);
+	ipc_notify_windows(view->server);
+}
+
+/* Super+Ctrl+Arrow: the focused tile trades places with its neighbour
+ * that way, column and all. */
+bool tile_swap(struct server *server, const char *dir) {
+	struct view *view = focused_tile(server);
+	struct view *other = view ? neighbour(view, dir) : NULL;
+	if (other == NULL) {
+		return false;
+	}
+	/* Swap their places in the tile order... */
+	struct wl_list *a = &view->tile_link, *b = &other->tile_link;
+	if (a->next == b) {
+		wl_list_remove(a);
+		wl_list_insert(b, a);
+	} else if (b->next == a) {
+		wl_list_remove(b);
+		wl_list_insert(a, b);
+	} else {
+		struct wl_list *before_a = a->prev;
+		wl_list_remove(a);
+		wl_list_insert(b, a);
+		wl_list_remove(b);
+		wl_list_insert(before_a, b);
+	}
+	/* ...and their columns. */
+	int column = view->tile_column;
+	view->tile_column = other->tile_column;
+	other->tile_column = column;
+	moved(view);
+	return true;
+}
+
+/* Super+Shift+Left/Right: the focused tile leaves its column for the other
+ * one, below the window it lands beside. A window alone in its column
+ * stays; a single full-width column gains a second, on that side. */
+bool tile_push(struct server *server, const char *dir) {
+	struct view *view = focused_tile(server);
+	bool left = strcmp(dir, "left") == 0;
+	if (view == NULL || (!left && strcmp(dir, "right") != 0)) {
+		return false;
+	}
+	struct view *tiles[256];
+	int n = workspace_tiles(view->workspace, tiles, 256);
+	int count[2] = { 0, 0 };
+	for (int i = 0; i < n; i++) {
+		if (tiles[i]->tile_column == 0 || tiles[i]->tile_column == 1) {
+			count[tiles[i]->tile_column]++;
+		}
+	}
+	int from = view->tile_column, to = left ? 0 : 1;
+	if (count[from] < 2) {
+		return false; /* it would leave its column empty */
+	}
+	if (count[1 - from] == 0) {
+		/* One column: the others go to the far side, this one to dir. */
+		for (int i = 0; i < n; i++) {
+			tiles[i]->tile_column = 1 - to;
+		}
+		view->tile_column = to;
+		moved(view);
+		return true;
+	}
+	if (from == to) {
+		return false; /* already the column on that side */
+	}
+	struct view *beside = neighbour(view, dir);
+	wl_list_remove(&view->tile_link);
+	if (beside != NULL) {
+		wl_list_insert(&beside->tile_link, &view->tile_link);
+	} else {
+		wl_list_insert(server->tiles.prev, &view->tile_link);
+	}
+	view->tile_column = to;
+	moved(view);
+	return true;
 }
