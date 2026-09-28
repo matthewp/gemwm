@@ -1,13 +1,21 @@
 /*
- * Tiling mode: windows share the screen, master and stack, like dwm.
+ * Tiling mode: windows share the screen in two columns, each a stack of
+ * windows top to bottom.
  *
  *   +--------------+-------------+
- *   |              |  stack 1    |
- *   |   master     +-------------+
- *   |  (first)     |  stack 2    |
- *   |              +-------------+
- *   |              |  stack 3    |
+ *   |   left 1     |  right 1    |
  *   +--------------+-------------+
+ *   |   left 2     |  right 2    |
+ *   |              +-------------+
+ *   |              |  right 3    |
+ *   +--------------+-------------+
+ *
+ * A new window goes where you're working, as in i3 and sway: while only
+ * one column is in use it starts the other (on the right); after that it
+ * splits the focused window's column, just below it (view.c). A column
+ * left empty gives the other the whole width. Windows arriving without a
+ * column (from another mode or workspace) take the left if it's free,
+ * else the right, so switching modes gives the familiar layout.
  *
  * One window fills the screen. `gap` pixels separate the tiles and the
  * screen edges. Windows keep their GEM frames; the gap is between frames.
@@ -56,6 +64,19 @@ void tile_place(struct view *view, int x, int y, int w, int h) {
 	}
 }
 
+/* A column's windows, top to bottom, sharing its height. */
+static void place_column(struct view **views, int k, int x, int w,
+		struct wlr_box area, int g) {
+	int avail = area.height - (k + 1) * g;
+	int y = area.y + g;
+	for (int i = 0; i < k; i++) {
+		/* The last one takes whatever rounding left over. */
+		int h = i == k - 1 ? area.y + area.height - g - y : avail / k;
+		tile_place(views[i], x, y, w, h);
+		y += h + g;
+	}
+}
+
 static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 	struct server *server = ws->server;
 	struct view *tiles[256];
@@ -75,25 +96,26 @@ static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 			area.width - 2 * g, area.height - 2 * g);
 		return;
 	}
-	if (n == 1) {
-		tile_place(tiles[0], area.x + g, area.y + g,
-			area.width - 2 * g, area.height - 2 * g);
+	struct view *columns[2][256];
+	int count[2] = { 0, 0 };
+	for (int i = 0; i < n; i++) {
+		struct view *view = tiles[i];
+		if (view->tile_column < 0 || view->tile_column > 1) {
+			view->tile_column = count[0] == 0 ? 0 : 1;
+		}
+		columns[view->tile_column][count[view->tile_column]++] = view;
+	}
+	/* One column in use: it has the whole width. */
+	if (count[0] == 0 || count[1] == 0) {
+		int c = count[0] > 0 ? 0 : 1;
+		place_column(columns[c], count[c], area.x + g, area.width - 2 * g,
+			area, g);
 		return;
 	}
-	int master_w = (area.width - 3 * g) / 2;
-	int stack_x = area.x + 2 * g + master_w;
-	int stack_w = area.width - 3 * g - master_w;
-	tile_place(tiles[0], area.x + g, area.y + g, master_w, area.height - 2 * g);
-
-	int k = n - 1;
-	int avail = area.height - (k + 1) * g;
-	int y = area.y + g;
-	for (int i = 0; i < k; i++) {
-		/* The last one takes whatever rounding left over. */
-		int h = i == k - 1 ? area.y + area.height - g - y : avail / k;
-		tile_place(tiles[1 + i], stack_x, y, stack_w, h);
-		y += h + g;
-	}
+	int left_w = (area.width - 3 * g) / 2;
+	place_column(columns[0], count[0], area.x + g, left_w, area, g);
+	place_column(columns[1], count[1], area.x + 2 * g + left_w,
+		area.width - 3 * g - left_w, area, g);
 }
 
 void tile_arrange(struct server *server) {

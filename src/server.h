@@ -181,6 +181,7 @@ struct view {
 	struct server *server;
 	uint32_t id; /* stable, for gemwm msg */
 	struct wl_list tile_link;    /* server.tiles, while mapped */
+	int tile_column;             /* tiling: 0 left, 1 right, -1 not yet */
 	struct column *column;       /* scrolling mode */
 	struct wl_list column_link;  /* column.views */
 	struct wlr_box float_box;    /* frame box to go back to after tiling */

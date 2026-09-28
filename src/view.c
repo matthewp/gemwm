@@ -581,30 +581,34 @@ void view_frame_click(struct view *view, double fx, double fy, uint32_t time) {
 
 /* ---- xdg-shell toplevels ------------------------------------------------ */
 
-/* Tiling puts a new window where you're working, as i3 and sway do: in the
- * focused window's column. Focused on the master, the new window takes its
- * place and the master tops the stack; focused in the stack, it goes just
- * below. A lone window's new neighbour opens the second column, on the
- * right. Otherwise (other modes, dialogs, nothing focused) it goes last. */
+/* Tiling puts a new window where you're working, as i3 and sway do:
+ * while only one column is in use it starts the other; after that it
+ * splits the focused window's column, just below it (see tile.c).
+ * Otherwise (other modes, dialogs, nothing focused) it goes last and the
+ * layout finds it a column. */
 static void tile_insert(struct view *view) {
 	struct server *server = view->server;
 	struct view *focused = server->focused_view;
+	view->tile_column = -1;
 	if (server->mode != MODE_TILING || !view_is_tiled(view) || focused == NULL ||
-			focused->workspace != view->workspace || !view_is_tiled(focused)) {
+			focused->workspace != view->workspace || !view_is_tiled(focused) ||
+			focused->tile_column < 0) {
 		wl_list_insert(server->tiles.prev, &view->tile_link);
 		return;
 	}
-	struct view *master = NULL, *v;
-	int tiles = 0;
+	int count[2] = { 0, 0 };
+	struct view *v;
 	wl_list_for_each(v, &server->tiles, tile_link) {
-		if (v->workspace == focused->workspace && view_is_tiled(v)) {
-			master = master != NULL ? master : v;
-			tiles++;
+		if (v->workspace == focused->workspace && view_is_tiled(v) &&
+				v->tile_column >= 0 && v->tile_column <= 1) {
+			count[v->tile_column]++;
 		}
 	}
-	if (focused == master && tiles > 1) {
-		wl_list_insert(focused->tile_link.prev, &view->tile_link);
+	if (count[0] == 0 || count[1] == 0) {
+		view->tile_column = count[0] > 0 ? 1 : 0; /* the other column */
+		wl_list_insert(server->tiles.prev, &view->tile_link);
 	} else {
+		view->tile_column = focused->tile_column;
 		wl_list_insert(&focused->tile_link, &view->tile_link);
 	}
 }

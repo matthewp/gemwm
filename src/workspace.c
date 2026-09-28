@@ -130,6 +130,7 @@ void view_set_workspace(struct view *view, struct workspace *ws) {
 	tile_unzoom(ws);
 	scroll_remove_view(view);
 	view->workspace = ws;
+	view->tile_column = -1; /* the layout there finds it a column */
 	wlr_scene_node_reparent(&view->tree->node, ws->tree);
 	if (server->mode == MODE_SCROLLING) {
 		scroll_add_view(view); /* joins the end of the strip there */
