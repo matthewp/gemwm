@@ -304,6 +304,13 @@ Progress is saved as you type. Puzzles and saves are in
 `~/.local/share/gemwm/crossword/`; `gemwm-crossword FILE.puz` opens any
 `.puz`. It needs GTK 4 and libsoup 3 to build.
 
+File > Print... (Ctrl+P) prints the open puzzle the way a newspaper would:
+the title and byline, the grid, and the clues in columns around it (going
+on to a second page if they need to). The print dialog's Crossword tab has
+"Include my answers" to print what you've filled in. To make a PDF without
+the dialog: `gemwm-crossword --pdf OUT.pdf [--blank] FILE.puz` (with your
+saved answers, unless `--blank`).
+
 ## Desktop
 
 The desktop is set in `[desktop]` in `~/.config/gemwm/config`:

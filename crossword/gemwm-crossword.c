@@ -2,6 +2,7 @@
  * gemwm-crossword: crossword puzzles for GemWM, after MPOS's.
  *
  *   gemwm-crossword [FILE.puz]
+ *   gemwm-crossword --pdf OUT.pdf [--blank] FILE.puz
  *
  * Two screens in one GEM window. The library lists your puzzles by date,
  * with how far along each is, and the week's Wall Street Journal and
@@ -9,6 +10,8 @@
  * at herbach.dnsalias.com). The puzzle: Across clues, the grid, Down clues;
  * the current square in blue, the rest of its word in light blue, and the
  * grid's border green or red once checked. Progress is saved as you type.
+ * File > Print (print.c) puts it on paper, newspaper-style; --pdf makes
+ * the same pages into a PDF, with your answers unless --blank.
  *
  * Puzzles and saves live in ~/.local/share/gemwm/crossword/.
  */
@@ -19,6 +22,7 @@
 #include <string.h>
 #include "app-menu.h"
 #include "gem-draw.h"
+#include "print.h"
 #include "puz.h"
 
 #define PAD 8
@@ -227,6 +231,7 @@ enum action {
 	ACT_ALERT_NO,
 	ACT_CLOSE,
 	ACT_SHOW_DOWNLOADS,
+	ACT_PRINT,
 };
 
 struct hit {
@@ -945,8 +950,21 @@ static void paint_game(cairo_t *cr, int w, int h) {
 		ROW_H);
 	g_free(by);
 
+	/* The buttons go in a row under the grid, or stacked if the middle is
+	 * too narrow for one: then the grid leaves them room. */
+	static const char *const labels[] = { "Check Puzzle", "Reveal Letter",
+		"Clear Puzzle" };
+	static const enum action actions[] = { ACT_CHECK, ACT_REVEAL_LETTER,
+		ACT_CLEAR };
+	int total = 0;
+	for (int i = 0; i < 3; i++) {
+		total += button_width(cr, labels[i]) + (i > 0 ? PAD : 0);
+	}
+	bool stack = total > cw - 2 * PAD;
+	int footer_h = FOOTER_H + (stack ? 2 * (BUTTON_H + PAD / 2) : 0);
+
 	/* The grid, as big as fits. */
-	int avail_w = cw - 2 * PAD - 8, avail_h = h - HEADER_H - FOOTER_H - 8;
+	int avail_w = cw - 2 * PAD - 8, avail_h = h - HEADER_H - footer_h - 8;
 	int cell = MIN(MAX_CELL, MIN(avail_w / p->width, avail_h / p->height));
 	cell = MAX(cell, MIN_CELL);
 	int gw = cell * p->width + 1, gh = cell * p->height + 1;
@@ -1047,18 +1065,18 @@ static void paint_game(cairo_t *cr, int w, int h) {
 	const char *line = ui.message ? ui.message : dir;
 	gem_text(cr, line, cx + (cw - gem_text_width(cr, line)) / 2, fy, 18);
 	fy += 18 + PAD / 2;
-	static const char *const labels[] = { "Check Puzzle", "Reveal Letter",
-		"Clear Puzzle" };
-	static const enum action actions[] = { ACT_CHECK, ACT_REVEAL_LETTER,
-		ACT_CLEAR };
-	int total = 0;
-	for (int i = 0; i < 3; i++) {
-		total += button_width(cr, labels[i]) + (i > 0 ? PAD : 0);
-	}
 	int bx = cx + (cw - total) / 2;
 	for (int i = 0; i < 3; i++) {
+		if (stack) {
+			/* Centred on one another, like a GEM dialog's. */
+			bx = cx + (cw - button_width(cr, labels[i])) / 2;
+		}
 		button(cr, bx, fy, labels[i], actions[i], NULL, !p->scrambled || i == 2);
-		bx += button_width(cr, labels[i]) + PAD;
+		if (stack) {
+			fy += BUTTON_H + PAD / 2;
+		} else {
+			bx += button_width(cr, labels[i]) + PAD;
+		}
 	}
 }
 
@@ -1121,6 +1139,28 @@ static struct hit *hit_at(double x, double y) {
 		}
 	}
 	return NULL;
+}
+
+/* The line under the title on paper: author, then source and date. */
+static char *subtitle(const char *id, const struct puzzle *p) {
+	GDateTime *date = NULL;
+	const struct source *src = source_of(id, &date);
+	GString *s = g_string_new(NULL);
+	if (p->author[0] != '\0') {
+		g_string_append_printf(s, "by %s", p->author);
+	}
+	if (src != NULL) {
+		char *day = g_date_time_format(date, "%A %-d %B %Y");
+		g_string_append_printf(s, "%s%s, %s", s->len ? "  \u00b7  " : "",
+			src->name, day);
+		g_free(day);
+		g_date_time_unref(date);
+	}
+	return g_string_free(s, FALSE);
+}
+
+static void printed(const char *message, void *data) {
+	set_message("%s", message);
 }
 
 static void act(enum action action, const struct hit *hit) {
@@ -1189,6 +1229,15 @@ static void act(enum action action, const struct hit *hit) {
 	case ACT_ALERT_NO:
 		ui.asking_clear = false;
 		break;
+	case ACT_PRINT:
+		if (ui.playing) {
+			save();
+			char *sub = subtitle(ui.id, ui.puz);
+			set_message("Printing...");
+			print_puzzle(GTK_WINDOW(ui.window), ui.puz, sub, printed, NULL);
+			g_free(sub);
+		}
+		break;
 	case ACT_CLOSE:
 		gtk_window_close(GTK_WINDOW(ui.window));
 		return;
@@ -1256,6 +1305,10 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
 	bool ctrl = mods & GDK_CONTROL_MASK;
 	if (ctrl && (keyval == GDK_KEY_w || keyval == GDK_KEY_W)) {
 		act(ACT_CLOSE, NULL);
+		return TRUE;
+	}
+	if (ctrl && (keyval == GDK_KEY_p || keyval == GDK_KEY_P)) {
+		act(ACT_PRINT, NULL);
 		return TRUE;
 	}
 	if (ctrl && (keyval == GDK_KEY_l || keyval == GDK_KEY_L)) {
@@ -1329,6 +1382,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_REVEAL_WORD, "Reveal Word", "", checkable);
 	app_menu_add_item(m, ACT_CLEAR, "Clear Puzzle...", "", game);
 	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_PRINT, "Print...", "^P", game);
+	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_CLOSE, "Close", "^W", 0);
 }
 
@@ -1393,7 +1448,58 @@ static void open_files(GApplication *app, GFile **files, int n, const char *hint
 	gtk_window_present(GTK_WINDOW(ui.window));
 }
 
+/* --pdf OUT [--blank] FILE: the printed pages as a PDF, no window. */
+static int export_pdf(int argc, char *argv[]) {
+	const char *out = NULL, *in = NULL;
+	bool blank = false;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--pdf") == 0 && i + 1 < argc) {
+			out = argv[++i];
+		} else if (strcmp(argv[i], "--blank") == 0) {
+			blank = true;
+		} else {
+			in = argv[i];
+		}
+	}
+	if (out == NULL || in == NULL) {
+		fprintf(stderr, "usage: gemwm-crossword --pdf OUT.pdf [--blank] "
+			"FILE.puz\n");
+		return 2;
+	}
+	gtk_init();
+	GError *error = NULL;
+	struct puzzle *p = puz_load(in, &error);
+	if (p == NULL) {
+		fprintf(stderr, "gemwm-crossword: %s\n", error->message);
+		return 1;
+	}
+	/* With the answers saved for it, if any. */
+	char *base = g_path_get_basename(in);
+	char *id = g_str_has_suffix(base, ".puz") ?
+		g_strndup(base, strlen(base) - 4) : g_strdup(base);
+	struct progress pr = { 0 };
+	if (progress_load(id, p->width * p->height, &pr)) {
+		memcpy(p->grid, pr.grid, p->width * p->height);
+		g_free(pr.grid);
+	}
+	char *sub = subtitle(id, p);
+	bool ok = print_puzzle_pdf(p, sub, !blank, out, &error);
+	if (!ok) {
+		fprintf(stderr, "gemwm-crossword: %s\n", error->message);
+	}
+	g_free(sub);
+	g_free(id);
+	g_free(base);
+	puz_free(p);
+	return ok ? 0 : 1;
+}
+
 int main(int argc, char *argv[]) {
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--pdf") == 0) {
+			return export_pdf(argc, argv);
+		}
+	}
 	GtkApplication *app = gtk_application_new("org.gemwm.Crossword",
 		G_APPLICATION_HANDLES_OPEN);
 	g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);

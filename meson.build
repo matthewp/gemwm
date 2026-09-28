@@ -196,7 +196,8 @@ if gtk4.found()
 	if soup.found()
 		executable(
 			'gemwm-crossword',
-			['crossword/gemwm-crossword.c', 'crossword/puz.c', 'lib/app-menu.c',
+			['crossword/gemwm-crossword.c', 'crossword/puz.c',
+				'crossword/print.c', 'lib/app-menu.c',
 				'lib/gem-draw.c', client_protocols],
 			dependencies: [gtk4, dependency('gtk4-wayland'), soup, wayland_client,
 				cairo],
