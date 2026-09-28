@@ -148,8 +148,13 @@ void scroll_arrange_workspace(struct workspace *ws, struct wlr_box area) {
 		struct view *view;
 		wl_list_for_each(view, &col->views, column_link) {
 			int h = i == n - 1 ? area.y + area.height - g - y : avail / n;
+			/* Shown before it moves, so a column coming on screen slides
+			 * in; one going off stays until it has slid out. */
+			wlr_scene_node_set_enabled(&view->tree->node,
+				(visible || view->slide_start != 0) && !view->anim_hidden);
 			tile_place(view, sx, y, col->w, h);
-			wlr_scene_node_set_enabled(&view->tree->node, visible);
+			wlr_scene_node_set_enabled(&view->tree->node,
+				(visible || view->slide_start != 0) && !view->anim_hidden);
 			y += h + g;
 			i++;
 		}

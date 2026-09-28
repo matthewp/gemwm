@@ -3,6 +3,7 @@
 
 #include <cairo.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/box.h>
@@ -66,6 +67,12 @@ struct server {
 	bool highlight_tiling; /* in tiling mode, always show the focus border */
 	enum { DIM_OFF, DIM_TILING, DIM_ALWAYS } dim; /* grey out unfocused windows */
 	float dim_opacity;
+
+	/* [animation] (animate.c): windows gliding to their places, or GEM's
+	 * outlines moving between boxes (in animations). */
+	enum { ANIM_SLIDE, ANIM_OUTLINE, ANIM_OFF } anim_mode;
+	int anim_ms;
+	struct wl_list animations;
 
 	/* The desktop background (desktop.c): a colour or the ST's mono
 	 * pattern, with an image over it if one is set. */
@@ -204,6 +211,17 @@ struct view {
 
 	bool maximized;
 	struct wlr_box saved_box; /* frame box before maximizing */
+	/* Animations (animate.c). slide: its node glides from slide_from to
+	 * x, y; a new one fades in (times in ms, 0 when still). outline: it's
+	 * hidden while its outline moves from the box the layout last gave it
+	 * (tile_box). placed: it's been somewhere before, so it moves rather
+	 * than appears. */
+	int slide_from_x, slide_from_y;
+	int64_t slide_start, fade_start;
+	bool anim_hidden;
+	bool tile_box_valid;
+	struct wlr_box tile_box;
+	bool placed;
 	/* Fullscreen: the whole output, frameless, above everything else. */
 	bool fullscreen;
 	struct wlr_box fullscreen_box; /* frame box to go back to */
@@ -263,6 +281,13 @@ void view_begin_interactive(struct view *view, enum cursor_mode mode,
 	uint32_t edges);
 void view_toggle_maximize(struct view *view);
 void view_set_fullscreen(struct view *view, bool fullscreen);
+void animate_move(struct view *view);
+void animate_appear(struct view *view);
+void animate_box(struct view *view, const struct wlr_box *from,
+	const struct wlr_box *to);
+void animate_grow(struct view *view, const struct wlr_box *to);
+void animate_view_gone(struct view *view);
+bool animate_tick(struct server *server);
 void fullscreen_update(struct server *server);
 void view_frame_click(struct view *view, double fx, double fy, uint32_t time);
 void process_interactive_motion(struct server *server);

@@ -644,6 +644,9 @@ static void view_map(struct wl_listener *listener, void *data) {
 	wlr_scene_node_reparent(&view->tree->node, view->workspace->tree);
 	wlr_scene_node_set_enabled(&view->tree->node, true);
 	wl_list_insert(&server->views, &view->link);
+	/* Opened in window mode, it's somewhere already: turning to tiling
+	 * slides it from there. Otherwise it fades in in its place. */
+	view->placed = server->mode == MODE_WINDOW;
 	tile_insert(view);
 	if (server->mode == MODE_SCROLLING) {
 		scroll_add_view(view); /* a new column, right of the focused one */
@@ -673,6 +676,9 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 		end_interactive(server);
 	}
 	view_cycle_end(server);
+	animate_view_gone(view);
+	view->placed = false;
+	view->tile_box_valid = false;
 	view->fullscreen = false; /* its node goes back among the others below */
 	if (view->workspace != NULL && view->workspace->zoomed == view) {
 		tile_unzoom(view->workspace); /* re-shows the other tiles */
@@ -770,7 +776,8 @@ void fullscreen_update(struct server *server) {
 	wl_list_for_each(view, &server->views, link) {
 		if (view->fullscreen) {
 			wlr_scene_node_set_enabled(&view->tree->node,
-				view->workspace == server->active_workspace);
+				view->workspace == server->active_workspace &&
+				!view->anim_hidden);
 		}
 	}
 }
@@ -973,6 +980,7 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 void view_init_shell(struct server *server) {
 	wl_list_init(&server->views);
 	wl_list_init(&server->tiles);
+	wl_list_init(&server->animations);
 	server->xdg_shell = wlr_xdg_shell_create(server->wl_display, 5);
 	server->new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server->xdg_shell->events.new_toplevel,

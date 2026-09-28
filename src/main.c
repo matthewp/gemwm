@@ -383,6 +383,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, frame);
 	struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(
 		output->server->scene, output->wlr_output);
+	/* Something moving asks for the frame after this one too. */
+	if (animate_tick(output->server)) {
+		wlr_output_schedule_frame(output->wlr_output);
+	}
 	wlr_scene_output_commit(scene_output, NULL);
 
 	struct timespec now;

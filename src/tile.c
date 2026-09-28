@@ -57,7 +57,41 @@ void tile_place(struct view *view, int x, int y, int w, int h) {
 	if (w - ew < 1 || h - eh < 1) {
 		return;
 	}
+	/* Animated (animate.c). Outline style, tiling: it goes there as an
+	 * outline, from the box the layout last gave it (not its size now:
+	 * the client may not have caught up), and a new window's outline
+	 * grows. Otherwise it glides there from wherever it's drawn now, and
+	 * a new window fades in. */
+	struct server *server = view->server;
+	struct wlr_scene_node *node = &view->tree->node;
+	int drawn_x = node->x, drawn_y = node->y;
+	struct wlr_box to = { x, y, w, h }, from;
+	if (view->tile_box_valid) {
+		from = view->tile_box;
+	} else {
+		view_frame_box(view, &from);
+	}
+	bool first = !view->placed;
+	bool moved = !first && (view->x != x || view->y != y);
+	bool changed = from.x != x || from.y != y || from.width != w ||
+		from.height != h;
+	view->placed = true;
+	view->tile_box = to;
+	view->tile_box_valid = true;
 	view_move(view, x, y);
+	if (server->anim_mode == ANIM_OUTLINE && (first ||
+			server->mode == MODE_TILING)) {
+		if (first) {
+			animate_grow(view, &to);
+		} else if (changed) {
+			animate_box(view, &from, &to);
+		}
+	} else if (first) {
+		animate_appear(view);
+	} else if (moved) {
+		wlr_scene_node_set_position(node, drawn_x, drawn_y);
+		animate_move(view);
+	}
 	/* Arranging runs often (every focus change when scrolling): only ask
 	 * the client to resize when the size actually changes. */
 	struct wlr_xdg_toplevel *toplevel = view->xdg_toplevel;
@@ -92,7 +126,8 @@ static void arrange_workspace(struct workspace *ws, struct wlr_box area) {
 	 * but hidden until it's restored. */
 	for (int i = 0; i < n; i++) {
 		wlr_scene_node_set_enabled(&tiles[i]->tree->node,
-			ws->zoomed == NULL || tiles[i] == ws->zoomed);
+			(ws->zoomed == NULL || tiles[i] == ws->zoomed) &&
+			!tiles[i]->anim_hidden);
 	}
 	if (ws->zoomed != NULL) {
 		tile_place(ws->zoomed, area.x + g, area.y + g,
@@ -153,7 +188,8 @@ void tile_unzoom(struct workspace *ws) {
 	struct view *tiles[256];
 	int n = workspace_tiles(ws, tiles, 256);
 	for (int i = 0; i < n; i++) {
-		wlr_scene_node_set_enabled(&tiles[i]->tree->node, true);
+		wlr_scene_node_set_enabled(&tiles[i]->tree->node,
+			!tiles[i]->anim_hidden);
 	}
 	tile_arrange(ws->server);
 	cursor_rebase(ws->server);
@@ -231,6 +267,7 @@ void tile_set_mode(struct server *server, enum layout_mode mode) {
 	}
 	if (mode == MODE_WINDOW) {
 		wl_list_for_each(view, &server->views, link) {
+			view->tile_box_valid = false; /* moved from here next time */
 			if (view->xdg_toplevel->parent != NULL) {
 				continue;
 			}

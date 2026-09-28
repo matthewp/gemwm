@@ -107,7 +107,11 @@ static const char default_config[] =
 	"dither-style = diffuse\n"
 	"pixel-size = 2\n"
 	"resolution = off\n"
-	"pattern = none\n";
+	"pattern = none\n"
+	"\n"
+	"[animation]\n"
+	"mode = slide\n"
+	"duration = 200\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -340,6 +344,14 @@ static void parse(struct server *server, FILE *f, const char *name) {
 					server->desktop_pattern = (enum desktop_pattern)i;
 				}
 			}
+		} else if (strcmp(section, "animation") == 0 &&
+				strcmp(key, "mode") == 0) {
+			server->anim_mode = strcmp(value, "off") == 0 ? ANIM_OFF :
+				strcmp(value, "outline") == 0 ? ANIM_OUTLINE : ANIM_SLIDE;
+		} else if (strcmp(section, "animation") == 0 &&
+				strcmp(key, "duration") == 0) {
+			int ms = atoi(value);
+			server->anim_ms = ms < 1 ? 1 : ms > 2000 ? 2000 : ms;
 		} else if (strcmp(section, "font") == 0 && strcmp(key, "family") == 0) {
 			free(server->font_family);
 			server->font_family = value[0] != '\0' ? strdup(value) : NULL;

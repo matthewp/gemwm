@@ -227,6 +227,10 @@ each line adds or replaces one binding, and `none` removes one.
     resolution = off
     pattern = none
 
+    [animation]
+    mode = slide                         # outline (GEM's moving boxes), off
+    duration = 200                       # ms; see Animation
+
     [font]                               # see Font
     family = Atari ST 8x16
     size = 16
@@ -259,6 +263,32 @@ each with a GEM slider and Mute. The volume keys run `gemwm-volume up`,
 `down`, `mute` and `mic-mute`, in 5% steps up to 100%, and the bar follows
 at once. It uses PulseAudio, or PipeWire's PulseAudio server, and is built
 when GTK 4 and `libpulse` are there.
+
+## Animation
+
+In tiling and scrolling modes, changes to the layout are animated: a new
+window, a swap or push, a window closing and the others closing up, Super+Z,
+and in scrolling mode the strip moving to the focused column. There are two
+styles:
+
+    [animation]
+    mode = slide              # or outline, or off
+    duration = 200            # ms, how long each takes
+
+- **slide** (the default): windows glide to their new places, quick to
+  start and gentle to stop, and a new window fades in, rising into its
+  place. Only positions glide; a window that changes size takes its new
+  size when its application redraws.
+- **outline**: the way GEM did it. Windows don't move: in tiling mode a
+  window the layout moves or resizes is hidden while its outline (the one
+  you drag windows by) steps from its old place to its new one, then it
+  appears there, and a new window's outline grows from the middle of its
+  place, as GEM opened windows from their icons. Scrolling mode still
+  slides its strip, and new windows' outlines grow there too.
+- **off**: everything jumps straight to its place.
+
+Window mode isn't animated: its windows only move when you drag them, and
+dragging already shows an outline.
 
 ## Crossword Puzzle
 
@@ -360,11 +390,14 @@ again, a new window, or moving focus brings the layout back. Tiles can't be
 dragged or resized; switching back to window mode returns every window to
 where it was.
 
+Changes to the layout are animated; see [Animation](#animation).
+
 ## Scrolling
 
 The third mode, after niri. Each workspace is a strip of columns that
 scrolls sideways; two half-width columns fill the screen, and the view moves
-just enough to keep the focused column in sight. A new window opens as a
+just enough to keep the focused column in sight, sliding there so you can
+see where you went (see [Animation](#animation)). A new window opens as a
 column to the right of the focused one.
 
 - Super+Left/Right (or Super+mouse wheel) moves between columns,
