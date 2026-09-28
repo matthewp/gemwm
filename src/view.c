@@ -581,6 +581,34 @@ void view_frame_click(struct view *view, double fx, double fy, uint32_t time) {
 
 /* ---- xdg-shell toplevels ------------------------------------------------ */
 
+/* Tiling puts a new window where you're working, as i3 and sway do: in the
+ * focused window's column. Focused on the master, the new window takes its
+ * place and the master tops the stack; focused in the stack, it goes just
+ * below. A lone window's new neighbour opens the second column, on the
+ * right. Otherwise (other modes, dialogs, nothing focused) it goes last. */
+static void tile_insert(struct view *view) {
+	struct server *server = view->server;
+	struct view *focused = server->focused_view;
+	if (server->mode != MODE_TILING || !view_is_tiled(view) || focused == NULL ||
+			focused->workspace != view->workspace || !view_is_tiled(focused)) {
+		wl_list_insert(server->tiles.prev, &view->tile_link);
+		return;
+	}
+	struct view *master = NULL, *v;
+	int tiles = 0;
+	wl_list_for_each(v, &server->tiles, tile_link) {
+		if (v->workspace == focused->workspace && view_is_tiled(v)) {
+			master = master != NULL ? master : v;
+			tiles++;
+		}
+	}
+	if (focused == master && tiles > 1) {
+		wl_list_insert(focused->tile_link.prev, &view->tile_link);
+	} else {
+		wl_list_insert(&focused->tile_link, &view->tile_link);
+	}
+}
+
 static void view_map(struct wl_listener *listener, void *data) {
 	struct view *view = wl_container_of(listener, view, map);
 	struct server *server = view->server;
@@ -597,7 +625,7 @@ static void view_map(struct wl_listener *listener, void *data) {
 	wlr_scene_node_reparent(&view->tree->node, view->workspace->tree);
 	wlr_scene_node_set_enabled(&view->tree->node, true);
 	wl_list_insert(&server->views, &view->link);
-	wl_list_insert(server->tiles.prev, &view->tile_link);
+	tile_insert(view);
 	if (server->mode == MODE_SCROLLING) {
 		scroll_add_view(view); /* a new column, right of the focused one */
 	}

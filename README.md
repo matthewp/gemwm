@@ -342,7 +342,10 @@ workspace, which creates a new one.
 Options > Mode switches between **Window** (overlapping GEM windows),
 **Tiling** and **Scrolling** (below), with a check mark on the current one. In tiling mode the first
 window takes the left half and the rest stack down the right, `gap` pixels
-apart; dialogs float on top. Super+Arrows move focus between tiles, and the
+apart; dialogs float on top. A new window opens where you're working, as in
+i3 and sway: with the left tile focused it takes the left half (that tile
+moves to the top of the right column), with a right-hand tile focused it
+opens just below it. Super+Arrows move focus between tiles, and the
 focused tile keeps the pink focus border,
 while the others are greyed out with GEM's dotted "disabled" pattern (clicks
 go straight through it). Super+Z (or a tile's fuller) makes the focused
