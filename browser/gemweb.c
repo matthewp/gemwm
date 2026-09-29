@@ -27,6 +27,7 @@
 #include "gemwm-scroll-v1-client-protocol.h"
 #include "cookies.h"
 #include "history.h"
+#include "passwords.h"
 
 #define TAB_H 20       /* 19px of tabs plus a 1px line */
 #define TOOL_H 21      /* the toolbar's buttons; the box adds a 1px line */
@@ -41,13 +42,17 @@
 #define DEFAULT_SEARCH "https://duckduckgo.com/?q=%s"
 #define SUGGEST_ROWS 8 /* the address field's list of pages from history */
 #define ROW_H 19
-#define BUTTON_H 22    /* an alert's buttons */
+#define BUTTON_H 22    /* a dialog's buttons */
+#define FIELD_H 24     /* and its password field */
+#define PASSWORD_WORLD "gemweb" /* the JavaScript world passwords are filled in */
 #define PAD 8
 
 static const char *font_family;
 static int font_size;
 
 struct browser;
+
+enum dialog { DIALOG_NONE, DIALOG_CLEAR_HISTORY, DIALOG_UNLOCK };
 
 struct tab {
 	struct browser *browser;
@@ -66,6 +71,7 @@ struct tab {
 	bool typed;
 	guint record_timer;
 	char *failed; /* an address that didn't load, shown as an error page */
+	bool login;   /* the page has a login field */
 };
 
 struct browser {
@@ -91,9 +97,22 @@ struct browser {
 	GPtrArray *suggestions;
 	int selected;
 
-	/* The Clear History alert, over the window. */
-	GtkWidget *alert;
-	int alert_buttons[2][4]; /* Clear, Cancel: x, y, w, h */
+	/* A dialog over the window: Clear History, or unlocking passwords. */
+	GtkWidget *dialog_box, *dialog_area, *dialog_field;
+	enum dialog dialog;
+	char *dialog_error;
+	int dialog_field_y;
+	int dialog_buttons[2][4]; /* x, y, w, h */
+
+	/* Passwords: the key gadget, the list of logins when a site has
+	 * several, the host they're for, and what's happening. */
+	GtkWidget *key, *logins_list;
+	GPtrArray *logins;
+	int login_selected;
+	char *login_host;
+	char *password_status;
+	GCancellable *password_cancel;
+	bool looking_up, unlocking;
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -110,6 +129,11 @@ static struct {
 	char *media_missing;
 	WebKitUserScript *media_script;
 	char *start_page;
+	/* Passwords, if a command is set: its session key once unlocked, kept
+	 * (in memory only) until GemWeb quits or Lock Passwords. */
+	bool passwords;
+	char *password_session;
+	WebKitUserScript *login_script;
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -117,6 +141,9 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 static void tab_close(struct browser *b, int index);
 static void tab_select(struct browser *b, int index);
 static void load_home(struct tab *t);
+static void sync_key(struct browser *b);
+static void on_login_message(WebKitUserContentManager *content,
+	JSCValue *value, struct tab *t);
 
 /* GEM-style scroll bars for web pages: a dithered track, a white slider
  * and boxed arrows. User-level, so sites that style their own win. */
@@ -550,6 +577,8 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 		cairo_pattern_destroy(pat);
 		snprintf(buf, sizeof(buf), "Loading... %d%%", (int)(p * 100));
 		msg = buf;
+	} else if (b->password_status != NULL) {
+		msg = b->password_status;
 	} else if (b->download_status != NULL) {
 		msg = b->download_status;
 	} else if (t != NULL && t->media && shared.media_missing != NULL) {
@@ -707,6 +736,7 @@ static void sync_all(struct browser *b) {
 	}
 	sync_entry(b);
 	sync_tabbar(b);
+	sync_key(b);
 	report_scroll(b);
 	app_menu_update(b->menu);
 	gtk_widget_queue_draw(b->buttons);
@@ -802,8 +832,15 @@ static void on_uri(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 
 static void on_progress(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 	if (strcmp(pspec->name, "is-loading") == 0 &&
-			webkit_web_view_is_loading(view) && t->loads++ > 0) {
-		t->media = false;
+			webkit_web_view_is_loading(view)) {
+		if (t->loads++ > 0) {
+			t->media = false;
+		}
+		t->login = false;
+		if (is_active(t)) {
+			set_status(&t->browser->password_status, NULL);
+			sync_key(t->browser);
+		}
 	}
 	if (is_active(t)) {
 		gtk_widget_queue_draw(t->browser->info);
@@ -957,11 +994,11 @@ static void on_download_started(WebKitNetworkSession *session,
 
 /* ---- Settings ----------------------------------------------------------- */
 
-/* A setting from ~/.config/gemweb/settings, under [General], or NULL.
+/* A setting from ~/.config/gemweb/settings, under [group], or NULL.
  * $env, if set, wins (for scripts and tests). The file is read each time,
  * so an edit applies to the next page loaded. */
-static char *setting(const char *key, const char *env) {
-	const char *value = g_getenv(env);
+static char *setting(const char *group, const char *key, const char *env) {
+	const char *value = env != NULL ? g_getenv(env) : NULL;
 	if (value != NULL) {
 		return g_strdup(value);
 	}
@@ -970,7 +1007,7 @@ static char *setting(const char *key, const char *env) {
 	GKeyFile *kf = g_key_file_new();
 	char *s = NULL;
 	if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
-		s = g_key_file_get_string(kf, "General", key, NULL);
+		s = g_key_file_get_string(kf, group, key, NULL);
 	}
 	g_key_file_free(kf);
 	g_free(path);
@@ -988,7 +1025,7 @@ static char *search_engine(void) {
 		{ "startpage", "https://www.startpage.com/do/search?q=%s" },
 		{ "kagi", "https://kagi.com/search?q=%s" },
 	};
-	char *engine = setting("search", "GEMWEB_SEARCH");
+	char *engine = setting("General", "search", "GEMWEB_SEARCH");
 	for (guint i = 0; engine != NULL && i < G_N_ELEMENTS(engines); i++) {
 		if (g_ascii_strcasecmp(engine, engines[i].name) == 0) {
 			g_free(engine);
@@ -1045,7 +1082,7 @@ static char *input_to_uri(const char *input, bool *search) {
 /* The home page: home = an address, or "start" (or nothing) for GemWeb's
  * own start page; Google if it isn't set. */
 static void load_home(struct tab *t) {
-	char *home = setting("home", "GEMWEB_HOME");
+	char *home = setting("General", "home", "GEMWEB_HOME");
 	if (home == NULL) {
 		home = g_strdup(DEFAULT_HOME);
 	}
@@ -1107,6 +1144,13 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 			"gemwmScroll", NULL);
 		g_signal_connect(t->content, "script-message-received::gemwmScroll",
 			G_CALLBACK(on_scroll_message), t);
+	}
+	if (shared.login_script != NULL) {
+		webkit_user_content_manager_add_script(t->content, shared.login_script);
+		webkit_user_content_manager_register_script_message_handler(t->content,
+			"gemwebLogin", PASSWORD_WORLD);
+		g_signal_connect(t->content, "script-message-received::gemwebLogin",
+			G_CALLBACK(on_login_message), t);
 	}
 	if (shared.media_script != NULL) {
 		webkit_user_content_manager_add_script(t->content, shared.media_script);
@@ -1467,18 +1511,30 @@ enum action {
 	ACT_NEW_TAB, ACT_CLOSE_TAB, ACT_FOCUS_URL, ACT_NEXT_TAB, ACT_PREV_TAB,
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
+	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS,
 };
 
 static struct browser *browser_new(GtkApplication *app);
 
-/* ---- The Clear History alert --------------------------------------------- */
+/* ---- Dialogs: Clear History, and unlocking passwords -------------------- */
 
-static const char *const alert_lines[] = {
-	"Clear all history?",
-	"Pages you've visited won't be suggested",
-	"any more. Cookies and logins stay.",
+/* A GEM alert box over the window: its lines, maybe a password field and
+ * a line for what went wrong, then two buttons at the right, the second
+ * the default with a thicker border. Escape is the first. */
+static const struct dialog_text {
+	const char *lines[3];
+	const char *labels[2];
+	int act; /* the button that does it */
+	bool field;
+} dialogs[] = {
+	[DIALOG_CLEAR_HISTORY] = {
+		{ "Clear all history?", "Pages you've visited won't be suggested",
+			"any more. Cookies and logins stay." },
+		{ "Clear", "Cancel" }, 0, false },
+	[DIALOG_UNLOCK] = {
+		{ "Your passwords are locked.", "Master password:" },
+		{ "Cancel", "Unlock" }, 1, true },
 };
-static const char *const alert_labels[] = { "Clear", "Cancel" };
 
 static double measure(const char *s) {
 	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
@@ -1492,9 +1548,45 @@ static double measure(const char *s) {
 	return w;
 }
 
-/* A GEM alert: a box in a box, the lines, then the buttons at the right,
- * the safe one (Cancel) the default with a thicker border. Sizes itself. */
-static void paint_alert(struct browser *b, cairo_t *cr, int w, int h) {
+static int dialog_lines(const struct dialog_text *d) {
+	int n = 0;
+	while (n < 3 && d->lines[n] != NULL) {
+		n++;
+	}
+	return n;
+}
+
+/* Sizes the box and places the field for the dialog shown. */
+static void dialog_layout(struct browser *b) {
+	const struct dialog_text *d = &dialogs[b->dialog];
+	int n = dialog_lines(d);
+	double tw = d->field ? 280 : 0;
+	for (int i = 0; i < n; i++) {
+		tw = MAX(tw, measure(d->lines[i]));
+	}
+	if (b->dialog_error != NULL) {
+		tw = MAX(tw, measure(b->dialog_error));
+	}
+	int bw = MAX(measure(d->labels[0]), measure(d->labels[1])) + 2 * PAD;
+	int w = MAX((int)tw, 2 * bw + PAD) + 4 * PAD + 6;
+	int y = 3 + 2 * PAD + n * 18;
+	if (d->field) {
+		b->dialog_field_y = y + PAD / 2;
+		y = b->dialog_field_y + FIELD_H + PAD / 2 + 18; /* then the error */
+		gtk_widget_set_margin_start(b->dialog_field, 3 + 2 * PAD);
+		gtk_widget_set_margin_top(b->dialog_field, b->dialog_field_y);
+		gtk_widget_set_size_request(b->dialog_field, w - 2 * (3 + 2 * PAD),
+			FIELD_H);
+	}
+	gtk_widget_set_visible(b->dialog_field, d->field);
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->dialog_area), w);
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->dialog_area),
+		y + PAD + BUTTON_H + 2 * PAD + 3);
+	gtk_widget_queue_draw(b->dialog_area);
+}
+
+static void paint_dialog(struct browser *b, cairo_t *cr, int w, int h) {
+	const struct dialog_text *d = &dialogs[b->dialog];
 	black(cr);
 	fill(cr, 0, 0, w, 1);
 	fill(cr, 0, h - 1, w, 1);
@@ -1504,11 +1596,16 @@ static void paint_alert(struct browser *b, cairo_t *cr, int w, int h) {
 	fill(cr, 3, h - 5, w - 6, 2);
 	fill(cr, 3, 3, 2, h - 6);
 	fill(cr, w - 5, 3, 2, h - 6);
-	for (guint i = 0; i < G_N_ELEMENTS(alert_lines); i++) {
-		text(cr, alert_lines[i], 3 + 2 * PAD, 3 + 2 * PAD + i * 18, 18);
+	int n = dialog_lines(d);
+	for (int i = 0; i < n; i++) {
+		text(cr, d->lines[i], 3 + 2 * PAD, 3 + 2 * PAD + i * 18, 18);
 	}
-	int bw = MAX(text_width(cr, alert_labels[0]),
-		text_width(cr, alert_labels[1])) + 2 * PAD;
+	if (d->field && b->dialog_error != NULL) {
+		text(cr, b->dialog_error, 3 + 2 * PAD,
+			b->dialog_field_y + FIELD_H + PAD / 2, 18);
+	}
+	int bw = MAX(text_width(cr, d->labels[0]),
+		text_width(cr, d->labels[1])) + 2 * PAD;
 	int by = h - 3 - 2 * PAD - BUTTON_H;
 	int bx = w - 3 - 2 * PAD - 2 * bw - PAD;
 	for (int i = 0; i < 2; i++) {
@@ -1517,73 +1614,502 @@ static void paint_alert(struct browser *b, cairo_t *cr, int w, int h) {
 		fill(cr, x, by + BUTTON_H - t, bw, t);
 		fill(cr, x, by, t, BUTTON_H);
 		fill(cr, x + bw - t, by, t, BUTTON_H);
-		text(cr, alert_labels[i],
-			x + (bw - text_width(cr, alert_labels[i])) / 2, by, BUTTON_H);
-		int *r = b->alert_buttons[i];
+		text(cr, d->labels[i],
+			x + (bw - text_width(cr, d->labels[i])) / 2, by, BUTTON_H);
+		int *r = b->dialog_buttons[i];
 		r[0] = x, r[1] = by, r[2] = bw, r[3] = BUTTON_H;
 	}
 }
 
-static void draw_alert(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+static void draw_dialog(GtkDrawingArea *area, cairo_t *cr, int w, int h,
 		gpointer data) {
-	paint_pixelated(cr, w, h, paint_alert, data);
+	paint_pixelated(cr, w, h, paint_dialog, data);
 }
 
-/* The alert holds the window: the rest of it takes no input meanwhile. */
-static void alert_show(struct browser *b, bool show) {
-	if (show) {
-		double tw = 0;
-		for (guint i = 0; i < G_N_ELEMENTS(alert_lines); i++) {
-			tw = MAX(tw, measure(alert_lines[i]));
-		}
-		int bw = MAX(measure(alert_labels[0]), measure(alert_labels[1])) +
-			2 * PAD;
-		gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->alert),
-			MAX((int)tw, 2 * bw + PAD) + 4 * PAD + 6);
-		gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->alert),
-			G_N_ELEMENTS(alert_lines) * 18 + BUTTON_H + 6 * PAD + 6);
+static bool dialog_up(struct browser *b) {
+	return b->dialog != DIALOG_NONE;
+}
+
+/* The dialog holds the window: the rest of it takes no input meanwhile. */
+static void dialog_show(struct browser *b, enum dialog dialog) {
+	b->dialog = dialog;
+	g_clear_pointer(&b->dialog_error, g_free);
+	gtk_editable_set_text(GTK_EDITABLE(b->dialog_field), "");
+	if (dialog != DIALOG_NONE) {
+		dialog_layout(b);
 		list_hide(b);
 	}
-	gtk_widget_set_sensitive(b->box, !show);
-	gtk_widget_set_visible(b->alert, show);
+	gtk_widget_set_sensitive(b->box, dialog == DIALOG_NONE);
+	gtk_widget_set_visible(b->dialog_box, dialog != DIALOG_NONE);
+	if (dialogs[dialog].field) {
+		gtk_widget_grab_focus(b->dialog_field);
+	}
 	app_menu_update(b->menu);
 }
 
-static void alert_answer(struct browser *b, bool clear) {
-	alert_show(b, false);
-	if (clear) {
+static void dialog_error(struct browser *b, const char *error) {
+	g_free(b->dialog_error);
+	b->dialog_error = g_strdup(error);
+	dialog_layout(b);
+}
+
+static void unlock_submit(struct browser *b, char *password);
+static void unlock_cancelled(struct browser *b);
+
+static void dialog_answer(struct browser *b, int button) {
+	enum dialog dialog = b->dialog;
+	if (dialog == DIALOG_UNLOCK && button == dialogs[dialog].act) {
+		if (!b->unlocking) {
+			GtkEditable *field = GTK_EDITABLE(b->dialog_field);
+			char *password = g_strdup(gtk_editable_get_text(field));
+			gtk_editable_set_text(field, "");
+			unlock_submit(b, password);
+		}
+		return;
+	}
+	dialog_show(b, DIALOG_NONE);
+	if (dialog == DIALOG_CLEAR_HISTORY && button == dialogs[dialog].act) {
 		history_clear();
+	} else if (dialog == DIALOG_UNLOCK) {
+		unlock_cancelled(b);
 	}
 }
 
-static void alert_pressed(GtkGestureClick *gesture, int n_press, double x,
+static void dialog_pressed(GtkGestureClick *gesture, int n_press, double x,
 		double y, struct browser *b) {
 	for (int i = 0; i < 2; i++) {
-		int *r = b->alert_buttons[i];
+		int *r = b->dialog_buttons[i];
 		if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) {
-			alert_answer(b, i == 0);
+			dialog_answer(b, i);
+			return;
 		}
 	}
 }
 
-/* Return takes the default, Cancel; so does Escape. */
-static gboolean alert_key(GtkEventControllerKey *ctrl, guint keyval,
+/* Return takes the default button, Escape the other; other keys go to the
+ * password field, if there is one. */
+static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
 		guint keycode, GdkModifierType state, struct browser *b) {
-	if (!gtk_widget_get_visible(b->alert)) {
+	if (!dialog_up(b)) {
 		return FALSE;
 	}
-	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter ||
-			keyval == GDK_KEY_Escape) {
-		alert_answer(b, false);
+	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+		dialog_answer(b, 1);
+	} else if (keyval == GDK_KEY_Escape) {
+		dialog_answer(b, 0);
+	} else {
+		return !dialogs[b->dialog].field;
 	}
 	return TRUE;
+}
+
+/* ---- Passwords ------------------------------------------------------------ */
+
+/* GemWeb fills in logins from a password manager's command-line tool (see
+ * passwords.h). A key gadget at the end of the toolbar shows when the page
+ * has a login field; pressing it asks the tool for the page's host,
+ * unlocking it first if need be, then fills the page's fields, from a list
+ * if the host has several logins. Nothing is filled without the press, and
+ * only into the page the lookup was for. */
+
+/* Runs in its own JavaScript world, which the page's scripts can't see or
+ * change: says whether the page has a login field, as that changes. */
+static const char login_script[] =
+	"(function () {"
+	"  var last = null, queued = false;"
+	"  function check() {"
+	"    queued = false;"
+	"    var has = Array.prototype.some.call(document.querySelectorAll("
+	"      'input[type=password], input[autocomplete~=username]'),"
+	"      function (e) { return e.getClientRects().length > 0; });"
+	"    if (has !== last) {"
+	"      last = has;"
+	"      window.webkit.messageHandlers.gemwebLogin.postMessage(has);"
+	"    }"
+	"  }"
+	"  function queue() {"
+	"    if (!queued) { queued = true; setTimeout(check, 300); }"
+	"  }"
+	"  new MutationObserver(queue).observe(document.documentElement,"
+	"    { subtree: true, childList: true, attributes: true,"
+	"      attributeFilter: ['type', 'style', 'class', 'hidden'] });"
+	"  addEventListener('load', queue);"
+	"  check();"
+	"})();";
+
+/* Fills a login, given host, username and password, in that same world.
+ * The password field is the focused one or the first shown; the username
+ * field is the text field before it (or, on a page asking only for a
+ * username, that field). Values are set the way typing sets them, so
+ * pages' scripts see them. Returns whether it found somewhere to fill. */
+static const char fill_script[] =
+	"if (location.hostname !== host) return false;"
+	"function shown(e) {"
+	"  return !e.disabled && !e.readOnly && e.getClientRects().length > 0 &&"
+	"    getComputedStyle(e).visibility !== 'hidden';"
+	"}"
+	"function isUser(e) {"
+	"  return ['text', 'email', 'tel'].indexOf(e.type) >= 0;"
+	"}"
+	"var inputs = Array.prototype.filter.call("
+	"  document.querySelectorAll('input'), shown);"
+	"var active = document.activeElement;"
+	"var focused = active && inputs.indexOf(active) >= 0 ? active : null;"
+	"var pass = focused && focused.type === 'password' ? focused :"
+	"  inputs.find(function (e) { return e.type === 'password'; });"
+	"var user = null;"
+	"if (pass) {"
+	"  for (var i = inputs.indexOf(pass) - 1; i >= 0 && !user; i--) {"
+	"    if (isUser(inputs[i])) user = inputs[i];"
+	"  }"
+	"} else {"
+	"  user = inputs.find(function (e) {"
+	"    return /username/.test(e.autocomplete); }) ||"
+	"    (focused && isUser(focused) ? focused : null);"
+	"}"
+	"var set = Object.getOwnPropertyDescriptor("
+	"  HTMLInputElement.prototype, 'value').set;"
+	"function put(e, v) {"
+	"  e.focus();"
+	"  set.call(e, v);"
+	"  e.dispatchEvent(new Event('input', { bubbles: true }));"
+	"  e.dispatchEvent(new Event('change', { bubbles: true }));"
+	"}"
+	"if (user && username) put(user, username);"
+	"if (pass) put(pass, password);"
+	"return !!(user || pass);";
+
+static char *password_command(const char *key) {
+	return setting("Passwords", key, NULL);
+}
+
+static void password_status(struct browser *b, char *message) {
+	set_status(&b->password_status, message);
+	gtk_widget_queue_draw(b->info);
+}
+
+static void sync_key(struct browser *b) {
+	struct tab *t = active_tab(b);
+	gtk_widget_set_visible(b->key, shared.passwords && t != NULL && t->login);
+	gtk_widget_queue_draw(b->key);
+	app_menu_update(b->menu);
+}
+
+static void on_login_message(WebKitUserContentManager *content,
+		JSCValue *value, struct tab *t) {
+	t->login = jsc_value_to_boolean(value);
+	if (is_active(t)) {
+		sync_key(t->browser);
+	}
+}
+
+/* The host to look up for the page, or NULL (and why) if it isn't a page
+ * to fill a password into: only https, or http on this machine. */
+static char *page_host(struct tab *t, const char **why) {
+	const char *uri = webkit_web_view_get_uri(t->view);
+	GUri *u = uri != NULL ? g_uri_parse(uri, G_URI_FLAGS_NONE, NULL) : NULL;
+	char *host = NULL;
+	*why = "This page can't have a password";
+	if (u != NULL && g_uri_get_host(u) != NULL) {
+		const char *scheme = g_uri_get_scheme(u), *h = g_uri_get_host(u);
+		bool local = strcmp(h, "localhost") == 0 ||
+			strcmp(h, "127.0.0.1") == 0 || strcmp(h, "::1") == 0;
+		if (strcmp(scheme, "https") == 0 ||
+				(strcmp(scheme, "http") == 0 && local)) {
+			host = g_strdup(h);
+		} else if (strcmp(scheme, "http") == 0) {
+			*why = "Not filling a password into an unencrypted (http) page";
+		}
+	}
+	if (u != NULL) {
+		g_uri_unref(u);
+	}
+	return host;
+}
+
+static void logins_hide(struct browser *b) {
+	g_clear_pointer(&b->logins, logins_free);
+	gtk_widget_set_visible(b->logins_list, FALSE);
+}
+
+static void filled(GObject *source, GAsyncResult *result, gpointer data) {
+	WebKitWebView *view = WEBKIT_WEB_VIEW(source);
+	struct tab *t = g_object_get_data(G_OBJECT(view), "tab");
+	GError *error = NULL;
+	JSCValue *value = webkit_web_view_call_async_javascript_function_finish(
+		view, result, &error);
+	if (t != NULL) {
+		bool ok = value != NULL && jsc_value_to_boolean(value);
+		password_status(t->browser, g_strdup(ok ? NULL :
+			"Couldn't find where to fill the password"));
+	}
+	g_clear_object(&value);
+	g_clear_error(&error);
+}
+
+/* Fills login into the page, if it's still on the host looked up. */
+static void fill_login(struct browser *b, struct login *login) {
+	struct tab *t = active_tab(b);
+	const char *why;
+	char *host = t != NULL ? page_host(t, &why) : NULL;
+	if (host == NULL || g_strcmp0(host, b->login_host) != 0) {
+		password_status(b, g_strdup("The page changed, so nothing was filled"));
+		g_free(host);
+		return;
+	}
+	GVariantDict args;
+	g_variant_dict_init(&args, NULL);
+	g_variant_dict_insert(&args, "host", "s", host);
+	g_variant_dict_insert(&args, "username", "s", login->username);
+	g_variant_dict_insert(&args, "password", "s", login->password);
+	gtk_widget_grab_focus(GTK_WIDGET(t->view));
+	webkit_web_view_call_async_javascript_function(t->view, fill_script, -1,
+		g_variant_dict_end(&args), PASSWORD_WORLD, NULL, NULL, filled, NULL);
+	g_free(host);
+}
+
+/* ---- The list of logins, when a site has several ---- */
+
+static void paint_logins(struct browser *b, cairo_t *cr, int w, int h) {
+	black(cr);
+	fill(cr, 0, 0, w, 1);
+	fill(cr, 0, 0, 1, h);
+	fill(cr, w - 1, 0, 1, h);
+	fill(cr, 0, h - 1, w, 1);
+	for (guint i = 0; b->logins != NULL && i < b->logins->len; i++) {
+		struct login *l = g_ptr_array_index(b->logins, i);
+		int y = 1 + i * ROW_H;
+		black(cr);
+		if ((int)i == b->login_selected) {
+			fill(cr, 1, y, w - 2, ROW_H);
+			white(cr);
+		}
+		text(cr, l->username[0] != '\0' ? l->username : "(no username)",
+			PAD, y, ROW_H);
+		text(cr, l->name, w - PAD - text_width(cr, l->name), y, ROW_H);
+	}
+}
+
+static void draw_logins(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_logins, data);
+}
+
+/* Drops the list down from the key gadget, like a menu. */
+static void logins_show(struct browser *b, GPtrArray *logins) {
+	int w = 0;
+	b->logins = g_ptr_array_new();
+	for (guint i = 0; i < logins->len; i++) {
+		struct login *l = g_ptr_array_index(logins, i), *c = g_new(struct login, 1);
+		c->name = g_strdup(l->name);
+		c->username = g_strdup(l->username);
+		c->password = g_strdup(l->password);
+		g_ptr_array_add(b->logins, c);
+		w = MAX(w, measure(c->username[0] ? c->username : "(no username)") +
+			measure(c->name) + 4 * PAD);
+	}
+	b->login_selected = 0;
+	gtk_widget_set_margin_top(b->logins_list,
+		(gtk_widget_get_visible(b->tabbar) ? TAB_H : 0) + TOOL_H);
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->logins_list),
+		MAX(w, 240));
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->logins_list),
+		b->logins->len * ROW_H + 2);
+	gtk_widget_set_visible(b->logins_list, TRUE);
+	gtk_widget_grab_focus(b->logins_list);
+	gtk_widget_queue_draw(b->logins_list);
+}
+
+static void logins_choose(struct browser *b, int i) {
+	if (b->logins != NULL && i >= 0 && i < (int)b->logins->len) {
+		struct login *l = g_ptr_array_index(b->logins, i);
+		fill_login(b, l);
+	}
+	logins_hide(b);
+}
+
+static int logins_row(struct browser *b, double y) {
+	int row = ((int)y - 1) / ROW_H;
+	return y >= 1 && b->logins != NULL && row < (int)b->logins->len ? row : -1;
+}
+
+static void logins_motion(GtkEventControllerMotion *motion, double x,
+		double y, struct browser *b) {
+	int row = logins_row(b, y);
+	if (row >= 0 && row != b->login_selected) {
+		b->login_selected = row;
+		gtk_widget_queue_draw(b->logins_list);
+	}
+}
+
+static void logins_pressed(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	int row = logins_row(b, y);
+	if (row >= 0) {
+		logins_choose(b, row);
+	}
+}
+
+static gboolean logins_key(GtkEventControllerKey *ctrl, guint keyval,
+		guint keycode, GdkModifierType state, struct browser *b) {
+	int n = b->logins != NULL ? (int)b->logins->len : 0;
+	switch (keyval) {
+	case GDK_KEY_Down:
+		b->login_selected = (b->login_selected + 1) % MAX(n, 1);
+		break;
+	case GDK_KEY_Up:
+		b->login_selected = (b->login_selected + n - 1) % MAX(n, 1);
+		break;
+	case GDK_KEY_Return:
+	case GDK_KEY_KP_Enter:
+		logins_choose(b, b->login_selected);
+		return TRUE;
+	case GDK_KEY_Escape:
+		logins_hide(b);
+		return TRUE;
+	default:
+		return FALSE;
+	}
+	gtk_widget_queue_draw(b->logins_list);
+	return TRUE;
+}
+
+static void logins_focus_left(GtkEventControllerFocus *focus,
+		struct browser *b) {
+	logins_hide(b);
+}
+
+/* ---- Looking up and unlocking ---- */
+
+static void lookup(struct browser *b);
+
+static void found(enum passwords_result result, GPtrArray *logins,
+		const char *error, void *data) {
+	struct browser *b = data;
+	b->looking_up = false;
+	gtk_widget_queue_draw(b->key);
+	if (result == PASSWORDS_LOCKED) {
+		char *unlock = password_command("unlock");
+		if (unlock != NULL) {
+			password_status(b, NULL);
+			dialog_show(b, DIALOG_UNLOCK);
+		} else {
+			password_status(b, g_strdup("Your passwords are locked"));
+		}
+		g_free(unlock);
+	} else if (result == PASSWORDS_FAILED) {
+		password_status(b, g_strdup_printf("Passwords: %s", error));
+	} else if (logins->len == 0) {
+		password_status(b, g_strdup_printf("No saved password for %s",
+			b->login_host));
+	} else if (logins->len == 1) {
+		password_status(b, NULL);
+		fill_login(b, g_ptr_array_index(logins, 0));
+	} else {
+		password_status(b, NULL);
+		logins_show(b, logins);
+	}
+}
+
+static void lookup(struct browser *b) {
+	char *command = password_command("command");
+	if (command == NULL) {
+		return;
+	}
+	b->looking_up = true;
+	gtk_widget_queue_draw(b->key);
+	password_status(b, g_strdup_printf("Looking up passwords for %s...",
+		b->login_host));
+	passwords_lookup(command, shared.password_session, b->login_host,
+		b->password_cancel, found, b);
+	g_free(command);
+}
+
+/* The key gadget: looks up the page's logins. */
+static void fill_password(struct browser *b) {
+	struct tab *t = active_tab(b);
+	const char *why;
+	char *host = t != NULL ? page_host(t, &why) : NULL;
+	if (b->looking_up || b->unlocking) {
+		g_free(host);
+		return;
+	}
+	if (host == NULL) {
+		password_status(b, g_strdup(why));
+		return;
+	}
+	g_free(b->login_host);
+	b->login_host = host;
+	lookup(b);
+}
+
+static void unlocked(const char *session, const char *error, void *data) {
+	struct browser *b = data;
+	b->unlocking = false;
+	if (session == NULL) {
+		dialog_error(b, error);
+		gtk_widget_grab_focus(b->dialog_field);
+		return;
+	}
+	secret_free(shared.password_session);
+	shared.password_session = g_strdup(session);
+	dialog_show(b, DIALOG_NONE);
+	lookup(b);
+}
+
+static void unlock_submit(struct browser *b, char *password) {
+	char *command = password_command("unlock");
+	if (command == NULL) {
+		secret_free(password);
+		dialog_show(b, DIALOG_NONE);
+		return;
+	}
+	b->unlocking = true;
+	dialog_error(b, "Unlocking...");
+	passwords_unlock(command, password, b->password_cancel, unlocked, b);
+	g_free(command);
+}
+
+static void unlock_cancelled(struct browser *b) {
+	password_status(b, NULL);
+}
+
+static void lock_passwords(void) {
+	g_clear_pointer(&shared.password_session, secret_free);
+}
+
+/* A key: a ring and a toothed shaft; inverted while looking up. */
+static void paint_key(struct browser *b, cairo_t *cr, int w, int h) {
+	double cy = h / 2.0;
+	black(cr);
+	fill(cr, 0, 0, 1, h);
+	if (b->looking_up) {
+		fill(cr, 1, 0, w - 1, h);
+		white(cr);
+	}
+	cairo_set_line_width(cr, 2);
+	cairo_arc(cr, 7, cy, 3, 0, 2 * G_PI);
+	cairo_stroke(cr);
+	fill(cr, 10, (int)cy - 1, 7, 2);
+	fill(cr, 13, (int)cy + 1, 2, 2);
+	fill(cr, 16, (int)cy + 1, 1, 3);
+}
+
+static void draw_key(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_key, data);
+}
+
+static void key_pressed(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	fill_password(b);
 }
 
 static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	struct browser *b = g_object_get_data(G_OBJECT(widget), "browser");
 	struct tab *t = active_tab(b);
 	int n = b->tabs->len;
-	if (gtk_widget_get_visible(b->alert) && GPOINTER_TO_INT(data) != ACT_QUIT) {
+	if (dialog_up(b) && GPOINTER_TO_INT(data) != ACT_QUIT) {
 		return TRUE;
 	}
 	switch (GPOINTER_TO_INT(data)) {
@@ -1637,7 +2163,14 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 		gtk_window_destroy(GTK_WINDOW(b->window));
 		break;
 	case ACT_CLEAR_HISTORY:
-		alert_show(b, true);
+		dialog_show(b, DIALOG_CLEAR_HISTORY);
+		break;
+	case ACT_FILL_PASSWORD:
+		fill_password(b);
+		break;
+	case ACT_LOCK_PASSWORDS:
+		lock_passwords();
+		password_status(b, g_strdup("Passwords locked"));
 		break;
 	}
 	return TRUE;
@@ -1678,16 +2211,24 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_PREV_TAB, "Previous Tab", "^Shift+Tab", one_tab);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_CLEAR_HISTORY, "Clear History...", NULL,
-		gtk_widget_get_visible(b->alert) ? APP_MENU_DISABLED : 0);
+		dialog_up(b) ? APP_MENU_DISABLED : 0);
+	if (shared.passwords) {
+		app_menu_add_separator(m);
+		app_menu_add_item(m, ACT_FILL_PASSWORD, "Fill Password", NULL,
+			gtk_widget_get_visible(b->key) ? 0 : APP_MENU_DISABLED);
+		app_menu_add_item(m, ACT_LOCK_PASSWORDS, "Lock Passwords", NULL,
+			shared.password_session != NULL ? 0 : APP_MENU_DISABLED);
+	}
 }
 
 static void menu_activate(uint32_t id, void *data) {
 	struct browser *b = data;
-	if (gtk_widget_get_visible(b->alert) && id != ACT_QUIT) {
+	if (dialog_up(b) && id != ACT_QUIT) {
 		return;
 	}
 	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
-			id == ACT_QUIT || id == ACT_CLEAR_HISTORY) {
+			id == ACT_QUIT || id == ACT_CLEAR_HISTORY ||
+			id == ACT_LOCK_PASSWORDS) {
 		shortcut(b->window, NULL, GINT_TO_POINTER(id));
 	}
 }
@@ -1752,8 +2293,14 @@ static void load_css(void) {
 		"  outline: none; min-height: %dpx; margin: 0; padding: 0 6px;"
 		"  font-family: \"%s\"; font-size: %dpx; caret-color: #000; }"
 		"entry.gem-url:focus-within { box-shadow: none; outline: none; }"
-		"entry.gem-url text selection { background: #000; color: #fff; }",
-		TOOL_H, font_family, FONT_SIZE);
+		"entry.gem-url text selection { background: #000; color: #fff; }"
+		".gem-field { background: #fff; color: #000; border: 1px solid #000;"
+		"  border-radius: 0; box-shadow: none; outline: none; min-height: %dpx;"
+		"  margin: 0; padding: 0 6px; font-family: \"%s\"; font-size: %dpx;"
+		"  caret-color: #000; }"
+		".gem-field:focus-within { box-shadow: none; outline: none; }"
+		".gem-field text selection { background: #000; color: #fff; }",
+		TOOL_H, font_family, FONT_SIZE, FIELD_H - 2, font_family, FONT_SIZE);
 	GtkCssProvider *provider = gtk_css_provider_new();
 	gtk_css_provider_load_from_string(provider, css);
 	gtk_style_context_add_provider_for_display(gdk_display_get_default(),
@@ -1777,6 +2324,13 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	if (b->complete_idle != 0) {
 		g_source_remove(b->complete_idle);
 	}
+	/* A lookup or unlock still running is stopped, not answered. */
+	g_cancellable_cancel(b->password_cancel);
+	g_object_unref(b->password_cancel);
+	g_clear_pointer(&b->logins, logins_free);
+	g_free(b->login_host);
+	g_free(b->password_status);
+	g_free(b->dialog_error);
 	g_ptr_array_free(b->tabs, TRUE);
 	g_clear_pointer(&b->suggestions, history_entries_free);
 	g_free(b->typed);
@@ -1865,6 +2419,16 @@ static void shared_init(GtkApplication *app) {
 		start_page_end, NULL);
 	g_free(note);
 
+	char *passwords = password_command("command");
+	shared.passwords = passwords != NULL;
+	g_free(passwords);
+	if (shared.passwords) {
+		shared.login_script = webkit_user_script_new_for_world(login_script,
+			WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+			WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, PASSWORD_WORLD,
+			NULL, NULL);
+	}
+
 	shared.settings = webkit_settings_new();
 	webkit_settings_set_enable_developer_extras(shared.settings, TRUE);
 }
@@ -1910,8 +2474,13 @@ static struct browser *browser_new(GtkApplication *app) {
 	GtkEventController *focus = gtk_event_controller_focus_new();
 	g_signal_connect(focus, "leave", G_CALLBACK(entry_focus_left), b);
 	gtk_widget_add_controller(b->entry, focus);
+	b->key = pixel_area(b, TOOL_H, draw_key, G_CALLBACK(key_pressed));
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->key), GADGET + 1);
+	gtk_widget_set_tooltip_text(b->key, "Fill Password");
+	gtk_widget_set_visible(b->key, FALSE);
 	gtk_box_append(GTK_BOX(toolbar), b->buttons);
 	gtk_box_append(GTK_BOX(toolbar), b->entry);
+	gtk_box_append(GTK_BOX(toolbar), b->key);
 
 	b->info = pixel_area(b, INFO_H, draw_info, NULL);
 	b->stack = gtk_stack_new();
@@ -1932,16 +2501,41 @@ static struct browser *browser_new(GtkApplication *app) {
 	g_signal_connect(motion, "motion", G_CALLBACK(list_motion), b);
 	gtk_widget_add_controller(b->list, motion);
 	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->list);
-	b->alert = pixel_area(b, 0, draw_alert, G_CALLBACK(alert_pressed));
-	gtk_widget_set_halign(b->alert, GTK_ALIGN_CENTER);
-	gtk_widget_set_valign(b->alert, GTK_ALIGN_CENTER);
-	gtk_widget_set_visible(b->alert, FALSE);
-	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->alert);
+	b->logins_list = pixel_area(b, 0, draw_logins, G_CALLBACK(logins_pressed));
+	gtk_widget_set_halign(b->logins_list, GTK_ALIGN_END);
+	gtk_widget_set_valign(b->logins_list, GTK_ALIGN_START);
+	gtk_widget_set_focusable(b->logins_list, TRUE);
+	gtk_widget_set_visible(b->logins_list, FALSE);
+	motion = gtk_event_controller_motion_new();
+	g_signal_connect(motion, "motion", G_CALLBACK(logins_motion), b);
+	gtk_widget_add_controller(b->logins_list, motion);
+	GtkEventController *logins_keys = gtk_event_controller_key_new();
+	g_signal_connect(logins_keys, "key-pressed", G_CALLBACK(logins_key), b);
+	gtk_widget_add_controller(b->logins_list, logins_keys);
+	GtkEventController *logins_focus = gtk_event_controller_focus_new();
+	g_signal_connect(logins_focus, "leave", G_CALLBACK(logins_focus_left), b);
+	gtk_widget_add_controller(b->logins_list, logins_focus);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->logins_list);
+
+	/* The dialog: its drawing, with a password field laid over it. */
+	b->dialog_box = gtk_overlay_new();
+	b->dialog_area = pixel_area(b, 0, draw_dialog, G_CALLBACK(dialog_pressed));
+	gtk_overlay_set_child(GTK_OVERLAY(b->dialog_box), b->dialog_area);
+	b->dialog_field = gtk_password_entry_new();
+	gtk_widget_add_css_class(b->dialog_field, "gem-field");
+	gtk_widget_set_halign(b->dialog_field, GTK_ALIGN_START);
+	gtk_widget_set_valign(b->dialog_field, GTK_ALIGN_START);
+	gtk_overlay_add_overlay(GTK_OVERLAY(b->dialog_box), b->dialog_field);
+	gtk_widget_set_halign(b->dialog_box, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign(b->dialog_box, GTK_ALIGN_CENTER);
+	gtk_widget_set_visible(b->dialog_box, FALSE);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->dialog_box);
 	gtk_window_set_child(GTK_WINDOW(b->window), overlay);
-	GtkEventController *alert_keys = gtk_event_controller_key_new();
-	gtk_event_controller_set_propagation_phase(alert_keys, GTK_PHASE_CAPTURE);
-	g_signal_connect(alert_keys, "key-pressed", G_CALLBACK(alert_key), b);
-	gtk_widget_add_controller(b->window, alert_keys);
+	GtkEventController *dialog_keys = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(dialog_keys, GTK_PHASE_CAPTURE);
+	g_signal_connect(dialog_keys, "key-pressed", G_CALLBACK(dialog_key), b);
+	gtk_widget_add_controller(b->window, dialog_keys);
+	b->password_cancel = g_cancellable_new();
 	add_shortcuts(b->window);
 	b->menu = app_menu_new(b->window, build_menus, menu_activate, b);
 	return b;

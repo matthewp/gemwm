@@ -141,13 +141,15 @@ if webkit.found()
 	executable(
 		'gemweb',
 		['browser/gemweb.c', 'browser/cookies.c', 'browser/history.c',
-			'lib/app-menu.c', client_protocols],
+			'browser/passwords.c', 'lib/app-menu.c', client_protocols],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
 			dependency('gstreamer-1.0'), dependency('sqlite3'),
 			wayland_client, cairo],
 		include_directories: 'lib',
 		install: true,
 	)
+	install_data('browser/gemweb-bw', install_dir: get_option('bindir'),
+		install_mode: 'rwxr-xr-x')
 	install_data('browser/gemweb.desktop',
 		install_dir: get_option('datadir') / 'applications')
 endif

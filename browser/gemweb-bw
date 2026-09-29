@@ -1,0 +1,56 @@
+#!/bin/sh
+# gemweb-bw: Bitwarden's CLI (bw) for GemWeb's key gadget. In
+# ~/.config/gemweb/settings:
+#
+#   [Passwords]
+#   command = gemweb-bw
+#   unlock = gemweb-bw --unlock
+#
+# gemweb-bw HOST      prints the logins for HOST, one per line:
+#                     name, username, password, tab-separated (jq's @tsv).
+#                     Exits 3 if the vault is locked.
+# gemweb-bw --unlock  reads the master password on stdin and prints a
+#                     session key, which GemWeb passes back to lookups as
+#                     $GEMWEB_PASSWORD_SESSION.
+#
+# Needs bw, logged in already (`bw login`), and jq.
+
+# Started from the desktop, PATH may not have npm's bin directories.
+PATH=$PATH:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin
+export BW_NOINTERACTION=true
+
+if ! command -v bw >/dev/null; then
+	echo "bw (Bitwarden's CLI) isn't installed" >&2
+	exit 1
+fi
+
+if [ "${1-}" = --unlock ]; then
+	IFS= read -r BW_PASSWORD || [ -n "$BW_PASSWORD" ] || exit 1
+	export BW_PASSWORD
+	out=$(bw unlock --raw --passwordenv BW_PASSWORD 2>&1) || {
+		case $out in
+		*"not logged in"*) echo "Log in to Bitwarden first: bw login" >&2 ;;
+		*"Invalid master password"*) echo "Wrong password" >&2 ;;
+		*) printf '%s\n' "$out" | head -n 1 >&2 ;;
+		esac
+		exit 1
+	}
+	printf '%s\n' "$out"
+	exit 0
+fi
+
+host=${1:?usage: gemweb-bw HOST | --unlock}
+BW_SESSION=${GEMWEB_PASSWORD_SESSION:-${BW_SESSION-}}
+[ -n "$BW_SESSION" ] || exit 3
+export BW_SESSION
+
+out=$(bw list items --url "https://$host" 2>&1) || {
+	case $out in
+	*"Vault is locked"*) exit 3 ;;
+	*"not logged in"*) echo "Log in to Bitwarden first: bw login" >&2 ;;
+	*) printf '%s\n' "$out" | head -n 1 >&2 ;;
+	esac
+	exit 1
+}
+printf '%s' "$out" | jq -r '.[] | select(.type == 1) |
+	[.name, (.login.username // ""), (.login.password // "")] | @tsv'

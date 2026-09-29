@@ -533,6 +533,31 @@ if unset. `search` is `duckduckgo` (the default), `google`, `bing`,
 goes, like `https://search.example/?q=%s`. `$GEMWEB_HOME` and
 `$GEMWEB_SEARCH`, if set, take precedence.
 
+### Passwords
+
+GemWeb fills in logins from a password manager's command-line tool. For
+Bitwarden, with `bw` installed and logged in (`bw login`) and `jq`:
+
+    [Passwords]
+    command = gemweb-bw
+    unlock = gemweb-bw --unlock
+
+A key gadget appears at the right of the toolbar on pages with a login
+field; press it (or Go > Fill Password) and GemWeb fills the username and
+password, from a list if the site has several logins. The first time, it
+asks for your master password; the session stays unlocked, in memory only,
+until GemWeb quits or Go > Lock Passwords. Nothing is filled until you ask,
+only into the page the logins were looked up for, never into an embedded
+frame, and never into a plain http page other than `localhost`.
+
+Other password managers need a small script. GemWeb runs `command HOST`
+(directly, not through a shell) and reads one login per line: name,
+username and password, tab-separated, with tabs, newlines and backslashes
+escaped as `\t`, `\n` and `\\` (jq's `@tsv`). It exits 3 if the vault is
+locked. `unlock` reads the master password as a line on stdin and prints a
+session key, which later lookups get as `$GEMWEB_PASSWORD_SESSION`; on
+failure it exits non-zero with a line on stderr. See `browser/gemweb-bw`.
+
 The address field completes from history: typing the start of a site you've
 visited fills in the rest (selected, so typing on replaces it), and a list
 of pages drops down, matching the start of an address or any words in its
