@@ -515,6 +515,8 @@ Web Browser always opens GemWeb.
 | Alt+Left / Alt+Right        | back / forward            |
 | Ctrl+R, F5                  | reload                    |
 | Ctrl+plus / minus / 0       | zoom                      |
+| Ctrl+F                      | find in the page          |
+| Ctrl+G, F3 (with Shift)     | next (previous) match     |
 | Ctrl+Alt+R                  | Reader View               |
 
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
@@ -567,6 +569,10 @@ and Down choose from the list (Down in an untouched field lists your top
 pages), Shift+Delete forgets the chosen page, and Escape closes the list.
 History is kept in `~/.local/share/gemweb/history.sqlite`, to the top 5,000
 pages; Go > Clear History... empties it.
+
+Ctrl+F opens a find bar along the bottom of the window. It finds as you
+type, ignoring case, and counts the matches; Return and Shift+Return (or
+its arrow gadgets) go to the next and previous match, and Escape closes it.
 
 View > Reader View (Ctrl+Alt+R) shows just a page's article: the text and
 its pictures, in a white box on the desk, headed in GemWM's font, with the

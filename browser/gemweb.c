@@ -115,6 +115,11 @@ struct browser {
 	char *login_host;
 	GCancellable *password_cancel;
 	bool looking_up, unlocking;
+
+	/* The find bar, along the bottom, and what WebKit found. */
+	GtkWidget *findbar, *find_entry, *find_info;
+	guint find_matches;
+	bool find_failed;
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -147,10 +152,17 @@ static void load_home(struct tab *t);
 static void sync_key(struct browser *b);
 static void on_login_message(WebKitUserContentManager *content,
 	JSCValue *value, struct tab *t);
+static bool find_open(struct browser *b);
+static void find_search(struct browser *b);
+static void find_connect(struct tab *t);
+static GtkWidget *pixel_area(struct browser *b, int height,
+	GtkDrawingAreaDrawFunc draw, GCallback pressed);
 
 /* GEM-style scroll bars for web pages: a dithered track, a white slider
- * and boxed arrows. User-level, so sites that style their own win. */
+ * and boxed arrows; and GEM's black selection, which also marks what
+ * Find found. User-level, so sites that style their own win. */
 static const char page_css[] =
+	"::selection { background: #000; color: #fff; }"
 	"::-webkit-scrollbar { width: 19px; height: 19px; background: #fff; }"
 	"::-webkit-scrollbar-track {"
 	"  background: repeating-conic-gradient(#000 0% 25%, #fff 0% 50%) 0 0 / 2px 2px; }"
@@ -1123,9 +1135,17 @@ static void tab_select(struct browser *b, int index) {
 	if (index < 0 || index >= (int)b->tabs->len) {
 		return;
 	}
+	struct tab *old = active_tab(b);
+	if (old != NULL && find_open(b)) {
+		webkit_find_controller_search_finish(
+			webkit_web_view_get_find_controller(old->view));
+	}
 	b->active = index;
 	struct tab *t = g_ptr_array_index(b->tabs, index);
 	gtk_stack_set_visible_child(GTK_STACK(b->stack), GTK_WIDGET(t->view));
+	if (find_open(b)) {
+		find_search(b);
+	}
 	set_status(&b->hover_link, NULL);
 	/* A blank tab wants an address; a page wants the keyboard. */
 	const char *uri = webkit_web_view_get_uri(t->view);
@@ -1192,6 +1212,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "decide-policy", G_CALLBACK(on_decide_policy), t);
 	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
 	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
+	find_connect(t);
 
 	gtk_stack_add_child(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	/* New tabs open next to the current one. */
@@ -1520,7 +1541,8 @@ enum action {
 	ACT_NEW_TAB, ACT_CLOSE_TAB, ACT_FOCUS_URL, ACT_NEXT_TAB, ACT_PREV_TAB,
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
-	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER,
+	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
+	ACT_FIND_NEXT, ACT_FIND_PREV,
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -2238,6 +2260,226 @@ static void reader_toggle(struct browser *b) {
 		READER_WORLD, "gemweb:readability", NULL, reader_parsed, r);
 }
 
+/* ---- Finding in the page -------------------------------------------------- */
+
+/* Ctrl+F opens a find bar along the bottom of the window: "Find:", the
+ * text, how many matches, then gadgets for the previous and next match and
+ * to close it. WebKit finds as you type, ignoring case, round the page. */
+
+#define FIND_OPTIONS (WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | \
+	WEBKIT_FIND_OPTIONS_WRAP_AROUND)
+#define FIND_MAX 1000     /* matches counted; more says "1000+" */
+#define FIND_LABEL_W 52   /* "Find:" */
+#define FIND_COUNT_W 110  /* "1000+ matches", "Not found" */
+
+static bool find_open(struct browser *b) {
+	return gtk_widget_get_visible(b->findbar);
+}
+
+static const char *find_text(struct browser *b) {
+	return gtk_editable_get_text(GTK_EDITABLE(b->find_entry));
+}
+
+static WebKitFindController *finder(struct tab *t) {
+	return webkit_web_view_get_find_controller(t->view);
+}
+
+/* Finds the text afresh in the active tab: its first match, and a count. */
+static void find_search(struct browser *b) {
+	struct tab *t = active_tab(b);
+	const char *text = find_text(b);
+	b->find_matches = 0;
+	b->find_failed = false;
+	if (t != NULL && text[0] == '\0') {
+		webkit_find_controller_search_finish(finder(t));
+	} else if (t != NULL) {
+		webkit_find_controller_search(finder(t), text, FIND_OPTIONS, FIND_MAX);
+		webkit_find_controller_count_matches(finder(t), text, FIND_OPTIONS,
+			FIND_MAX);
+	}
+	gtk_widget_queue_draw(b->find_info);
+	app_menu_update(b->menu);
+}
+
+static void find_step(struct browser *b, bool back) {
+	struct tab *t = active_tab(b);
+	if (t == NULL || find_text(b)[0] == '\0') {
+		return;
+	}
+	if (g_strcmp0(webkit_find_controller_get_search_text(finder(t)),
+			find_text(b)) != 0) {
+		find_search(b);
+	} else if (back) {
+		webkit_find_controller_search_previous(finder(t));
+	} else {
+		webkit_find_controller_search_next(finder(t));
+	}
+}
+
+static void find_show(struct browser *b) {
+	bool was_open = find_open(b);
+	gtk_widget_set_visible(b->findbar, TRUE);
+	gtk_widget_grab_focus(b->find_entry);
+	gtk_editable_select_region(GTK_EDITABLE(b->find_entry), 0, -1);
+	if (!was_open && find_text(b)[0] != '\0') {
+		find_search(b);
+	}
+}
+
+/* Closing takes the highlights away and gives the page the keyboard. */
+static void find_close(struct browser *b) {
+	struct tab *t = active_tab(b);
+	gtk_widget_set_visible(b->findbar, FALSE);
+	if (t != NULL) {
+		webkit_find_controller_search_finish(finder(t));
+		gtk_widget_grab_focus(GTK_WIDGET(t->view));
+	}
+}
+
+static void on_found(WebKitFindController *fc, guint count, struct tab *t) {
+	if (is_active(t)) {
+		t->browser->find_failed = false;
+		gtk_widget_queue_draw(t->browser->find_info);
+	}
+}
+
+static void on_not_found(WebKitFindController *fc, struct tab *t) {
+	if (is_active(t)) {
+		t->browser->find_failed = true;
+		t->browser->find_matches = 0;
+		gtk_widget_queue_draw(t->browser->find_info);
+	}
+}
+
+static void on_counted(WebKitFindController *fc, guint count, struct tab *t) {
+	if (is_active(t)) {
+		t->browser->find_matches = count;
+		gtk_widget_queue_draw(t->browser->find_info);
+	}
+}
+
+static void find_connect(struct tab *t) {
+	WebKitFindController *fc = finder(t);
+	g_signal_connect(fc, "found-text", G_CALLBACK(on_found), t);
+	g_signal_connect(fc, "failed-to-find-text", G_CALLBACK(on_not_found), t);
+	g_signal_connect(fc, "counted-matches", G_CALLBACK(on_counted), t);
+}
+
+static void paint_find_label(struct browser *b, cairo_t *cr, int w, int h) {
+	black(cr);
+	text(cr, "Find:", 6, 0, h);
+}
+
+static void draw_find_label(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_find_label, data);
+}
+
+/* The count ("Not found" inverted), then the previous, next and close
+ * gadgets, each boxed off on its left. */
+static void paint_find_info(struct browser *b, cairo_t *cr, int w, int h) {
+	char count[32] = "";
+	if (b->find_failed) {
+		g_strlcpy(count, "Not found", sizeof(count));
+	} else if (b->find_matches > 0) {
+		snprintf(count, sizeof(count), "%u%s match%s", b->find_matches,
+			b->find_matches >= FIND_MAX ? "+" : "",
+			b->find_matches == 1 ? "" : "es");
+	}
+	black(cr);
+	fill(cr, 0, 0, 1, h);
+	if (count[0] != '\0') {
+		if (b->find_failed) {
+			fill(cr, 3, 2, text_width(cr, count) + 8, h - 4);
+			white(cr);
+		}
+		text(cr, count, 7, 0, h);
+		black(cr);
+	}
+	double cy = h / 2.0;
+	int x = w - 3 * (GADGET + 1);
+	for (int i = 0; i < 3; i++, x += GADGET + 1) {
+		fill(cr, x, 0, 1, h);
+		double c = x + 1 + GADGET / 2.0;
+		if (i == 0) {
+			cairo_move_to(cr, c, cy - 4);
+			cairo_line_to(cr, c + 5, cy + 3);
+			cairo_line_to(cr, c - 5, cy + 3);
+		} else if (i == 1) {
+			cairo_move_to(cr, c, cy + 4);
+			cairo_line_to(cr, c + 5, cy - 3);
+			cairo_line_to(cr, c - 5, cy - 3);
+		} else {
+			draw_closer(cr, x + 1, (h - GADGET) / 2.0);
+			continue;
+		}
+		cairo_close_path(cr);
+		cairo_fill(cr);
+	}
+}
+
+static void draw_find_info(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_find_info, data);
+}
+
+static void find_info_pressed(GtkGestureClick *gesture, int n_press,
+		double x, double y, struct browser *b) {
+	int w = gtk_widget_get_width(b->find_info);
+	int i = ((int)x - (w - 3 * (GADGET + 1))) / (GADGET + 1);
+	if (x < w - 3 * (GADGET + 1)) {
+		return;
+	} else if (i == 0 || i == 1) {
+		find_step(b, i == 0);
+	} else {
+		find_close(b);
+	}
+}
+
+static void find_changed(GtkEditable *editable, struct browser *b) {
+	find_search(b);
+}
+
+/* Return finds the next match, Shift+Return the one before; Escape
+ * closes the bar. */
+static gboolean find_key(GtkEventControllerKey *ctrl, guint keyval,
+		guint keycode, GdkModifierType state, struct browser *b) {
+	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+		find_step(b, state & GDK_SHIFT_MASK);
+		return TRUE;
+	}
+	if (keyval == GDK_KEY_Escape) {
+		find_close(b);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/* The bar: built hidden, under the page. */
+static GtkWidget *findbar_new(struct browser *b) {
+	GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+	gtk_widget_add_css_class(bar, "gem-findbar");
+	GtkWidget *label = pixel_area(b, TOOL_H, draw_find_label, NULL);
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(label), FIND_LABEL_W);
+	b->find_entry = gtk_entry_new();
+	gtk_widget_add_css_class(b->find_entry, "gem-url");
+	gtk_widget_set_hexpand(b->find_entry, TRUE);
+	g_signal_connect(b->find_entry, "changed", G_CALLBACK(find_changed), b);
+	GtkEventController *keys = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+	g_signal_connect(keys, "key-pressed", G_CALLBACK(find_key), b);
+	gtk_widget_add_controller(b->find_entry, keys);
+	b->find_info = pixel_area(b, TOOL_H, draw_find_info,
+		G_CALLBACK(find_info_pressed));
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->find_info),
+		FIND_COUNT_W + 3 * (GADGET + 1));
+	gtk_box_append(GTK_BOX(bar), label);
+	gtk_box_append(GTK_BOX(bar), b->find_entry);
+	gtk_box_append(GTK_BOX(bar), b->find_info);
+	gtk_widget_set_visible(bar, FALSE);
+	return bar;
+}
+
 /* A key: a ring and a toothed shaft; inverted while looking up. */
 static void paint_key(struct browser *b, cairo_t *cr, int w, int h) {
 	double cy = h / 2.0;
@@ -2331,6 +2573,16 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_READER:
 		reader_toggle(b);
 		break;
+	case ACT_FIND:
+		find_show(b);
+		break;
+	case ACT_FIND_NEXT:
+	case ACT_FIND_PREV:
+		if (!find_open(b)) {
+			find_show(b);
+		}
+		find_step(b, GPOINTER_TO_INT(data) == ACT_FIND_PREV);
+		break;
 	case ACT_LOCK_PASSWORDS:
 		lock_passwords();
 		show_notice(b, g_strdup("Passwords locked"));
@@ -2362,6 +2614,10 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_READER, "Reader View", "^Alt+R",
 		t != NULL && t->reading ? APP_MENU_CHECKED :
 		can_read(t) ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_FIND, "Find...", "^F", 0);
+	app_menu_add_item(m, ACT_FIND_NEXT, "Find Again", "^G",
+		find_text(b)[0] != '\0' ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_ZOOM_IN, "Zoom In", "^+", 0);
 	app_menu_add_item(m, ACT_ZOOM_OUT, "Zoom Out", "^-", 0);
@@ -2414,6 +2670,11 @@ static void add_shortcuts(GtkWidget *window) {
 		{ "<Control>Page_Up", ACT_PREV_TAB },
 		{ "<Control>r", ACT_RELOAD },
 		{ "<Control><Alt>r", ACT_READER },
+		{ "<Control>f", ACT_FIND },
+		{ "<Control>g", ACT_FIND_NEXT },
+		{ "F3", ACT_FIND_NEXT },
+		{ "<Control><Shift>g", ACT_FIND_PREV },
+		{ "<Shift>F3", ACT_FIND_PREV },
 		{ "F5", ACT_RELOAD },
 		{ "<Alt>Left", ACT_BACK },
 		{ "<Alt>Right", ACT_FORWARD },
@@ -2462,6 +2723,7 @@ static void load_css(void) {
 		"  font-family: \"%s\"; font-size: %dpx; caret-color: #000; }"
 		"entry.gem-url:focus-within { box-shadow: none; outline: none; }"
 		"entry.gem-url text selection { background: #000; color: #fff; }"
+		".gem-findbar { background: #fff; border-top: 1px solid #000; }"
 		".gem-field { background: #fff; color: #000; border: 1px solid #000;"
 		"  border-radius: 0; box-shadow: none; outline: none; min-height: %dpx;"
 		"  margin: 0; padding: 0 6px; font-family: \"%s\"; font-size: %dpx;"
@@ -2658,6 +2920,8 @@ static struct browser *browser_new(GtkApplication *app) {
 	gtk_box_append(GTK_BOX(box), toolbar);
 	gtk_box_append(GTK_BOX(box), b->info);
 	gtk_box_append(GTK_BOX(box), b->stack);
+	b->findbar = findbar_new(b);
+	gtk_box_append(GTK_BOX(box), b->findbar);
 
 	/* Over it all: the address field's list, and the alert. */
 	GtkWidget *overlay = gtk_overlay_new();
