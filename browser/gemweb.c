@@ -25,6 +25,7 @@
 #include <webkit/webkit.h>
 #include "app-menu.h"
 #include "gemwm-scroll-v1-client-protocol.h"
+#include "cookies.h"
 #include "history.h"
 
 #define TAB_H 20       /* 19px of tabs plus a 1px line */
@@ -1771,15 +1772,16 @@ static void shared_init(GtkApplication *app) {
 	shared.app = app;
 	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
 	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
+	g_mkdir_with_parents(data, 0700);
 	shared.session = webkit_network_session_new(data, cache);
-	char *cookies = g_build_filename(data, "cookies.sqlite", NULL);
+	char *cookies;
+	cookies_prepare(data, &cookies);
 	webkit_cookie_manager_set_persistent_storage(
 		webkit_network_session_get_cookie_manager(shared.session),
-		cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+		cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_TEXT);
 	g_signal_connect(shared.session, "download-started",
 		G_CALLBACK(on_download_started), NULL);
 	g_free(cookies);
-	g_mkdir_with_parents(data, 0700);
 	char *history = g_build_filename(data, "history.sqlite", NULL);
 	history_open(history);
 	g_free(history);

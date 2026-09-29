@@ -1,6 +1,7 @@
 /*
  * GemWeb's history: see history.h. One table, places, a row per address.
  */
+#include <glib/gstdio.h>
 #include <sqlite3.h>
 #include <string.h>
 #include "history.h"
@@ -81,6 +82,8 @@ void history_open(const char *path) {
 		db = NULL;
 		return;
 	}
+	/* Where you've been is yours alone. */
+	g_chmod(path, 0600);
 	/* Other GemWeb windows share this process, but not a second GemWeb
 	 * (under another user's bus, say): wait for it rather than fail. */
 	sqlite3_busy_timeout(db, 1000);

@@ -140,8 +140,8 @@ webkit = dependency('webkitgtk-6.0', required: false)
 if webkit.found()
 	executable(
 		'gemweb',
-		['browser/gemweb.c', 'browser/history.c', 'lib/app-menu.c',
-			client_protocols],
+		['browser/gemweb.c', 'browser/cookies.c', 'browser/history.c',
+			'lib/app-menu.c', client_protocols],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
 			dependency('gstreamer-1.0'), dependency('sqlite3'),
 			wayland_client, cairo],
