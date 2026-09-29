@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GemMail
+Comment=Read and send email (IMAP), GEM style
+Exec=gemmail
+Icon=mail-message
+Categories=Network;Email;
+Terminal=false

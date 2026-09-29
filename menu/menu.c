@@ -120,6 +120,7 @@ static const char default_config[] =
 	"[Desk > Internet]\n"
 	"Web Browser = if command -v gemweb >/dev/null; then exec gemweb;"
 	" else exec gtk-launch \"$(xdg-settings get default-web-browser)\"; fi\n"
+	"GemMail = gemmail\n"
 	"\n"
 	"[Desk > Games]\n"
 	"Crossword Puzzle = gemwm-crossword\n"

@@ -110,10 +110,10 @@ static GSubprocess *start(const char *command, const char *extra,
 		G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE |
 		G_SUBPROCESS_FLAGS_STDERR_PIPE);
 	if (session != NULL) {
-		g_subprocess_launcher_setenv(launcher, "GEMWEB_PASSWORD_SESSION",
+		g_subprocess_launcher_setenv(launcher, "GEM_PASSWORD_SESSION",
 			session, TRUE);
 	} else {
-		g_subprocess_launcher_unsetenv(launcher, "GEMWEB_PASSWORD_SESSION");
+		g_subprocess_launcher_unsetenv(launcher, "GEM_PASSWORD_SESSION");
 	}
 	GSubprocess *proc = g_subprocess_launcher_spawnv(launcher,
 		(const char *const *)argv, error);

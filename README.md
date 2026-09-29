@@ -123,9 +123,10 @@ same name, and every other menu stays as it is.
 - `Label` alone is a disabled (grey) item
 - `-` is a separator
 
-The defaults are the TOS 1.0 desktop menus, plus two working items under
+The defaults are the TOS 1.0 desktop menus, plus some working items under
 Desk: **Internet > Web Browser** opens GemWeb (or your default browser if
-GemWeb isn't installed), **Tools > Terminal** opens `$TERMINAL` (foot
+GemWeb isn't installed), **Internet > GemMail** opens GemMail (see
+GemMail), **Tools > Terminal** opens `$TERMINAL` (foot
 if unset), and **Tools > Printing** opens the printing window (see
 Printing). The menu bar reads
 its config at startup; restart it with `pkill gemwm-menu; setsid gemwm-menu &`.
@@ -598,7 +599,7 @@ Other password managers need a small script. GemWeb runs `command HOST`
 username and password, tab-separated, with tabs, newlines and backslashes
 escaped as `\t`, `\n` and `\\` (jq's `@tsv`). It exits 3 if the vault is
 locked. `unlock` reads the master password as a line on stdin and prints a
-session key, which later lookups get as `$GEMWEB_PASSWORD_SESSION`; on
+session key, which later lookups get as `$GEM_PASSWORD_SESSION`; on
 failure it exits non-zero with a line on stderr. See `browser/gemweb-bw`.
 
 The address field completes from history: typing the start of a site you've
@@ -635,6 +636,60 @@ article, such as a home page, says so in the info line instead.
 
 Under GemWM a page scrolls with the window frame's own scroll bars, and its
 built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
+
+## GemMail
+
+GemMail (`gemmail`) reads and sends email over IMAP and SMTP. Folders are on the
+left, with their unread counts; the main pane lists a folder's newest
+messages (a diamond marks unread ones), and opening one (double-click or
+Return) shows it in that same pane, with Back, Reply, Reply All, Forward,
+Archive and Delete above it, and its attachments as buttons that save them
+in Downloads. Escape goes back to the list.
+
+Archive (A) moves a message to the folder the server flags as the archive
+(`\Archive`, or Gmail's All Mail), else one called Archive, which is made
+the first time it's needed; Delete moves it to Trash (and out of Trash,
+deletes it for good). Either way, reading, the next message opens.
+It checks for new mail every three minutes, or on F5.
+
+An HTML message runs no scripts and loads nothing from the web (no
+tracking pixels) until you press **Show Images**; its links open in the
+browser, and `mailto:` ones start a new message. Messages are written as
+plain text, and sent copies are kept in Sent.
+
+It's built when libetpan (IMAP and SMTP), GMime 3 and WebKit are
+installed (`pacman -S libetpan gmime3 webkitgtk-6.0`). The account goes in
+`~/.config/gemmail/settings`:
+
+    [Account]
+    from = Jane Doe <jane@example.org>
+    user = jane@example.org             # the login; the From address if unset
+    imap = imaps://imap.example.org     # imaps: TLS; imap: STARTTLS (:port)
+    smtp = smtps://smtp.example.org     # smtps: TLS; smtp: STARTTLS (:port)
+    password-command = pass show mail   # prints the password
+
+The password command runs when the app connects (anything that prints the
+password: `pass`, `secret-tool lookup ...`); if it fails, a GEM dialog
+asks, and the password is kept in memory only. A password manager that
+locks, like Bitwarden, works as it does for GemWeb (see Passwords), in
+place of `password-command`:
+
+    [Passwords]
+    command = gemweb-bw
+    unlock = gemweb-bw --unlock
+    site = example.org                  # optional: the IMAP server's name
+
+With Bitwarden, `command = gemweb-bw --item "Item name"` picks one item by
+its name instead, whatever website it's saved for.
+
+GemMail looks up the site's login whose username is yours; when the
+vault's locked, a GEM dialog asks for the master password first, and it
+stays unlocked (in memory) while GemMail runs.
+Connections are always encrypted, and the server's certificate checked
+(GIO's TLS, against the system's certificates); for a server with a
+self-signed one, `certificate = ~/server.pem` trusts that one. Sent and
+Trash are found by the flags servers give them, or by name, or `sent =`
+`trash =` and `archive =`.
 
 ## Windows
 

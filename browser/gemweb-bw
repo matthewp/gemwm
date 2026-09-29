@@ -1,6 +1,6 @@
 #!/bin/sh
-# gemweb-bw: Bitwarden's CLI (bw) for GemWeb's key gadget. In
-# ~/.config/gemweb/settings:
+# gemweb-bw: Bitwarden's CLI (bw) for GemWeb's key gadget, and GemMail's
+# password. In ~/.config/gemweb/settings (and ~/.config/gemmail/settings):
 #
 #   [Passwords]
 #   command = gemweb-bw
@@ -9,9 +9,12 @@
 # gemweb-bw HOST      prints the logins for HOST, one per line:
 #                     name, username, password, tab-separated (jq's @tsv).
 #                     Exits 3 if the vault is locked.
+# gemweb-bw --item NAME [HOST]
+#                     the same, for the one item called NAME, whatever
+#                     website it's for (a mail account's, say).
 # gemweb-bw --unlock  reads the master password on stdin and prints a
-#                     session key, which GemWeb passes back to lookups as
-#                     $GEMWEB_PASSWORD_SESSION.
+#                     session key, which GemWeb and GemMail pass back to lookups as
+#                     $GEM_PASSWORD_SESSION.
 #
 # Needs bw, logged in already (`bw login`), and jq.
 
@@ -39,18 +42,26 @@ if [ "${1-}" = --unlock ]; then
 	exit 0
 fi
 
-host=${1:?usage: gemweb-bw HOST | --unlock}
-BW_SESSION=${GEMWEB_PASSWORD_SESSION:-${BW_SESSION-}}
+BW_SESSION=${GEM_PASSWORD_SESSION:-${BW_SESSION-}}
 [ -n "$BW_SESSION" ] || exit 3
 export BW_SESSION
 
-out=$(bw list items --url "https://$host" 2>&1) || {
+if [ "${1-}" = --item ]; then
+	name=${2:?usage: gemweb-bw --item NAME}
+	filter='[.]'
+	out=$(bw get item "$name" 2>&1)
+else
+	host=${1:?usage: gemweb-bw HOST | --item NAME | --unlock}
+	filter='.'
+	out=$(bw list items --url "https://$host" 2>&1)
+fi || {
 	case $out in
 	*"Vault is locked"*) exit 3 ;;
 	*"not logged in"*) echo "Log in to Bitwarden first: bw login" >&2 ;;
+	*"Not found"*) echo "Bitwarden has no item called \"$name\"" >&2 ;;
 	*) printf '%s\n' "$out" | head -n 1 >&2 ;;
 	esac
 	exit 1
 }
-printf '%s' "$out" | jq -r '.[] | select(.type == 1) |
+printf '%s' "$out" | jq -r "$filter"' | .[] | select(.type == 1) |
 	[.name, (.login.username // ""), (.login.password // "")] | @tsv'

@@ -144,7 +144,7 @@ if webkit.found()
 	executable(
 		'gemweb',
 		['browser/gemweb.c', 'browser/adblock.c', 'browser/cookies.c',
-			'browser/history.c', 'browser/passwords.c', 'lib/app-menu.c',
+			'browser/history.c', 'lib/passwords.c', 'lib/app-menu.c',
 			'lib/gem-draw.c', 'lib/gem-print.c', client_protocols,
 			gemweb_resources],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
@@ -157,6 +157,26 @@ if webkit.found()
 	install_data('browser/gemweb-bw', install_dir: get_option('bindir'),
 		install_mode: 'rwxr-xr-x')
 	install_data('browser/gemweb.desktop',
+		install_dir: get_option('datadir') / 'applications')
+endif
+
+# GemMail, email over IMAP and SMTP. Optional: needs libetpan (IMAP and
+# SMTP), GMime (messages) and WebKit (to show them).
+etpan = dependency('libetpan', required: false)
+gmime = dependency('gmime-3.0', required: false)
+if etpan.found() and gmime.found() and webkit.found()
+	executable(
+		'gemmail',
+		['mail/gemmail.c', 'mail/account.c', 'mail/net.c', 'mail/imap.c',
+			'mail/message.c', 'lib/app-menu.c', 'lib/gem-draw.c',
+			'lib/passwords.c',
+			client_protocols],
+		dependencies: [etpan, gmime, webkit, dependency('gtk4'),
+			wayland_client, cairo],
+		include_directories: 'lib',
+		install: true,
+	)
+	install_data('mail/org.gemwm.GemMail.desktop',
 		install_dir: get_option('datadir') / 'applications')
 endif
 

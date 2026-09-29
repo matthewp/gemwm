@@ -1,6 +1,6 @@
 /*
- * GemWeb's passwords come from a password manager's command-line tool,
- * through two commands set in ~/.config/gemweb/settings:
+ * Passwords from a password manager's command-line tool, for GemWeb and
+ * GemMail, through two commands set in their settings:
  *
  *   command HOST   prints the logins for HOST, one per line: name,
  *                  username and password, tab-separated, with tabs,
@@ -8,14 +8,14 @@
  *                  @tsv). Exits 3 if the password manager is locked.
  *   unlock         reads the master password, a line on stdin, and prints
  *                  a session key; later lookups get it as
- *                  $GEMWEB_PASSWORD_SESSION. Exits non-zero, with a line on
+ *                  $GEM_PASSWORD_SESSION. Exits non-zero, with a line on
  *                  stderr, if it can't.
  *
  * Neither runs through a shell: the command line is split into arguments
  * and the host added as one more.
  */
-#ifndef GEMWEB_PASSWORDS_H
-#define GEMWEB_PASSWORDS_H
+#ifndef GEM_PASSWORDS_H
+#define GEM_PASSWORDS_H
 
 #include <gio/gio.h>
 
