@@ -143,10 +143,12 @@ if webkit.found()
 		'browser/gemweb.gresource.xml', source_dir: 'browser')
 	executable(
 		'gemweb',
-		['browser/gemweb.c', 'browser/cookies.c', 'browser/history.c',
-			'browser/passwords.c', 'lib/app-menu.c', client_protocols,
+		['browser/gemweb.c', 'browser/adblock.c', 'browser/cookies.c',
+			'browser/history.c', 'browser/passwords.c', 'lib/app-menu.c',
+			'lib/gem-draw.c', 'lib/gem-print.c', client_protocols,
 			gemweb_resources],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
+			dependency('gtk4-unix-print'), dependency('libsoup-3.0'),
 			dependency('gstreamer-1.0'), dependency('sqlite3'),
 			wayland_client, cairo],
 		include_directories: 'lib',
@@ -208,7 +210,7 @@ if gtk4.found()
 				'crossword/print.c', 'lib/app-menu.c',
 				'lib/gem-draw.c', 'lib/gem-print.c', client_protocols],
 			dependencies: [gtk4, dependency('gtk4-wayland'),
-				dependency('gtk4-unix-print'), soup, wayland_client, cairo],
+				dependency('gtk4-unix-print'), dependency('libsoup-3.0'), soup, wayland_client, cairo],
 			include_directories: 'lib',
 			install: true,
 		)

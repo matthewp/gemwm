@@ -515,6 +515,7 @@ Web Browser always opens GemWeb.
 | Alt+Left / Alt+Right        | back / forward            |
 | Ctrl+R, F5                  | reload                    |
 | Ctrl+plus / minus / 0       | zoom                      |
+| Ctrl+P                      | print                     |
 | Ctrl+F                      | find in the page          |
 | Ctrl+G, F3 (with Shift)     | next (previous) match     |
 | Ctrl+Alt+R                  | Reader View               |
@@ -535,6 +536,30 @@ if unset. `search` is `duckduckgo` (the default), `google`, `bing`,
 `brave`, `startpage` or `kagi`, or any search URL with `%s` where the query
 goes, like `https://search.example/?q=%s`. `$GEMWEB_HOME` and
 `$GEMWEB_SEARCH`, if set, take precedence.
+
+### Ad blocking
+
+GemWeb blocks ads and trackers with [EasyList](https://easylist.to) and
+EasyPrivacy, the lists most ad blockers use. It converts them to WebKit's
+own content-blocking rules, which WebKit compiles and applies itself, so
+pages load no slower. The lists are fetched again every four days, in the
+background; the compiled rules (about 55 MB) live in
+`~/.local/share/gemweb/adblock`.
+
+View > Block Ads turns it on or off everywhere, and View > Block Ads on
+*site* turns it the other way for the site you're on (and its subdomains),
+reloading the page. Both are kept in the settings file:
+
+    [Ad Blocking]
+    enabled = true
+    lists = https://easylist.to/easylist/easylist.txt;https://easylist.to/easylist/easyprivacy.txt
+
+    [Ad Blocking Sites]
+    example.com = false
+
+`lists` takes any lists in Adblock Plus's format, separated by `;`. Filters
+WebKit can't express (regular expressions, `$csp`, `$redirect`, scriptlets,
+extended selectors) are left out.
 
 ### Passwords
 
@@ -569,6 +594,10 @@ and Down choose from the list (Down in an untouched field lists your top
 pages), Shift+Delete forgets the chosen page, and Escape closes the list.
 History is kept in `~/.local/share/gemweb/history.sqlite`, to the top 5,000
 pages; Go > Clear History... empties it.
+
+File > Print... (Ctrl+P) prints the page with GemWM's print dialog (see
+[Printing](#printing)), to a printer or a PDF in Documents; in Reader View
+it prints just the article.
 
 Ctrl+F opens a find bar along the bottom of the window. It finds as you
 type, ignoring case, and counts the matches; Return and Shift+Return (or

@@ -60,7 +60,9 @@ enum rank { RANK_NONE, RANK_FIRST, RANK_DEFAULT, RANK_LAST_USED };
 struct dialog {
 	int refs;              /* while open or printing, and while listing */
 	GtkWidget *window, *area;
-	GtkPrintOperation *op;
+	GtkPrintOperation *op; /* what to print; or else run does, */
+	gem_print_run_fn run;
+	char *name;            /* with this job name */
 	GPtrArray *printers;   /* GtkPrinter, as found */
 	bool listing;
 	char *printer;         /* the chosen one's name */
@@ -97,6 +99,7 @@ static void dialog_unref(struct dialog *d) {
 	g_ptr_array_unref(d->printers);
 	g_array_unref(d->hits);
 	g_free(d->printer);
+	g_free(d->name);
 	g_free(d->pdf_path);
 	g_free(d->choices);
 	g_free(d->values);
@@ -175,9 +178,13 @@ static const char *printer_state(GtkPrinter *p) {
 
 /* ---- Printing ----------------------------------------------------------- */
 
-static char *job_name(GtkPrintOperation *op) {
+static char *job_name(struct dialog *d) {
 	char *name = NULL;
-	g_object_get(op, "job-name", &name, NULL);
+	if (d->op != NULL) {
+		g_object_get(d->op, "job-name", &name, NULL);
+	} else {
+		name = g_strdup(d->name);
+	}
 	return name;
 }
 
@@ -204,7 +211,9 @@ static char *pdf_path(const char *name) {
 	return path;
 }
 
-static void finish(struct dialog *d, GtkPrintOperationResult result) {
+/* error: why, for a run that failed (an operation has its own). */
+static void finish(struct dialog *d, GtkPrintOperationResult result,
+		const char *error_text) {
 	if (d->finished) {
 		return;
 	}
@@ -223,9 +232,12 @@ static void finish(struct dialog *d, GtkPrintOperationResult result) {
 		message = g_strdup_printf("Sent to %s.", d->printer);
 	} else if (result == GTK_PRINT_OPERATION_RESULT_ERROR) {
 		GError *error = NULL;
-		gtk_print_operation_get_error(d->op, &error);
+		if (d->op != NULL) {
+			gtk_print_operation_get_error(d->op, &error);
+		}
 		message = g_strdup_printf("Couldn't print: %s",
-			error != NULL ? error->message : "unknown error");
+			error != NULL ? error->message :
+			error_text != NULL ? error_text : "unknown error");
 		g_clear_error(&error);
 	} else {
 		message = g_strdup("Printing cancelled.");
@@ -234,13 +246,20 @@ static void finish(struct dialog *d, GtkPrintOperationResult result) {
 		d->done(message, d->data);
 	}
 	g_free(message);
-	g_object_unref(d->op);
+	g_clear_object(&d->op);
 	dialog_unref(d); /* the dialog's own ref */
 }
 
 static void op_done(GtkPrintOperation *op, GtkPrintOperationResult result,
 		struct dialog *d) {
-	finish(d, result);
+	finish(d, result, NULL);
+}
+
+void gem_print_job_done(struct gem_print_job *job, const char *error) {
+	struct dialog *d = (struct dialog *)job;
+	finish(d, error != NULL ? GTK_PRINT_OPERATION_RESULT_ERROR :
+		GTK_PRINT_OPERATION_RESULT_APPLY, error);
+	dialog_unref(d); /* the run's */
 }
 
 static void print(struct dialog *d) {
@@ -254,14 +273,25 @@ static void print(struct dialog *d) {
 	last_pdf = d->pdf;
 	close_window(d);
 
-	GtkPrintSettings *s = gtk_print_operation_get_print_settings(d->op);
+	GtkPrintSettings *s = d->op != NULL ?
+		gtk_print_operation_get_print_settings(d->op) : NULL;
 	s = s != NULL ? gtk_print_settings_copy(s) : gtk_print_settings_new();
 	GtkPrintOperationAction action = GTK_PRINT_OPERATION_ACTION_PRINT;
 	if (d->pdf) {
-		char *name = job_name(d->op);
+		char *name = job_name(d);
 		d->pdf_path = pdf_path(name);
 		g_free(name);
-		gtk_print_operation_set_export_filename(d->op, d->pdf_path);
+		if (d->op != NULL) {
+			gtk_print_operation_set_export_filename(d->op, d->pdf_path);
+		} else {
+			/* GTK's own printer for files. */
+			char *uri = g_filename_to_uri(d->pdf_path, NULL, NULL);
+			gtk_print_settings_set_printer(s, "Print to File");
+			gtk_print_settings_set(s, GTK_PRINT_SETTINGS_OUTPUT_FILE_FORMAT,
+				"pdf");
+			gtk_print_settings_set(s, GTK_PRINT_SETTINGS_OUTPUT_URI, uri);
+			g_free(uri);
+		}
 		action = GTK_PRINT_OPERATION_ACTION_EXPORT;
 	} else {
 		gtk_print_settings_set_printer(s, d->printer);
@@ -274,6 +304,12 @@ static void print(struct dialog *d) {
 			gtk_print_settings_set_print_pages(s, GTK_PRINT_PAGES_ALL);
 		}
 	}
+	if (d->run != NULL) {
+		d->refs++; /* until gem_print_job_done */
+		d->run(s, (struct gem_print_job *)d, d->data);
+		g_object_unref(s);
+		return;
+	}
 	gtk_print_operation_set_print_settings(d->op, s);
 	g_object_unref(s);
 	gtk_print_operation_set_allow_async(d->op, TRUE);
@@ -283,7 +319,7 @@ static void print(struct dialog *d) {
 	GtkPrintOperationResult result = gtk_print_operation_run(d->op, action,
 		NULL, NULL);
 	if (result != GTK_PRINT_OPERATION_RESULT_IN_PROGRESS) {
-		finish(d, result);
+		finish(d, result, NULL);
 	}
 	dialog_unref(d);
 }
@@ -293,7 +329,7 @@ static void cancel(struct dialog *d) {
 	if (d->done != NULL) {
 		d->done(NULL, d->data);
 	}
-	g_object_unref(d->op);
+	g_clear_object(&d->op);
 	dialog_unref(d);
 }
 
@@ -636,12 +672,15 @@ void gem_print_setup(void) {
 	}
 }
 
-void gem_print_dialog(GtkWindow *parent, GtkPrintOperation *op,
+static void open_dialog(GtkWindow *parent, GtkPrintOperation *op,
+		gem_print_run_fn run, const char *name,
 		const struct gem_print_choice *choices, int n_choices,
 		void (*done)(const char *message, void *data), void *data) {
 	struct dialog *d = g_new0(struct dialog, 1);
 	d->refs = 2; /* the dialog, and the printer listing */
 	d->op = op;
+	d->run = run;
+	d->name = g_strdup(name);
 	d->done = done;
 	d->data = data;
 	d->printers = g_ptr_array_new_with_free_func(g_object_unref);
@@ -685,4 +724,16 @@ void gem_print_dialog(GtkWindow *parent, GtkPrintOperation *op,
 
 	gtk_enumerate_printers(found, d, listed, FALSE);
 	gtk_window_present(GTK_WINDOW(d->window));
+}
+
+void gem_print_dialog(GtkWindow *parent, GtkPrintOperation *op,
+		const struct gem_print_choice *choices, int n_choices,
+		void (*done)(const char *message, void *data), void *data) {
+	open_dialog(parent, op, NULL, NULL, choices, n_choices, done, data);
+}
+
+void gem_print_dialog_run(GtkWindow *parent, const char *name,
+		gem_print_run_fn run,
+		void (*done)(const char *message, void *data), void *data) {
+	open_dialog(parent, NULL, run, name, NULL, 0, done, data);
 }

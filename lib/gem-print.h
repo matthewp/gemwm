@@ -33,4 +33,17 @@ void gem_print_dialog(GtkWindow *parent, GtkPrintOperation *op,
 	const struct gem_print_choice *choices, int n_choices,
 	void (*done)(const char *message, void *data), void *data);
 
+/* For printing that isn't a GtkPrintOperation (WebKit's): the same
+ * dialog, but on Print, run gets the settings chosen (the printer, copies
+ * and pages; for a PDF, GTK's "Print to File" printer and the file) and
+ * prints with them, then calls gem_print_job_done, with an error line if
+ * it failed. name is the job's, and the PDF's. */
+struct gem_print_job;
+typedef void (*gem_print_run_fn)(GtkPrintSettings *settings,
+	struct gem_print_job *job, void *data);
+void gem_print_dialog_run(GtkWindow *parent, const char *name,
+	gem_print_run_fn run,
+	void (*done)(const char *message, void *data), void *data);
+void gem_print_job_done(struct gem_print_job *job, const char *error);
+
 #endif

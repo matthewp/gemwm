@@ -17,13 +17,17 @@
  */
 #include <cairo.h>
 #include <gdk/wayland/gdkwayland.h>
+#include <glib/gstdio.h>
 #include <gst/gst.h>
 #include <gtk/gtk.h>
+#include <libsoup/soup.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <webkit/webkit.h>
+#include "adblock.h"
 #include "app-menu.h"
+#include "gem-print.h"
 #include "gemwm-scroll-v1-client-protocol.h"
 #include "cookies.h"
 #include "history.h"
@@ -74,11 +78,12 @@ struct tab {
 	bool login;   /* the page has a login field */
 	bool reading; /* in Reader View */
 	bool reader_loading; /* the load starting is the reader's page */
+	WebKitUserContentFilter *ads; /* the ad filter it has on, or NULL */
 };
 
 struct browser {
 	GtkWidget *window;
-	GtkWidget *tabbar, *buttons, *entry, *info, *stack;
+	GtkWidget *tabbar, *toolbar, *buttons, *entry, *info, *stack;
 	GPtrArray *tabs; /* struct tab * */
 	int active;
 	char *hover_link;      /* link under the pointer, for the info line */
@@ -120,6 +125,10 @@ struct browser {
 	GtkWidget *findbar, *find_entry, *find_info;
 	guint find_matches;
 	bool find_failed;
+
+	/* A page (a video) is fullscreen: the chrome is hidden. */
+	bool fullscreen;
+	bool find_was_open;
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -142,6 +151,12 @@ static struct {
 	char *password_session;
 	WebKitUserScript *login_script;
 	char *readability; /* Readability.js, and the call that runs it */
+	/* Ad blocking: WebKit's compiled filter, where it's kept, and whether
+	 * the lists are being fetched and compiled afresh. */
+	WebKitUserContentFilterStore *ads_store;
+	WebKitUserContentFilter *ads_filter;
+	char *ads_dir;
+	bool ads_updating;
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -155,6 +170,9 @@ static void on_login_message(WebKitUserContentManager *content,
 static bool find_open(struct browser *b);
 static void find_search(struct browser *b);
 static void find_connect(struct tab *t);
+static gboolean on_enter_fullscreen(WebKitWebView *view, struct tab *t);
+static gboolean on_leave_fullscreen(WebKitWebView *view, struct tab *t);
+static void ads_apply(struct tab *t);
 static GtkWidget *pixel_area(struct browser *b, int height,
 	GtkDrawingAreaDrawFunc draw, GCallback pressed);
 
@@ -670,7 +688,7 @@ static void sync_entry(struct browser *b) {
 /* The tab bar only appears once there are two tabs (Ctrl+T makes the
  * second); a single page gets the whole window. */
 static void sync_tabbar(struct browser *b) {
-	gtk_widget_set_visible(b->tabbar, b->tabs->len >= 2);
+	gtk_widget_set_visible(b->tabbar, !b->fullscreen && b->tabs->len >= 2);
 	gtk_widget_queue_draw(b->tabbar);
 }
 
@@ -799,6 +817,9 @@ static gboolean record_later(gpointer data) {
 static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 		struct tab *t) {
 	const char *uri = webkit_web_view_get_uri(view);
+	if (event == WEBKIT_LOAD_STARTED || event == WEBKIT_LOAD_REDIRECTED) {
+		ads_apply(t);
+	}
 	if (event == WEBKIT_LOAD_STARTED) {
 		/* Reading ends when anything but the reader's page loads. */
 		t->reading = t->reader_loading;
@@ -1015,6 +1036,8 @@ static void on_download_started(WebKitNetworkSession *session,
 
 /* ---- Settings ----------------------------------------------------------- */
 
+static char *settings_path(void);
+
 /* A setting from ~/.config/gemweb/settings, under [group], or NULL.
  * $env, if set, wins (for scripts and tests). The file is read each time,
  * so an edit applies to the next page loaded. */
@@ -1023,8 +1046,7 @@ static char *setting(const char *group, const char *key, const char *env) {
 	if (value != NULL) {
 		return g_strdup(value);
 	}
-	char *path = g_build_filename(g_get_user_config_dir(), "gemweb",
-		"settings", NULL);
+	char *path = settings_path();
 	GKeyFile *kf = g_key_file_new();
 	char *s = NULL;
 	if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
@@ -1033,6 +1055,53 @@ static char *setting(const char *group, const char *key, const char *env) {
 	g_key_file_free(kf);
 	g_free(path);
 	return s != NULL ? g_strstrip(s) : NULL;
+}
+
+static char *settings_path(void) {
+	return g_build_filename(g_get_user_config_dir(), "gemweb", "settings",
+		NULL);
+}
+
+/* A yes-or-no setting: true, yes, on or 1; false, no, off or 0. */
+static bool setting_bool(const char *group, const char *key, bool otherwise) {
+	char *v = setting(group, key, NULL);
+	bool on = otherwise;
+	if (v != NULL) {
+		on = g_ascii_strcasecmp(v, "true") == 0 ||
+			g_ascii_strcasecmp(v, "yes") == 0 ||
+			g_ascii_strcasecmp(v, "on") == 0 || strcmp(v, "1") == 0;
+	}
+	g_free(v);
+	return on;
+}
+
+/* Sets (or, for NULL, removes) a setting from the menus, keeping the rest
+ * of the file, comments and all. */
+static void setting_write(const char *group, const char *key,
+		const char *value) {
+	char *path = settings_path();
+	GKeyFile *kf = g_key_file_new();
+	GError *error = NULL;
+	g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
+	if (value != NULL) {
+		g_key_file_set_string(kf, group, key, value);
+	} else {
+		g_key_file_remove_key(kf, group, key, NULL);
+		gsize n = 0;
+		g_strfreev(g_key_file_get_keys(kf, group, &n, NULL));
+		if (n == 0) {
+			g_key_file_remove_group(kf, group, NULL);
+		}
+	}
+	char *dir = g_path_get_dirname(path);
+	g_mkdir_with_parents(dir, 0755);
+	if (!g_key_file_save_to_file(kf, path, &error)) {
+		g_printerr("gemweb: can't save %s: %s\n", path, error->message);
+		g_error_free(error);
+	}
+	g_free(dir);
+	g_key_file_free(kf);
+	g_free(path);
 }
 
 /* The search engine: search = a URL with %s for the query, or one of these
@@ -1213,6 +1282,10 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
 	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
 	find_connect(t);
+	g_signal_connect(t->view, "enter-fullscreen",
+		G_CALLBACK(on_enter_fullscreen), t);
+	g_signal_connect(t->view, "leave-fullscreen",
+		G_CALLBACK(on_leave_fullscreen), t);
 
 	gtk_stack_add_child(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	/* New tabs open next to the current one. */
@@ -1542,7 +1615,7 @@ enum action {
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
-	ACT_FIND_NEXT, ACT_FIND_PREV,
+	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -2480,6 +2553,313 @@ static GtkWidget *findbar_new(struct browser *b) {
 	return bar;
 }
 
+/* ---- Ad blocking ---------------------------------------------------------- */
+
+/* Ads and trackers are blocked by WebKit itself, with EasyList and
+ * EasyPrivacy converted to its rules (adblock.c) and compiled into a store
+ * in GemWeb's data folder; the lists are fetched afresh every few days.
+ * [Ad Blocking] enabled turns it on or off, and [Ad Blocking Sites] holds
+ * sites that differ; the View menu sets both. A tab has the filter on or
+ * off as each page starts loading, by the page's site. */
+
+#define ADS_ID "ads"
+#define ADS_LISTS "https://easylist.to/easylist/easylist.txt;" \
+	"https://easylist.to/easylist/easyprivacy.txt"
+#define ADS_REFRESH (4 * 24 * 60 * 60) /* seconds */
+
+/* A page's site, for its setting: its host, without "www.". */
+static char *site_of(const char *uri) {
+	GUri *u = uri != NULL ? g_uri_parse(uri, G_URI_FLAGS_NONE, NULL) : NULL;
+	char *site = NULL;
+	if (u != NULL && g_uri_get_host(u) != NULL &&
+			(strcmp(g_uri_get_scheme(u), "https") == 0 ||
+			strcmp(g_uri_get_scheme(u), "http") == 0)) {
+		const char *h = g_uri_get_host(u);
+		site = g_ascii_strdown(g_str_has_prefix(h, "www.") ? h + 4 : h, -1);
+	}
+	if (u != NULL) {
+		g_uri_unref(u);
+	}
+	return site;
+}
+
+static bool ads_enabled(void) {
+	return setting_bool("Ad Blocking", "enabled", true);
+}
+
+/* Whether ads are blocked on site: its own setting, or the nearest
+ * enclosing domain's (news.example.com, then example.com), or else the
+ * setting for everywhere. from_parent skips the site's own. */
+static bool ads_blocked_on(const char *site, bool from_parent) {
+	/* The site, then each domain it's in, short of the last (com). */
+	const char *d = site;
+	for (bool skip = from_parent; d != NULL; skip = false) {
+		const char *dot = strchr(d, '.');
+		if (!skip) {
+			char *v = setting("Ad Blocking Sites", d, NULL);
+			if (v != NULL) {
+				g_free(v);
+				return setting_bool("Ad Blocking Sites", d, true);
+			}
+		}
+		d = dot != NULL && strchr(dot + 1, '.') != NULL ? dot + 1 : NULL;
+	}
+	return ads_enabled();
+}
+
+/* Puts the filter on or takes it off for the tab's page. */
+static void ads_apply(struct tab *t) {
+	char *site = site_of(webkit_web_view_get_uri(t->view));
+	WebKitUserContentFilter *want = shared.ads_filter != NULL &&
+		site != NULL && ads_blocked_on(site, false) ? shared.ads_filter : NULL;
+	g_free(site);
+	if (want == t->ads) {
+		return;
+	}
+	webkit_user_content_manager_remove_all_filters(t->content);
+	if (want != NULL) {
+		webkit_user_content_manager_add_filter(t->content, want);
+	}
+	t->ads = want;
+}
+
+static void ads_apply_all(void) {
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		for (guint i = 0; b != NULL && i < b->tabs->len; i++) {
+			ads_apply(g_ptr_array_index(b->tabs, i));
+		}
+	}
+}
+
+static void ads_use(WebKitUserContentFilter *filter) {
+	WebKitUserContentFilter *old = shared.ads_filter;
+	shared.ads_filter = filter;
+	ads_apply_all();
+	if (old != NULL) {
+		webkit_user_content_filter_unref(old);
+	}
+}
+
+static char *ads_stamp(void) {
+	return g_build_filename(shared.ads_dir, "updated", NULL);
+}
+
+struct ads_update {
+	SoupSession *session;
+	char **urls;
+	int next, fetched;
+	struct adblock *converter;
+};
+
+static void ads_fetch_next(struct ads_update *u);
+
+static void ads_saved(GObject *source, GAsyncResult *result, gpointer data) {
+	GError *error = NULL;
+	WebKitUserContentFilter *filter = webkit_user_content_filter_store_save_finish(
+		shared.ads_store, result, &error);
+	shared.ads_updating = false;
+	if (filter == NULL) {
+		g_printerr("gemweb: ad blocking lists didn't compile: %s\n",
+			error->message);
+		g_error_free(error);
+		return;
+	}
+	char *stamp = ads_stamp();
+	g_file_set_contents(stamp, "", 0, NULL);
+	g_free(stamp);
+	ads_use(filter);
+}
+
+static void ads_fetched(GObject *source, GAsyncResult *result, gpointer data) {
+	struct ads_update *u = data;
+	GError *error = NULL;
+	GBytes *body = soup_session_send_and_read_finish(u->session, result,
+		&error);
+	SoupMessage *msg = soup_session_get_async_result_message(u->session,
+		result);
+	const char *url = u->urls[u->next - 1];
+	if (body == NULL) {
+		g_printerr("gemweb: can't fetch %s: %s\n", url, error->message);
+		g_error_free(error);
+	} else if (soup_message_get_status(msg) != SOUP_STATUS_OK) {
+		g_printerr("gemweb: can't fetch %s: %u\n", url,
+			soup_message_get_status(msg));
+	} else {
+		gsize len;
+		const char *data = g_bytes_get_data(body, &len);
+		char *text = g_strndup(data, len);
+		adblock_add_list(u->converter, text);
+		g_free(text);
+		u->fetched++;
+	}
+	g_clear_pointer(&body, g_bytes_unref);
+	ads_fetch_next(u);
+}
+
+/* Fetches the lists one by one, then converts and compiles them. The old
+ * filter stays until the new one's ready, or if it can't be made. */
+static void ads_fetch_next(struct ads_update *u) {
+	while (u->urls[u->next] != NULL) {
+		SoupMessage *msg = soup_message_new("GET", g_strstrip(u->urls[u->next++]));
+		if (msg != NULL) {
+			soup_session_send_and_read_async(u->session, msg, G_PRIORITY_LOW,
+				NULL, ads_fetched, u);
+			g_object_unref(msg);
+			return;
+		}
+	}
+	guint n = 0;
+	GBytes *rules = adblock_finish(u->converter, &n);
+	if (u->fetched > 0) {
+		webkit_user_content_filter_store_save(shared.ads_store, ADS_ID, rules,
+			NULL, ads_saved, NULL);
+	} else {
+		shared.ads_updating = false;
+	}
+	g_bytes_unref(rules);
+	g_object_unref(u->session);
+	g_strfreev(u->urls);
+	g_free(u);
+}
+
+static void ads_update(void) {
+	if (shared.ads_updating) {
+		return;
+	}
+	shared.ads_updating = true;
+	char *lists = setting("Ad Blocking", "lists", NULL);
+	struct ads_update *u = g_new0(struct ads_update, 1);
+	u->session = soup_session_new_with_options("user-agent", "GemWeb", NULL);
+	u->urls = g_strsplit(lists != NULL ? lists : ADS_LISTS, ";", -1);
+	u->converter = adblock_new();
+	g_free(lists);
+	ads_fetch_next(u);
+}
+
+/* Lists more than a few days old (or never fetched) are fetched again. */
+static bool ads_stale(void) {
+	char *stamp = ads_stamp();
+	GStatBuf st;
+	bool stale = g_stat(stamp, &st) != 0 ||
+		g_get_real_time() / G_USEC_PER_SEC - st.st_mtime > ADS_REFRESH;
+	g_free(stamp);
+	return stale;
+}
+
+static void ads_loaded(GObject *source, GAsyncResult *result, gpointer data) {
+	WebKitUserContentFilter *filter = webkit_user_content_filter_store_load_finish(
+		shared.ads_store, result, NULL);
+	if (filter != NULL) {
+		ads_use(filter);
+	}
+	if (ads_enabled() && (filter == NULL || ads_stale())) {
+		ads_update();
+	}
+}
+
+static void ads_init(const char *data) {
+	shared.ads_dir = g_build_filename(data, "adblock", NULL);
+	shared.ads_store = webkit_user_content_filter_store_new(shared.ads_dir);
+	webkit_user_content_filter_store_load(shared.ads_store, ADS_ID, NULL,
+		ads_loaded, NULL);
+}
+
+/* View > Block Ads: everywhere, then the page's site differently. Either
+ * reloads the page to show the change. */
+static void ads_toggle(struct browser *b, bool here) {
+	struct tab *t = active_tab(b);
+	char *site = t != NULL ? site_of(webkit_web_view_get_uri(t->view)) : NULL;
+	if (!here) {
+		setting_write("Ad Blocking", "enabled", ads_enabled() ? "false" : "true");
+	} else if (site != NULL) {
+		bool on = !ads_blocked_on(site, false);
+		/* Same as it'd be anyway: no need to say so. */
+		setting_write("Ad Blocking Sites", site,
+			on == ads_blocked_on(site, true) ? NULL : on ? "true" : "false");
+	}
+	if (shared.ads_filter == NULL || (ads_enabled() && ads_stale())) {
+		ads_update();
+	}
+	ads_apply_all();
+	if (t != NULL && site != NULL) {
+		webkit_web_view_reload(t->view);
+	}
+	g_free(site);
+	app_menu_update(b->menu);
+}
+
+/* ---- Printing ------------------------------------------------------------- */
+
+/* File > Print...: GemWM's print dialog, then WebKit prints the page with
+ * what was chosen, to a printer or a PDF in Documents. */
+
+static void print_failed(WebKitPrintOperation *op, GError *error,
+		gpointer data) {
+	g_object_set_data_full(G_OBJECT(op), "error", g_strdup(error->message),
+		g_free);
+}
+
+static void print_finished(WebKitPrintOperation *op, gpointer data) {
+	gem_print_job_done(data, g_object_get_data(G_OBJECT(op), "error"));
+	g_object_unref(op);
+}
+
+static void print_run(GtkPrintSettings *settings, struct gem_print_job *job,
+		void *data) {
+	WebKitPrintOperation *op = webkit_print_operation_new(data);
+	webkit_print_operation_set_print_settings(op, settings);
+	g_signal_connect(op, "failed", G_CALLBACK(print_failed), job);
+	g_signal_connect(op, "finished", G_CALLBACK(print_finished), job);
+	webkit_print_operation_print(op);
+}
+
+/* What happened, in the info line, if the tab's still there. */
+static void print_done(const char *message, void *data) {
+	struct tab *t = g_object_get_data(G_OBJECT(data), "tab");
+	if (t != NULL && message != NULL) {
+		show_notice(t->browser, g_strdup(message));
+	}
+	g_object_unref(data);
+}
+
+static void print_page(struct browser *b) {
+	struct tab *t = active_tab(b);
+	if (t != NULL) {
+		gem_print_dialog_run(GTK_WINDOW(b->window), tab_title(t), print_run,
+			print_done, g_object_ref(t->view));
+	}
+}
+
+/* ---- Fullscreen ----------------------------------------------------------- */
+
+/* A page going fullscreen (a video, say) gets the whole window, which
+ * WebKit then makes fullscreen: the tabs, toolbar, info line and find bar
+ * hide until it leaves. */
+static gboolean on_enter_fullscreen(WebKitWebView *view, struct tab *t) {
+	struct browser *b = t->browser;
+	b->fullscreen = true;
+	b->find_was_open = find_open(b);
+	list_hide(b);
+	logins_hide(b);
+	gtk_widget_set_visible(b->tabbar, FALSE);
+	gtk_widget_set_visible(b->toolbar, FALSE);
+	gtk_widget_set_visible(b->info, FALSE);
+	gtk_widget_set_visible(b->findbar, FALSE);
+	return FALSE;
+}
+
+static gboolean on_leave_fullscreen(WebKitWebView *view, struct tab *t) {
+	struct browser *b = t->browser;
+	b->fullscreen = false;
+	sync_tabbar(b);
+	gtk_widget_set_visible(b->toolbar, TRUE);
+	gtk_widget_set_visible(b->info, TRUE);
+	gtk_widget_set_visible(b->findbar, b->find_was_open);
+	return FALSE;
+}
+
 /* A key: a ring and a toothed shaft; inverted while looking up. */
 static void paint_key(struct browser *b, cairo_t *cr, int w, int h) {
 	double cy = h / 2.0;
@@ -2573,6 +2953,13 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_READER:
 		reader_toggle(b);
 		break;
+	case ACT_PRINT:
+		print_page(b);
+		break;
+	case ACT_BLOCK_ADS:
+	case ACT_BLOCK_ADS_SITE:
+		ads_toggle(b, GPOINTER_TO_INT(data) == ACT_BLOCK_ADS_SITE);
+		break;
 	case ACT_FIND:
 		find_show(b);
 		break;
@@ -2605,6 +2992,9 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_NEW_TAB, "New Tab", "^T", 0);
 	app_menu_add_item(m, ACT_FOCUS_URL, "Open Location...", "^L", 0);
 	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_PRINT, "Print...", "^P",
+		t != NULL ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_CLOSE_TAB, "Close Tab", "^W", 0);
 	app_menu_add_item(m, ACT_QUIT, "Close Window", "^Q", 0);
 
@@ -2614,6 +3004,15 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_READER, "Reader View", "^Alt+R",
 		t != NULL && t->reading ? APP_MENU_CHECKED :
 		can_read(t) ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
+	char *site = t != NULL ? site_of(webkit_web_view_get_uri(t->view)) : NULL;
+	char *here = g_strdup_printf("Block Ads on %s", site ? site : "This Site");
+	app_menu_add_item(m, ACT_BLOCK_ADS, "Block Ads", NULL,
+		ads_enabled() ? APP_MENU_CHECKED : 0);
+	app_menu_add_item(m, ACT_BLOCK_ADS_SITE, here, NULL, site == NULL ?
+		APP_MENU_DISABLED : ads_blocked_on(site, false) ? APP_MENU_CHECKED : 0);
+	g_free(here);
+	g_free(site);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_FIND, "Find...", "^F", 0);
 	app_menu_add_item(m, ACT_FIND_NEXT, "Find Again", "^G",
@@ -2671,6 +3070,7 @@ static void add_shortcuts(GtkWidget *window) {
 		{ "<Control>r", ACT_RELOAD },
 		{ "<Control><Alt>r", ACT_READER },
 		{ "<Control>f", ACT_FIND },
+		{ "<Control>p", ACT_PRINT },
 		{ "<Control>g", ACT_FIND_NEXT },
 		{ "F3", ACT_FIND_NEXT },
 		{ "<Control><Shift>g", ACT_FIND_PREV },
@@ -2808,6 +3208,7 @@ static void shared_init(GtkApplication *app) {
 	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
 	g_mkdir_with_parents(data, 0700);
 	shared.session = webkit_network_session_new(data, cache);
+	ads_init(data);
 	char *cookies;
 	cookies_prepare(data, &cookies);
 	webkit_cookie_manager_set_persistent_storage(
@@ -2883,6 +3284,7 @@ static struct browser *browser_new(GtkApplication *app) {
 	b->tabbar = pixel_area(b, TAB_H, draw_tabbar, G_CALLBACK(tabbar_pressed));
 
 	GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+	b->toolbar = toolbar;
 	gtk_widget_add_css_class(toolbar, "gem-toolbar");
 	b->buttons = pixel_area(b, TOOL_H, draw_buttons, G_CALLBACK(buttons_pressed));
 	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->buttons),
@@ -3012,6 +3414,7 @@ static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 }
 
 int main(int argc, char *argv[]) {
+	gem_print_setup();
 	font_family = g_getenv("GEMWM_FONT") ? g_getenv("GEMWM_FONT") : "monospace";
 	font_size = g_getenv("GEMWM_FONT_SIZE") ? atoi(g_getenv("GEMWM_FONT_SIZE")) : 0;
 	font_size = font_size > 0 ? font_size : 14;
