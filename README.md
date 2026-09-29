@@ -203,7 +203,7 @@ each line adds or replaces one binding, and `none` removes one.
     [highlight]
     color = #ff3fa4                      # the border shown while Super is held
     width = 4                            # 0 turns it off
-    tiling = always                      # or super: in tiling mode, keep it on
+    tiling = super                       # or always: keep it on the focused tile
     dim = tiling                         # grey out unfocused windows: always, off
     dim-opacity = 0.5                    # 0..1, how strong the grey dots are
 
@@ -409,9 +409,9 @@ A column left empty gives the other the whole width. Super+Ctrl+Arrows swap
 the focused window with its neighbour that way; Super+Shift+Left/Right push
 it into the other column, below the window beside it (only if its own
 column keeps another; from a single column, it starts a second).
-Super+Arrows move focus between tiles, and the
-focused tile keeps the pink focus border,
-while the others are greyed out with GEM's dotted "disabled" pattern (clicks
+Super+Arrows move focus between tiles, which show the pink focus border
+while Super is held, as in window mode (`[highlight] tiling = always` keeps
+it on the focused tile), while the others are greyed out with GEM's dotted "disabled" pattern (clicks
 go straight through it). Super+Z (or a tile's fuller) makes the focused
 tile fill the screen; the other tiles stay open but hidden until Super+Z
 again, a new window, or moving focus brings the layout back. Tiles can't be

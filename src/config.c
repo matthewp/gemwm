@@ -90,7 +90,7 @@ static const char default_config[] =
 	"[highlight]\n"
 	"color = #ff3fa4\n"
 	"width = 4\n"
-	"tiling = always\n"
+	"tiling = super\n"
 	"dim = tiling\n"
 	"dim-opacity = 0.5\n"
 	"\n"
@@ -257,8 +257,9 @@ static void parse(struct server *server, FILE *f, const char *name) {
 			server->highlight_width = width < 0 ? 0 : width > 64 ? 64 : width;
 		} else if (strcmp(section, "highlight") == 0 &&
 				strcmp(key, "tiling") == 0) {
-			/* "always": the focused tile keeps its border; "super": only
-			 * while Super is held, as in window mode. */
+			/* In tiling and scrolling modes, "super" shows the border only
+			 * while Super is held, as in window mode; "always" keeps it on
+			 * the focused tile. */
 			server->highlight_tiling = strcmp(value, "super") != 0;
 		} else if (strcmp(section, "highlight") == 0 &&
 				strcmp(key, "dim") == 0) {

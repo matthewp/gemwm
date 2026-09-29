@@ -64,7 +64,7 @@ struct server {
 	int n_bindings;
 	float highlight_color[4];
 	int highlight_width;
-	bool highlight_tiling; /* in tiling mode, always show the focus border */
+	bool highlight_tiling; /* tiled windows always show the focus border */
 	enum { DIM_OFF, DIM_TILING, DIM_ALWAYS } dim; /* grey out unfocused windows */
 	float dim_opacity;
 
