@@ -500,6 +500,7 @@ pages with video or sound.
 
     gemweb               # opens a new window
     gemweb URL...        # opens tabs in the last-used window
+    gemweb --app URL [--name NAME]   # a web app in a window of its own
 
 The tab bar appears once a window has two tabs; Ctrl+T opens the second.
 
@@ -536,6 +537,20 @@ if unset. `search` is `duckduckgo` (the default), `google`, `bing`,
 `brave`, `startpage` or `kagi`, or any search URL with `%s` where the query
 goes, like `https://search.example/?q=%s`. `$GEMWEB_HOME` and
 `$GEMWEB_SEARCH`, if set, take precedence.
+
+### Web apps
+
+`gemweb --app URL` opens a site as an app of its own: a window with just
+the page, no tabs, address field or info line (it appears only for a
+download or a notice), named in the menu bar after `--name` (or the site:
+`x.com` is X). It shares the browser's logins. Links to other sites open in
+the browser; the app's own pages, redirects and pop-ups, like signing in,
+stay in its window. File > Open in Browser takes the page there, and Go >
+Home goes back to URL. Running it again brings its window forward. To put
+one in the Desk menu:
+
+    [Desk > Internet]
+    Twitter = gemweb --app https://x.com --name Twitter
 
 ### Ad blocking
 
@@ -619,6 +634,9 @@ built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
   moves on release, as in GEM.
 - Sizer (bottom right) resizes the same way.
 - Closer (top left) closes, fuller (top right) toggles full screen size.
+- An application can bring its own window forward (xdg-activation), as
+  GemWeb does when asked to open a link: the window is focused, on its
+  workspace.
 - Fullscreen (a video, a browser's F11, a game, or Super+F) covers the
   whole screen, menu bar and all, without a frame. Focusing another window
   on that workspace brings it back out, into its old place.

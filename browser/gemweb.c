@@ -129,6 +129,10 @@ struct browser {
 	/* A page (a video) is fullscreen: the chrome is hidden. */
 	bool fullscreen;
 	bool find_was_open;
+
+	/* A web app's window (gemweb --app): just its page, named after it. */
+	bool app;
+	char *app_uri, *app_name;
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -173,6 +177,10 @@ static void find_connect(struct tab *t);
 static gboolean on_enter_fullscreen(WebKitWebView *view, struct tab *t);
 static gboolean on_leave_fullscreen(WebKitWebView *view, struct tab *t);
 static void ads_apply(struct tab *t);
+static void sync_info(struct browser *b);
+static bool app_owns(struct browser *b, const char *uri);
+static void open_in_browser(const char *uri);
+static struct browser *app_window(const char *uri, const char *name);
 static GtkWidget *pixel_area(struct browser *b, int height,
 	GtkDrawingAreaDrawFunc draw, GCallback pressed);
 
@@ -643,6 +651,16 @@ static void set_status(char **field, char *value) {
 	*field = value;
 }
 
+/* A web app's window shows the info line only when it has something to
+ * say: a download, or a notice. */
+static void sync_info(struct browser *b) {
+	if (b->app) {
+		gtk_widget_set_visible(b->info, !b->fullscreen &&
+			(b->download_status != NULL || b->notice != NULL));
+	}
+	gtk_widget_queue_draw(b->info);
+}
+
 /* ---- Keeping the chrome in sync ----------------------------------------- */
 
 static bool entry_focused(struct browser *b) {
@@ -688,7 +706,8 @@ static void sync_entry(struct browser *b) {
 /* The tab bar only appears once there are two tabs (Ctrl+T makes the
  * second); a single page gets the whole window. */
 static void sync_tabbar(struct browser *b) {
-	gtk_widget_set_visible(b->tabbar, !b->fullscreen && b->tabs->len >= 2);
+	gtk_widget_set_visible(b->tabbar, !b->fullscreen && !b->app &&
+		b->tabs->len >= 2);
 	gtk_widget_queue_draw(b->tabbar);
 }
 
@@ -911,6 +930,22 @@ static void on_mouse_target(WebKitWebView *view, WebKitHitTestResult *hit,
 
 static GtkWidget *on_create(WebKitWebView *view, WebKitNavigationAction *action,
 		struct tab *t) {
+	if (t->browser->app) {
+		/* A link out of the app goes to the browser; its own pop-ups
+		 * (a sign-in window) are more of the app. */
+		const char *uri = webkit_uri_request_get_uri(
+			webkit_navigation_action_get_request(action));
+		if (webkit_navigation_action_get_navigation_type(action) ==
+				WEBKIT_NAVIGATION_TYPE_LINK_CLICKED && !app_owns(t->browser, uri)) {
+			open_in_browser(uri);
+			return NULL;
+		}
+		struct browser *popup = app_window(t->browser->app_uri,
+			t->browser->app_name);
+		struct tab *pt = tab_new(popup, view, NULL, true);
+		gtk_window_present(GTK_WINDOW(popup->window));
+		return GTK_WIDGET(pt->view);
+	}
 	/* target=_blank and window.open(): a new tab, related to this one. */
 	return GTK_WIDGET(tab_new(t->browser, view, NULL, true)->view);
 }
@@ -933,6 +968,21 @@ static gboolean on_decide_policy(WebKitWebView *view,
 		WEBKIT_NAVIGATION_POLICY_DECISION(decision));
 	if (webkit_navigation_action_get_navigation_type(action) !=
 			WEBKIT_NAVIGATION_TYPE_LINK_CLICKED) {
+		return FALSE;
+	}
+	if (t->browser->app) {
+		/* A link out of the app opens in the browser (as does a middle
+		 * or Ctrl click); redirects and sign-ins stay in the app. */
+		const char *uri = webkit_uri_request_get_uri(
+			webkit_navigation_action_get_request(action));
+		guint button = webkit_navigation_action_get_mouse_button(action);
+		guint mods = webkit_navigation_action_get_modifiers(action);
+		if (!app_owns(t->browser, uri) || button == GDK_BUTTON_MIDDLE ||
+				(mods & GDK_CONTROL_MASK)) {
+			open_in_browser(uri);
+			webkit_policy_decision_ignore(decision);
+			return TRUE;
+		}
 		return FALSE;
 	}
 	guint button = webkit_navigation_action_get_mouse_button(action);
@@ -969,7 +1019,7 @@ static void download_status(WebKitDownload *download, char *message) {
 		return;
 	}
 	set_status(&b->download_status, message);
-	gtk_widget_queue_draw(b->info);
+	sync_info(b);
 }
 
 static gboolean on_decide_destination(WebKitDownload *download,
@@ -1172,6 +1222,10 @@ static char *input_to_uri(const char *input, bool *search) {
 /* The home page: home = an address, or "start" (or nothing) for GemWeb's
  * own start page; Google if it isn't set. */
 static void load_home(struct tab *t) {
+	if (t->browser->app) {
+		webkit_web_view_load_uri(t->view, t->browser->app_uri);
+		return;
+	}
 	char *home = setting("General", "home", "GEMWEB_HOME");
 	if (home == NULL) {
 		home = g_strdup(DEFAULT_HOME);
@@ -1616,6 +1670,7 @@ enum action {
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
+	ACT_OPEN_IN_BROWSER,
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -1889,7 +1944,7 @@ static char *password_command(const char *key) {
 
 static void show_notice(struct browser *b, char *message) {
 	set_status(&b->notice, message);
-	gtk_widget_queue_draw(b->info);
+	sync_info(b);
 }
 
 static void sync_key(struct browser *b) {
@@ -2854,8 +2909,9 @@ static gboolean on_leave_fullscreen(WebKitWebView *view, struct tab *t) {
 	struct browser *b = t->browser;
 	b->fullscreen = false;
 	sync_tabbar(b);
-	gtk_widget_set_visible(b->toolbar, TRUE);
-	gtk_widget_set_visible(b->info, TRUE);
+	gtk_widget_set_visible(b->toolbar, !b->app);
+	gtk_widget_set_visible(b->info, !b->app);
+	sync_info(b);
 	gtk_widget_set_visible(b->findbar, b->find_was_open);
 	return FALSE;
 }
@@ -2892,6 +2948,13 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	struct tab *t = active_tab(b);
 	int n = b->tabs->len;
 	if (dialog_up(b) && GPOINTER_TO_INT(data) != ACT_QUIT) {
+		return TRUE;
+	}
+	/* An app's window has one page, and no address field. */
+	if (b->app && (GPOINTER_TO_INT(data) == ACT_NEW_TAB ||
+			GPOINTER_TO_INT(data) == ACT_FOCUS_URL ||
+			GPOINTER_TO_INT(data) == ACT_NEXT_TAB ||
+			GPOINTER_TO_INT(data) == ACT_PREV_TAB)) {
 		return TRUE;
 	}
 	switch (GPOINTER_TO_INT(data)) {
@@ -2956,6 +3019,9 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_PRINT:
 		print_page(b);
 		break;
+	case ACT_OPEN_IN_BROWSER:
+		open_in_browser(webkit_web_view_get_uri(t->view));
+		break;
 	case ACT_BLOCK_ADS:
 	case ACT_BLOCK_ADS_SITE:
 		ads_toggle(b, GPOINTER_TO_INT(data) == ACT_BLOCK_ADS_SITE);
@@ -2988,14 +3054,21 @@ static void build_menus(struct app_menu *m, void *data) {
 	uint32_t one_tab = b->tabs->len < 2 ? APP_MENU_DISABLED : 0;
 
 	app_menu_add_menu(m, "File");
-	app_menu_add_item(m, ACT_NEW_WINDOW, "New Window", "^N", 0);
-	app_menu_add_item(m, ACT_NEW_TAB, "New Tab", "^T", 0);
-	app_menu_add_item(m, ACT_FOCUS_URL, "Open Location...", "^L", 0);
+	if (b->app) {
+		app_menu_add_item(m, ACT_OPEN_IN_BROWSER, "Open in Browser", NULL,
+			t != NULL ? 0 : APP_MENU_DISABLED);
+	} else {
+		app_menu_add_item(m, ACT_NEW_WINDOW, "New Window", "^N", 0);
+		app_menu_add_item(m, ACT_NEW_TAB, "New Tab", "^T", 0);
+		app_menu_add_item(m, ACT_FOCUS_URL, "Open Location...", "^L", 0);
+	}
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_PRINT, "Print...", "^P",
 		t != NULL ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
-	app_menu_add_item(m, ACT_CLOSE_TAB, "Close Tab", "^W", 0);
+	if (!b->app) {
+		app_menu_add_item(m, ACT_CLOSE_TAB, "Close Tab", "^W", 0);
+	}
 	app_menu_add_item(m, ACT_QUIT, "Close Window", "^Q", 0);
 
 	app_menu_add_menu(m, "View");
@@ -3029,9 +3102,12 @@ static void build_menus(struct app_menu *m, void *data) {
 		forward ? 0 : APP_MENU_DISABLED);
 	app_menu_add_item(m, ACT_HOME, "Home", "Alt+Home", 0);
 	app_menu_add_separator(m);
-	app_menu_add_item(m, ACT_NEXT_TAB, "Next Tab", "^Tab", one_tab);
-	app_menu_add_item(m, ACT_PREV_TAB, "Previous Tab", "^Shift+Tab", one_tab);
-	app_menu_add_separator(m);
+	if (!b->app) {
+		app_menu_add_item(m, ACT_NEXT_TAB, "Next Tab", "^Tab", one_tab);
+		app_menu_add_item(m, ACT_PREV_TAB, "Previous Tab", "^Shift+Tab",
+			one_tab);
+		app_menu_add_separator(m);
+	}
 	app_menu_add_item(m, ACT_CLEAR_HISTORY, "Clear History...", NULL,
 		dialog_up(b) ? APP_MENU_DISABLED : 0);
 	if (shared.passwords) {
@@ -3161,6 +3237,8 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	g_free(b->login_host);
 	g_free(b->notice);
 	g_free(b->dialog_error);
+	g_free(b->app_uri);
+	g_free(b->app_name);
 	g_ptr_array_free(b->tabs, TRUE);
 	g_clear_pointer(&b->suggestions, history_entries_free);
 	g_free(b->typed);
@@ -3375,6 +3453,128 @@ static struct browser *browser_new(GtkApplication *app) {
 	return b;
 }
 
+/* ---- Web apps ------------------------------------------------------------- */
+
+/* `gemweb --app URL [--name NAME]`: a window with just the page, no tabs or
+ * address field, named NAME in the menu bar (its own Wayland app ID,
+ * org.gemwm.GemWeb.NAME). It shares the browser's logins. Links to other
+ * sites open in the browser; the app's own pop-ups (signing in) and
+ * redirects stay. */
+
+/* A host's site, for what an app covers: its last two names (x.com), or
+ * three when the second-last is short, as in bbc.co.uk. */
+static char *base_domain(const char *host) {
+	char **parts = g_strsplit(host, ".", -1);
+	int n = g_strv_length(parts);
+	int keep = n >= 3 && strlen(parts[n - 2]) <= 3 && strlen(parts[n - 1]) == 2 ?
+		3 : 2;
+	char *base = g_strjoinv(".", parts + MAX(n - keep, 0));
+	g_strfreev(parts);
+	return base;
+}
+
+/* Whether uri is the app's: on its site, or not a web address at all. */
+static bool app_owns(struct browser *b, const char *uri) {
+	char *site = site_of(uri), *app = site_of(b->app_uri);
+	bool owns = site == NULL || app == NULL;
+	if (!owns) {
+		char *s1 = base_domain(site), *s2 = base_domain(app);
+		owns = strcmp(s1, s2) == 0;
+		g_free(s1);
+		g_free(s2);
+	}
+	g_free(site);
+	g_free(app);
+	return owns;
+}
+
+/* The browser window last used (not an app's), if there is one. */
+static struct browser *browser_window(void) {
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		if (b != NULL && !b->app) {
+			return b;
+		}
+	}
+	return NULL;
+}
+
+static void open_in_browser(const char *uri) {
+	struct browser *b = browser_window();
+	if (b == NULL) {
+		b = browser_new(shared.app);
+	}
+	tab_new(b, NULL, uri, true);
+	gtk_window_present(GTK_WINDOW(b->window));
+}
+
+/* The menu bar names a window after its app ID's last part. */
+static void app_realized(GtkWidget *window, struct browser *b) {
+	GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+	if (GDK_IS_WAYLAND_TOPLEVEL(surface)) {
+		char *id = g_strconcat("org.gemwm.GemWeb.", b->app_name, NULL);
+		g_strdelimit(id + strlen("org.gemwm.GemWeb."), "./", '-');
+		gdk_wayland_toplevel_set_application_id(GDK_TOPLEVEL(surface), id);
+		g_free(id);
+	}
+}
+
+/* A new app window, without a tab yet. */
+static struct browser *app_window(const char *uri, const char *name) {
+	struct browser *b = browser_new(shared.app);
+	b->app = true;
+	b->app_uri = g_strdup(uri);
+	b->app_name = g_strdup(name);
+	gtk_window_set_title(GTK_WINDOW(b->window), name);
+	/* GTK sets the application's own ID as the window's realized; this
+	 * comes after, and before it's mapped, so GemWM sees the app's. */
+	g_signal_connect_after(b->window, "realize", G_CALLBACK(app_realized), b);
+	g_signal_connect(b->window, "map", G_CALLBACK(app_realized), b);
+	sync_tabbar(b);
+	gtk_widget_set_visible(b->toolbar, FALSE);
+	sync_info(b);
+	app_menu_update(b->menu);
+	return b;
+}
+
+/* An app's name, if it isn't given: its site's (x.com -> X). */
+static char *app_default_name(const char *uri) {
+	char *site = site_of(uri);
+	char *base = site != NULL ? base_domain(site) : g_strdup("Web App");
+	char *dot = strchr(base, '.');
+	if (dot != NULL && dot != base) {
+		*dot = '\0';
+	}
+	base[0] = g_ascii_toupper(base[0]);
+	g_free(site);
+	return base;
+}
+
+/* Opens the app, or brings its window forward if it's open. */
+static void app_open(const char *input, const char *name) {
+	char *uri = input_to_uri(input, NULL);
+	if (uri == NULL) {
+		return;
+	}
+	char *app_name = name != NULL ? g_strdup(name) : app_default_name(uri);
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		if (b != NULL && b->app && strcmp(b->app_name, app_name) == 0) {
+			gtk_window_present(GTK_WINDOW(b->window));
+			g_free(app_name);
+			g_free(uri);
+			return;
+		}
+	}
+	struct browser *b = app_window(uri, app_name);
+	tab_new(b, NULL, uri, true);
+	gtk_window_present(GTK_WINDOW(b->window));
+	g_free(app_name);
+	g_free(uri);
+}
+
 /* Every `gemweb [URL...]` lands here, in the first instance: URLs open as
  * tabs in the existing window. */
 static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
@@ -3391,24 +3591,41 @@ static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 		load_css();
 		shared_init(GTK_APPLICATION(app));
 	}
+	const char *app_uri = NULL, *name = NULL;
+	GPtrArray *uris = g_ptr_array_new();
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--app") == 0 && i + 1 < argc) {
+			app_uri = argv[++i];
+		} else if (g_str_has_prefix(argv[i], "--app=")) {
+			app_uri = argv[i] + 6;
+		} else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+			name = argv[++i];
+		} else if (g_str_has_prefix(argv[i], "--name=")) {
+			name = argv[i] + 7;
+		} else {
+			g_ptr_array_add(uris, argv[i]);
+		}
+	}
+	if (app_uri != NULL) {
+		app_open(app_uri, name);
+	}
 	/* Starting GemWeb opens a new window (tabs are made inside it). Links
 	 * handed over by other programs open as tabs in the last-used window,
 	 * as other browsers do. */
-	struct browser *b = NULL;
-	if (argc >= 2) {
-		GtkWindow *window = gtk_application_get_active_window(shared.app);
-		b = window ? g_object_get_data(G_OBJECT(window), "browser") : NULL;
+	if (app_uri == NULL || uris->len > 0) {
+		struct browser *b = uris->len > 0 ? browser_window() : NULL;
+		if (b == NULL) {
+			b = browser_new(shared.app);
+		}
+		if (uris->len == 0) {
+			tab_new(b, NULL, NULL, true);
+		}
+		for (guint i = 0; i < uris->len; i++) {
+			tab_new(b, NULL, uris->pdata[i], i == uris->len - 1);
+		}
+		gtk_window_present(GTK_WINDOW(b->window));
 	}
-	if (b == NULL) {
-		b = browser_new(shared.app);
-	}
-	if (argc < 2) {
-		tab_new(b, NULL, NULL, true);
-	}
-	for (int i = 1; i < argc; i++) {
-		tab_new(b, NULL, argv[i], i == argc - 1);
-	}
-	gtk_window_present(GTK_WINDOW(b->window));
+	g_ptr_array_free(uris, TRUE);
 	g_strfreev(argv);
 	return 0;
 }
