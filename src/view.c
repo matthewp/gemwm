@@ -4,6 +4,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_server_decoration.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
@@ -1121,6 +1122,27 @@ static void server_new_kde_decoration(struct wl_listener *listener,
 	deco->destroy.notify = kde_decoration_destroy;
 	wl_signal_add(&deco->wlr->events.destroy, &deco->destroy);
 	kde_decoration_mode(&deco->mode, NULL);
+}
+
+/* xdg-activation: an app asks for one of its windows to come forward (a
+ * GTK app handed a file or a link while running, say). GemWM grants it:
+ * the window is focused, on its own workspace. */
+static void server_request_activate(struct wl_listener *listener, void *data) {
+	struct wlr_xdg_activation_v1_request_activate_event *event = data;
+	struct wlr_xdg_toplevel *toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(event->surface);
+	if (toplevel == NULL || !toplevel->base->surface->mapped) {
+		return;
+	}
+	focus_view(toplevel->base->surface->data);
+}
+
+void view_init_activation(struct server *server) {
+	struct wlr_xdg_activation_v1 *activation =
+		wlr_xdg_activation_v1_create(server->wl_display);
+	server->request_activate.notify = server_request_activate;
+	wl_signal_add(&activation->events.request_activate,
+		&server->request_activate);
 }
 
 void view_init_decorations(struct server *server) {

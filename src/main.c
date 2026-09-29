@@ -571,6 +571,7 @@ int main(int argc, char *argv[]) {
 	config_load(&server);
 	layers_init(&server);
 	view_init_decorations(&server);
+	view_init_activation(&server);
 
 	server.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
@@ -649,6 +650,7 @@ int main(int argc, char *argv[]) {
 	wl_list_remove(&server.new_layer_surface.link);
 	wl_list_remove(&server.new_xdg_decoration.link);
 	wl_list_remove(&server.new_kde_decoration.link);
+	wl_list_remove(&server.request_activate.link);
 	wl_list_remove(&server.cursor_motion.link);
 	wl_list_remove(&server.cursor_motion_absolute.link);
 	wl_list_remove(&server.cursor_button.link);

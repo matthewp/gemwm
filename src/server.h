@@ -116,6 +116,7 @@ struct server {
 
 	struct wl_listener new_xdg_decoration;
 	struct wl_listener new_kde_decoration;
+	struct wl_listener request_activate; /* xdg-activation */
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -273,6 +274,7 @@ struct layer_surface {
 /* view.c */
 void view_init_shell(struct server *server);
 void view_init_decorations(struct server *server);
+void view_init_activation(struct server *server);
 void focus_view(struct view *view);
 struct view *view_at(struct server *server, double lx, double ly,
 	struct wlr_surface **surface, double *sx, double *sy, bool *on_frame);
