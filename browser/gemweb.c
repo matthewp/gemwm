@@ -72,6 +72,8 @@ struct tab {
 	guint record_timer;
 	char *failed; /* an address that didn't load, shown as an error page */
 	bool login;   /* the page has a login field */
+	bool reading; /* in Reader View */
+	bool reader_loading; /* the load starting is the reader's page */
 };
 
 struct browser {
@@ -81,6 +83,7 @@ struct browser {
 	int active;
 	char *hover_link;      /* link under the pointer, for the info line */
 	char *download_status; /* last download message */
+	char *notice;          /* a passing one: passwords, Reader View */
 	bool entry_edited;     /* the user typed in the address field */
 	bool entry_setting;    /* we are changing it, not the user */
 	struct gemwm_scroll_v1 *scroll; /* GemWM draws our scroll bars */
@@ -110,7 +113,6 @@ struct browser {
 	GPtrArray *logins;
 	int login_selected;
 	char *login_host;
-	char *password_status;
 	GCancellable *password_cancel;
 	bool looking_up, unlocking;
 };
@@ -134,6 +136,7 @@ static struct {
 	bool passwords;
 	char *password_session;
 	WebKitUserScript *login_script;
+	char *readability; /* Readability.js, and the call that runs it */
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -577,8 +580,8 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 		cairo_pattern_destroy(pat);
 		snprintf(buf, sizeof(buf), "Loading... %d%%", (int)(p * 100));
 		msg = buf;
-	} else if (b->password_status != NULL) {
-		msg = b->password_status;
+	} else if (b->notice != NULL) {
+		msg = b->notice;
 	} else if (b->download_status != NULL) {
 		msg = b->download_status;
 	} else if (t != NULL && t->media && shared.media_missing != NULL) {
@@ -784,6 +787,12 @@ static gboolean record_later(gpointer data) {
 static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 		struct tab *t) {
 	const char *uri = webkit_web_view_get_uri(view);
+	if (event == WEBKIT_LOAD_STARTED) {
+		/* Reading ends when anything but the reader's page loads. */
+		t->reading = t->reader_loading;
+		t->reader_loading = false;
+		app_menu_update(t->browser->menu);
+	}
 	if (event == WEBKIT_LOAD_STARTED && g_strcmp0(uri, t->failed) != 0) {
 		g_clear_pointer(&t->failed, g_free);
 	} else if (event == WEBKIT_LOAD_COMMITTED) {
@@ -838,7 +847,7 @@ static void on_progress(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 		}
 		t->login = false;
 		if (is_active(t)) {
-			set_status(&t->browser->password_status, NULL);
+			set_status(&t->browser->notice, NULL);
 			sync_key(t->browser);
 		}
 	}
@@ -1511,7 +1520,7 @@ enum action {
 	ACT_NEW_TAB, ACT_CLOSE_TAB, ACT_FOCUS_URL, ACT_NEXT_TAB, ACT_PREV_TAB,
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
-	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS,
+	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER,
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -1783,8 +1792,8 @@ static char *password_command(const char *key) {
 	return setting("Passwords", key, NULL);
 }
 
-static void password_status(struct browser *b, char *message) {
-	set_status(&b->password_status, message);
+static void show_notice(struct browser *b, char *message) {
+	set_status(&b->notice, message);
 	gtk_widget_queue_draw(b->info);
 }
 
@@ -1840,7 +1849,7 @@ static void filled(GObject *source, GAsyncResult *result, gpointer data) {
 		view, result, &error);
 	if (t != NULL) {
 		bool ok = value != NULL && jsc_value_to_boolean(value);
-		password_status(t->browser, g_strdup(ok ? NULL :
+		show_notice(t->browser, g_strdup(ok ? NULL :
 			"Couldn't find where to fill the password"));
 	}
 	g_clear_object(&value);
@@ -1853,7 +1862,7 @@ static void fill_login(struct browser *b, struct login *login) {
 	const char *why;
 	char *host = t != NULL ? page_host(t, &why) : NULL;
 	if (host == NULL || g_strcmp0(host, b->login_host) != 0) {
-		password_status(b, g_strdup("The page changed, so nothing was filled"));
+		show_notice(b, g_strdup("The page changed, so nothing was filled"));
 		g_free(host);
 		return;
 	}
@@ -1991,22 +2000,22 @@ static void found(enum passwords_result result, GPtrArray *logins,
 	if (result == PASSWORDS_LOCKED) {
 		char *unlock = password_command("unlock");
 		if (unlock != NULL) {
-			password_status(b, NULL);
+			show_notice(b, NULL);
 			dialog_show(b, DIALOG_UNLOCK);
 		} else {
-			password_status(b, g_strdup("Your passwords are locked"));
+			show_notice(b, g_strdup("Your passwords are locked"));
 		}
 		g_free(unlock);
 	} else if (result == PASSWORDS_FAILED) {
-		password_status(b, g_strdup_printf("Passwords: %s", error));
+		show_notice(b, g_strdup_printf("Passwords: %s", error));
 	} else if (logins->len == 0) {
-		password_status(b, g_strdup_printf("No saved password for %s",
+		show_notice(b, g_strdup_printf("No saved password for %s",
 			b->login_host));
 	} else if (logins->len == 1) {
-		password_status(b, NULL);
+		show_notice(b, NULL);
 		fill_login(b, g_ptr_array_index(logins, 0));
 	} else {
-		password_status(b, NULL);
+		show_notice(b, NULL);
 		logins_show(b, logins);
 	}
 }
@@ -2018,7 +2027,7 @@ static void lookup(struct browser *b) {
 	}
 	b->looking_up = true;
 	gtk_widget_queue_draw(b->key);
-	password_status(b, g_strdup_printf("Looking up passwords for %s...",
+	show_notice(b, g_strdup_printf("Looking up passwords for %s...",
 		b->login_host));
 	passwords_lookup(command, shared.password_session, b->login_host,
 		b->password_cancel, found, b);
@@ -2035,7 +2044,7 @@ static void fill_password(struct browser *b) {
 		return;
 	}
 	if (host == NULL) {
-		password_status(b, g_strdup(why));
+		show_notice(b, g_strdup(why));
 		return;
 	}
 	g_free(b->login_host);
@@ -2071,11 +2080,162 @@ static void unlock_submit(struct browser *b, char *password) {
 }
 
 static void unlock_cancelled(struct browser *b) {
-	password_status(b, NULL);
+	show_notice(b, NULL);
 }
 
 static void lock_passwords(void) {
 	g_clear_pointer(&shared.password_session, secret_free);
+}
+
+/* ---- Reader View ---------------------------------------------------------- */
+
+/* View > Reader View shows just a page's article, found by Mozilla's
+ * Readability.js (Firefox's Reader View) run on a copy of the page, in the
+ * passwords' own JavaScript world. The article is shown as a page of its
+ * own, GEM style, at the page's address, with scripts blocked; choosing
+ * Reader View again goes back to the page. */
+
+#define READER_WORLD PASSWORD_WORLD
+
+/* Only for what's probably an article (Readability's own test, which
+ * Firefox uses too): a home page's links aren't one. */
+static const char reader_parse[] =
+	"\n;(function () {"
+	"  if (!isProbablyReaderable(document)) return null;"
+	"  var a = new Readability(document.cloneNode(true)).parse();"
+	"  return a && a.content ? { title: a.title || document.title,"
+	"    byline: a.byline || '', site: a.siteName || location.hostname,"
+	"    content: a.content, lang: a.lang || '', dir: a.dir || '' } : null;"
+	"})();";
+
+/* The reader's page: the article in a white box on the dithered desk,
+ * headed in GemWM's font, the text in a book face. */
+static const char reader_css[] =
+	"html { background: repeating-conic-gradient(#000 0%% 25%%, #fff 0%% 50%%)"
+	"  0 0 / 2px 2px; }"
+	"body { margin: 0; padding: 24px 16px; }"
+	"main { max-width: 38em; margin: 0 auto; background: #fff; color: #000;"
+	"  border: 1px solid #000; box-shadow: 2px 2px 0 #000;"
+	"  padding: 8px 40px 40px; font: 19px/1.6 serif; }"
+	"header { font-family: '%s', monospace; font-size: %dpx;"
+	"  border-bottom: 2px solid #000; margin: 0 -40px 24px; padding: 0 40px 12px; }"
+	"header h1 { font: inherit; font-size: %dpx; line-height: 1.3;"
+	"  margin: 12px 0 8px; }"
+	"header .site, header .byline { margin: 0; }"
+	"a { color: #000; }"
+	"img, video, svg, iframe { max-width: 100%%; height: auto; }"
+	"figure { margin: 1em 0; }"
+	"figcaption { font-size: 15px; }"
+	"pre, code { font: 15px monospace; }"
+	"pre { overflow: auto; border: 1px solid #000; padding: 8px; }"
+	"blockquote { margin: 1em 0; padding-left: 1em; border-left: 2px solid #000; }"
+	"table { border-collapse: collapse; }"
+	"td, th { border: 1px solid #000; padding: 2px 6px; }";
+
+static char *js_string(JSCValue *object, const char *name) {
+	JSCValue *v = jsc_value_object_get_property(object, name);
+	char *s = jsc_value_is_string(v) ? jsc_value_to_string(v) : g_strdup("");
+	g_object_unref(v);
+	return s;
+}
+
+struct reading {
+	WebKitWebView *view;
+	char *uri; /* the page read */
+};
+
+static void reader_parsed(GObject *source, GAsyncResult *result,
+		gpointer data) {
+	struct reading *r = data;
+	struct tab *t = g_object_get_data(G_OBJECT(r->view), "tab");
+	GError *error = NULL;
+	JSCValue *article = webkit_web_view_evaluate_javascript_finish(r->view,
+		result, &error);
+	/* Only if the tab's still there, on the page read. */
+	if (t != NULL && g_strcmp0(webkit_web_view_get_uri(r->view), r->uri) == 0) {
+		if (article == NULL || !jsc_value_is_object(article)) {
+			show_notice(t->browser,
+				g_strdup("No article found on this page"));
+		} else {
+			char *title = js_string(article, "title");
+			char *byline = js_string(article, "byline");
+			char *site = js_string(article, "site");
+			char *content = js_string(article, "content");
+			char *lang = js_string(article, "lang");
+			char *dir = js_string(article, "dir");
+			char *css = g_strdup_printf(reader_css, font_family,
+				FONT_SIZE, FONT_SIZE * 2);
+			char *head = g_markup_printf_escaped(
+				"<!doctype html><html lang=\"%s\" dir=\"%s\"><head>"
+				"<meta charset=\"utf-8\">"
+				"<meta name=\"viewport\" content=\"width=device-width\">"
+				"<meta http-equiv=\"Content-Security-Policy\" content=\""
+				"default-src 'none'; img-src * data:; media-src *;"
+				" style-src 'unsafe-inline'\">"
+				"<title>%s</title>", lang, dir, title);
+			char *top = g_markup_printf_escaped("<header><p class=\"site\">%s"
+				"</p><h1>%s</h1><p class=\"byline\">%s</p></header>",
+				site, title, byline);
+			char *page = g_strconcat(head, "<style>", css,
+				"</style></head><body><main>", top, content,
+				"</main></body></html>", NULL);
+			g_free(head);
+			g_free(top);
+			t->reader_loading = true;
+			webkit_web_view_load_alternate_html(r->view, page, r->uri, r->uri);
+			g_free(page);
+			g_free(css);
+			g_free(title);
+			g_free(byline);
+			g_free(site);
+			g_free(content);
+			g_free(lang);
+			g_free(dir);
+		}
+	}
+	g_clear_object(&article);
+	g_clear_error(&error);
+	g_object_unref(r->view);
+	g_free(r->uri);
+	g_free(r);
+}
+
+static bool can_read(struct tab *t) {
+	const char *uri = t != NULL ? webkit_web_view_get_uri(t->view) : NULL;
+	return uri != NULL && (g_str_has_prefix(uri, "https://") ||
+		g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "file://"));
+}
+
+static void reader_toggle(struct browser *b) {
+	struct tab *t = active_tab(b);
+	if (t == NULL) {
+		return;
+	}
+	if (t->reading) {
+		/* Back to the page: the address never changed. */
+		webkit_web_view_reload(t->view);
+		return;
+	}
+	if (!can_read(t)) {
+		return;
+	}
+	if (shared.readability == NULL) {
+		GBytes *js = g_resources_lookup_data(
+			"/org/gemwm/GemWeb/readability/Readability.js",
+			G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+		GBytes *check = g_resources_lookup_data(
+			"/org/gemwm/GemWeb/readability/Readability-readerable.js",
+			G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+		shared.readability = g_strconcat(g_bytes_get_data(js, NULL), "\n;",
+			g_bytes_get_data(check, NULL), reader_parse, NULL);
+		g_bytes_unref(js);
+		g_bytes_unref(check);
+	}
+	struct reading *r = g_new(struct reading, 1);
+	r->view = g_object_ref(t->view);
+	r->uri = g_strdup(webkit_web_view_get_uri(t->view));
+	webkit_web_view_evaluate_javascript(t->view, shared.readability, -1,
+		READER_WORLD, "gemweb:readability", NULL, reader_parsed, r);
 }
 
 /* A key: a ring and a toothed shaft; inverted while looking up. */
@@ -2168,9 +2328,12 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_FILL_PASSWORD:
 		fill_password(b);
 		break;
+	case ACT_READER:
+		reader_toggle(b);
+		break;
 	case ACT_LOCK_PASSWORDS:
 		lock_passwords();
-		password_status(b, g_strdup("Passwords locked"));
+		show_notice(b, g_strdup("Passwords locked"));
 		break;
 	}
 	return TRUE;
@@ -2195,6 +2358,10 @@ static void build_menus(struct app_menu *m, void *data) {
 
 	app_menu_add_menu(m, "View");
 	app_menu_add_item(m, ACT_RELOAD, "Reload", "^R", 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_READER, "Reader View", "^Alt+R",
+		t != NULL && t->reading ? APP_MENU_CHECKED :
+		can_read(t) ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_ZOOM_IN, "Zoom In", "^+", 0);
 	app_menu_add_item(m, ACT_ZOOM_OUT, "Zoom Out", "^-", 0);
@@ -2246,6 +2413,7 @@ static void add_shortcuts(GtkWidget *window) {
 		{ "<Control><Shift>Tab", ACT_PREV_TAB },
 		{ "<Control>Page_Up", ACT_PREV_TAB },
 		{ "<Control>r", ACT_RELOAD },
+		{ "<Control><Alt>r", ACT_READER },
 		{ "F5", ACT_RELOAD },
 		{ "<Alt>Left", ACT_BACK },
 		{ "<Alt>Right", ACT_FORWARD },
@@ -2329,7 +2497,7 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	g_object_unref(b->password_cancel);
 	g_clear_pointer(&b->logins, logins_free);
 	g_free(b->login_host);
-	g_free(b->password_status);
+	g_free(b->notice);
 	g_free(b->dialog_error);
 	g_ptr_array_free(b->tabs, TRUE);
 	g_clear_pointer(&b->suggestions, history_entries_free);

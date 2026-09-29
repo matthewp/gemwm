@@ -138,10 +138,14 @@ meson.add_install_script('sh', '-c',
 # GemWeb, the browser. Optional: needs webkitgtk-6.0.
 webkit = dependency('webkitgtk-6.0', required: false)
 if webkit.found()
+	# Mozilla's Readability.js, for Reader View, built in.
+	gemweb_resources = import('gnome').compile_resources('gemweb-resources',
+		'browser/gemweb.gresource.xml', source_dir: 'browser')
 	executable(
 		'gemweb',
 		['browser/gemweb.c', 'browser/cookies.c', 'browser/history.c',
-			'browser/passwords.c', 'lib/app-menu.c', client_protocols],
+			'browser/passwords.c', 'lib/app-menu.c', client_protocols,
+			gemweb_resources],
 		dependencies: [webkit, dependency('gtk4'), dependency('gtk4-wayland'),
 			dependency('gstreamer-1.0'), dependency('sqlite3'),
 			wayland_client, cairo],

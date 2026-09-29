@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/gemwm/GemWeb">
+    <file>readability/Readability.js</file>
+    <file>readability/Readability-readerable.js</file>
+  </gresource>
+</gresources>

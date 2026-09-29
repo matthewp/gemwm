@@ -515,6 +515,7 @@ Web Browser always opens GemWeb.
 | Alt+Left / Alt+Right        | back / forward            |
 | Ctrl+R, F5                  | reload                    |
 | Ctrl+plus / minus / 0       | zoom                      |
+| Ctrl+Alt+R                  | Reader View               |
 
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
 tab to close it. Text that isn't an address is searched. Downloads go to
@@ -566,6 +567,13 @@ and Down choose from the list (Down in an untouched field lists your top
 pages), Shift+Delete forgets the chosen page, and Escape closes the list.
 History is kept in `~/.local/share/gemweb/history.sqlite`, to the top 5,000
 pages; Go > Clear History... empties it.
+
+View > Reader View (Ctrl+Alt+R) shows just a page's article: the text and
+its pictures, in a white box on the desk, headed in GemWM's font, with the
+site's scripts and styles left out. Choose it again to go back to the page.
+It uses Mozilla's Readability.js, the library behind Firefox's Reader View
+(in `browser/readability`, Apache 2.0); a page that doesn't look like an
+article, such as a home page, says so in the info line instead.
 
 Under GemWM a page scrolls with the window frame's own scroll bars, and its
 built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
