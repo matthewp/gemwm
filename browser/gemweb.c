@@ -17,12 +17,15 @@
  */
 #include <cairo.h>
 #include <gdk/wayland/gdkwayland.h>
+#include <gst/gst.h>
 #include <gtk/gtk.h>
 #include <stdbool.h>
 #include <string.h>
+#include <unistd.h>
 #include <webkit/webkit.h>
 #include "app-menu.h"
 #include "gemwm-scroll-v1-client-protocol.h"
+#include "history.h"
 
 #define TAB_H 20       /* 19px of tabs plus a 1px line */
 #define TOOL_H 21      /* the toolbar's buttons; the box adds a 1px line */
@@ -34,6 +37,10 @@
 #define FONT_SIZE font_size /* GEMWM_FONT_SIZE, else 14 */
 #define BUTTONS 4      /* back, forward, reload, home */
 #define DEFAULT_HOME "https://www.google.com/"
+#define SUGGEST_ROWS 8 /* the address field's list of pages from history */
+#define ROW_H 19
+#define BUTTON_H 22    /* an alert's buttons */
+#define PAD 8
 
 static const char *font_family;
 static int font_size;
@@ -46,6 +53,17 @@ struct tab {
 	WebKitUserContentManager *content;
 	/* The page's scroll state, as its script last reported it (CSS px). */
 	int scroll_x, scroll_y, view_w, view_h, doc_w, doc_h;
+	/* The page has video or sound (noticed only if we can't play it), or
+	 * it's a new window's first page: both show what to install. */
+	bool media;
+	int loads;
+	/* History: the address last recorded, whether that made a new entry,
+	 * and whether the page loading was typed in (or chosen from the list). */
+	char *recorded;
+	bool recorded_new;
+	bool typed;
+	guint record_timer;
+	char *failed; /* an address that didn't load, shown as an error page */
 };
 
 struct browser {
@@ -59,6 +77,21 @@ struct browser {
 	bool entry_setting;    /* we are changing it, not the user */
 	struct gemwm_scroll_v1 *scroll; /* GemWM draws our scroll bars */
 	struct app_menu *menu;          /* and shows our menus */
+
+	/* Completing addresses: what the user typed (without the inline
+	 * completion), that completion and where it goes, and the list of
+	 * pages under the field, which may have a row selected. */
+	GtkWidget *box, *list;
+	char *typed;
+	char *completion, *completion_uri;
+	bool inserted; /* the last edit added text, so completing is welcome */
+	guint complete_idle;
+	GPtrArray *suggestions;
+	int selected;
+
+	/* The Clear History alert, over the window. */
+	GtkWidget *alert;
+	int alert_buttons[2][4]; /* Clear, Cancel: x, y, w, h */
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -71,6 +104,10 @@ static struct {
 	WebKitSettings *settings;
 	/* Under GemWM, the window frame's GEM scroll bars scroll the page. */
 	struct gemwm_scroll_manager_v1 *scroll_manager;
+	/* What's missing to play video and sound, or NULL if nothing. */
+	char *media_missing;
+	WebKitUserScript *media_script;
+	char *start_page;
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -140,8 +177,71 @@ static const char start_page[] =
 	".box{background:#fff;border:1px solid #000;box-shadow:2px 2px 0 #000;"
 	"padding:16px 28px;text-align:center}"
 	"h1{font-size:14px;font-weight:normal;margin:0 0 12px}"
+	"p{margin:12px 0 0}"
 	"</style></head><body><div class=box><h1>GemWeb</h1>"
-	"Type an address or a search above.</div></body></html>";
+	"Type an address or a search above.";
+static const char start_page_end[] = "</div></body></html>";
+
+/* Tells GemWeb when a page has video or sound, so it can say why they won't
+ * play. Only added when GStreamer plugins are missing. Pages like YouTube
+ * make their <video> late, so it looks again after loading. */
+static const char media_script[] =
+	"(function () {"
+	"  var sent = false;"
+	"  function send() {"
+	"    if (sent) return;"
+	"    sent = true;"
+	"    window.webkit.messageHandlers.gemwebMedia.postMessage(0);"
+	"  }"
+	"  function look() { if (document.querySelector('video,audio')) send(); }"
+	"  function media(e) { if (e.target instanceof HTMLMediaElement) send(); }"
+	"  addEventListener('loadstart', media, true);"
+	"  addEventListener('error', media, true);"
+	"  addEventListener('load', function () { look(); setTimeout(look, 3000); });"
+	"  look();"
+	"})();";
+
+/* WebKit plays video and sound through GStreamer, but its plugins are
+ * packages of their own that distributions don't always install with it;
+ * without them video pages stall. Each package is missing if any element it
+ * needs is (or, for any_of, if none is). */
+static char *find_missing_media(void) {
+	static const struct {
+		const char *package;
+		bool any_of;
+		const char *elements[5];
+	} needs[] = {
+		{ "gst-plugins-base", false, { "opusdec", "vorbisdec" } },
+		{ "gst-plugins-good", false,
+			{ "autoaudiosink", "qtdemux", "matroskademux", "vp9dec" } },
+		/* H.264: FFmpeg's, or the graphics card's. */
+		{ "gst-libav", true, { "avdec_h264", "vah264dec", "openh264dec" } },
+	};
+	GError *error = NULL;
+	if (!gst_init_check(NULL, NULL, &error)) {
+		g_warning("GStreamer didn't start, so can't check its plugins: %s",
+			error->message);
+		g_error_free(error);
+		return NULL;
+	}
+	GString *missing = g_string_new(NULL);
+	for (guint i = 0; i < G_N_ELEMENTS(needs); i++) {
+		int found = 0, wanted = 0;
+		for (int j = 0; needs[i].elements[j] != NULL; j++) {
+			GstElementFactory *f = gst_element_factory_find(needs[i].elements[j]);
+			found += f != NULL;
+			wanted++;
+			if (f != NULL) {
+				gst_object_unref(f);
+			}
+		}
+		if (needs[i].any_of ? found == 0 : found < wanted) {
+			g_string_append_printf(missing, "%s%s", missing->len ? ", " : "",
+				needs[i].package);
+		}
+	}
+	return g_string_free(missing, missing->len == 0);
+}
 
 /* ---- Drawing, GEM style ------------------------------------------------- */
 
@@ -450,6 +550,10 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 		msg = buf;
 	} else if (b->download_status != NULL) {
 		msg = b->download_status;
+	} else if (t != NULL && t->media && shared.media_missing != NULL) {
+		snprintf(buf, sizeof(buf), "Can't play video or sound: install %s",
+			shared.media_missing);
+		msg = buf;
 	}
 	if (msg != NULL) {
 		cairo_save(cr);
@@ -495,9 +599,15 @@ static void set_entry(struct browser *b, const char *text) {
 	}
 }
 
+static gboolean complete(gpointer data);
+
 static void entry_changed(GtkEditable *editable, struct browser *b) {
-	if (!b->entry_setting) {
-		b->entry_edited = true;
+	if (b->entry_setting) {
+		return;
+	}
+	b->entry_edited = true;
+	if (entry_focused(b) && b->complete_idle == 0) {
+		b->complete_idle = g_idle_add(complete, b);
 	}
 }
 
@@ -605,7 +715,72 @@ static bool is_active(struct tab *t) {
 	return active_tab(t->browser) == t;
 }
 
+/* ---- History ------------------------------------------------------------ */
+
+/* Records the page shown in history, once per address it goes to. */
+static void record_visit(struct tab *t) {
+	const char *uri = webkit_web_view_get_uri(t->view);
+	if (uri == NULL || g_strcmp0(uri, t->recorded) == 0 ||
+			g_strcmp0(uri, t->failed) == 0 ||
+			!(g_str_has_prefix(uri, "https://") ||
+			g_str_has_prefix(uri, "http://") ||
+			g_str_has_prefix(uri, "file://"))) {
+		return;
+	}
+	t->recorded_new = history_visit(uri, t->typed);
+	t->typed = false;
+	g_free(t->recorded);
+	t->recorded = g_strdup(uri);
+	const char *title = webkit_web_view_get_title(t->view);
+	if (title != NULL && title[0] != '\0') {
+		history_set_title(uri, title);
+	}
+}
+
+static gboolean record_later(gpointer data) {
+	struct tab *t = data;
+	t->record_timer = 0;
+	if (!webkit_web_view_is_loading(t->view)) {
+		record_visit(t);
+	}
+	return G_SOURCE_REMOVE;
+}
+
+/* A page is recorded when it commits (after any redirects), or, for pages
+ * that change their address themselves (YouTube's videos), once the
+ * address has settled. */
+static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
+		struct tab *t) {
+	const char *uri = webkit_web_view_get_uri(view);
+	if (event == WEBKIT_LOAD_STARTED && g_strcmp0(uri, t->failed) != 0) {
+		g_clear_pointer(&t->failed, g_free);
+	} else if (event == WEBKIT_LOAD_COMMITTED) {
+		record_visit(t);
+	}
+}
+
+/* A page that didn't load (a mistyped address) isn't worth suggesting. */
+static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event,
+		const char *uri, GError *error, struct tab *t) {
+	if (g_error_matches(error, WEBKIT_NETWORK_ERROR,
+			WEBKIT_NETWORK_ERROR_CANCELLED)) {
+		return FALSE;
+	}
+	g_free(t->failed);
+	t->failed = g_strdup(uri);
+	if (t->recorded_new && g_strcmp0(uri, t->recorded) == 0) {
+		history_forget(uri);
+		t->recorded_new = false;
+	}
+	return FALSE;
+}
+
 static void on_title(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
+	const char *title = webkit_web_view_get_title(view);
+	if (t->recorded != NULL && title != NULL && title[0] != '\0' &&
+			g_strcmp0(webkit_web_view_get_uri(view), t->recorded) == 0) {
+		history_set_title(t->recorded, title);
+	}
 	if (is_active(t)) {
 		gtk_window_set_title(GTK_WINDOW(t->browser->window), tab_title(t));
 	}
@@ -613,6 +788,10 @@ static void on_title(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 }
 
 static void on_uri(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
+	if (t->record_timer != 0) {
+		g_source_remove(t->record_timer);
+	}
+	t->record_timer = g_timeout_add(500, record_later, t);
 	if (is_active(t)) {
 		sync_entry(t->browser);
 	}
@@ -620,9 +799,21 @@ static void on_uri(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 }
 
 static void on_progress(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
+	if (strcmp(pspec->name, "is-loading") == 0 &&
+			webkit_web_view_is_loading(view) && t->loads++ > 0) {
+		t->media = false;
+	}
 	if (is_active(t)) {
 		gtk_widget_queue_draw(t->browser->info);
 		gtk_widget_queue_draw(t->browser->buttons);
+	}
+}
+
+static void on_media_message(WebKitUserContentManager *content,
+		JSCValue *value, struct tab *t) {
+	t->media = true;
+	if (is_active(t)) {
+		gtk_widget_queue_draw(t->browser->info);
 	}
 }
 
@@ -764,9 +955,12 @@ static void on_download_started(WebKitNetworkSession *session,
 
 /* What the user typed, as a URI: addresses as-is, bare names get https://,
  * anything else is a search ($GEMWEB_SEARCH, with %s for the query). */
-static char *input_to_uri(const char *input) {
+static char *input_to_uri(const char *input, bool *search) {
 	char *s = g_strstrip(g_strdup(input));
 	char *uri;
+	if (search != NULL) {
+		*search = false;
+	}
 	if (s[0] == '\0') {
 		uri = NULL;
 	} else if (strstr(s, "://") != NULL || g_str_has_prefix(s, "about:") ||
@@ -781,14 +975,17 @@ static char *input_to_uri(const char *input) {
 			(strchr(s, '.') != NULL || g_str_has_prefix(s, "localhost"))) {
 		uri = g_strconcat("https://", s, NULL);
 	} else {
-		const char *search = g_getenv("GEMWEB_SEARCH");
-		if (search == NULL || strstr(search, "%s") == NULL) {
-			search = "https://duckduckgo.com/?q=%s";
+		const char *engine = g_getenv("GEMWEB_SEARCH");
+		if (engine == NULL || strstr(engine, "%s") == NULL) {
+			engine = "https://duckduckgo.com/?q=%s";
 		}
 		char *q = g_uri_escape_string(s, NULL, TRUE);
-		const char *at = strstr(search, "%s");
-		uri = g_strdup_printf("%.*s%s%s", (int)(at - search), search, q, at + 2);
+		const char *at = strstr(engine, "%s");
+		uri = g_strdup_printf("%.*s%s%s", (int)(at - engine), engine, q, at + 2);
 		g_free(q);
+		if (search != NULL) {
+			*search = true;
+		}
 	}
 	g_free(s);
 	return uri;
@@ -803,24 +1000,24 @@ static const char *home_page(void) {
 
 static void load_home(struct tab *t) {
 	const char *home = home_page();
-	char *uri = strcmp(home, "about:blank") == 0 ? NULL : input_to_uri(home);
+	char *uri = strcmp(home, "about:blank") == 0 ? NULL : input_to_uri(home, NULL);
 	if (uri != NULL) {
 		webkit_web_view_load_uri(t->view, uri);
 	} else {
-		webkit_web_view_load_html(t->view, start_page, "about:blank");
+		webkit_web_view_load_html(t->view, shared.start_page, "about:blank");
 	}
 	g_free(uri);
 }
 
 /* Loads what was typed, or the home page for nothing. */
 static void load_input(struct tab *t, const char *input) {
-	char *uri = input ? input_to_uri(input) : NULL;
+	char *uri = input ? input_to_uri(input, NULL) : NULL;
 	if (input == NULL) {
 		load_home(t);
 	} else if (uri != NULL) {
 		webkit_web_view_load_uri(t->view, uri);
 	} else {
-		webkit_web_view_load_html(t->view, start_page, "about:blank");
+		webkit_web_view_load_html(t->view, shared.start_page, "about:blank");
 	}
 	g_free(uri);
 }
@@ -848,6 +1045,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 		const char *input, bool select) {
 	struct tab *t = g_new0(struct tab, 1);
 	t->browser = b;
+	t->media = b->tabs->len == 0;
 	/* Each tab has its own content manager so its scroll reports say which
 	 * tab they come from. */
 	t->content = webkit_user_content_manager_new();
@@ -858,6 +1056,13 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 			"gemwmScroll", NULL);
 		g_signal_connect(t->content, "script-message-received::gemwmScroll",
 			G_CALLBACK(on_scroll_message), t);
+	}
+	if (shared.media_script != NULL) {
+		webkit_user_content_manager_add_script(t->content, shared.media_script);
+		webkit_user_content_manager_register_script_message_handler(t->content,
+			"gemwebMedia", NULL);
+		g_signal_connect(t->content, "script-message-received::gemwebMedia",
+			G_CALLBACK(on_media_message), t);
 	}
 	if (related != NULL) {
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
@@ -881,6 +1086,8 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "create", G_CALLBACK(on_create), t);
 	g_signal_connect(t->view, "close", G_CALLBACK(on_close), t);
 	g_signal_connect(t->view, "decide-policy", G_CALLBACK(on_decide_policy), t);
+	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
+	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
 
 	gtk_stack_add_child(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	/* New tabs open next to the current one. */
@@ -914,6 +1121,11 @@ static void tab_close(struct browser *b, int index) {
 	g_object_set_data(G_OBJECT(t->view), "tab", NULL);
 	g_signal_handlers_disconnect_by_data(t->content, t);
 	g_object_unref(t->content);
+	if (t->record_timer != 0) {
+		g_source_remove(t->record_timer);
+	}
+	g_free(t->recorded);
+	g_free(t->failed);
 	gtk_stack_remove(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	g_free(t);
 	if (b->tabs->len == 0) {
@@ -928,47 +1140,401 @@ static void tab_close(struct browser *b, int index) {
 
 /* ---- Input -------------------------------------------------------------- */
 
-static void entry_activate(GtkEntry *entry, struct browser *b) {
-	struct tab *t = active_tab(b);
-	char *uri = input_to_uri(gtk_editable_get_text(GTK_EDITABLE(entry)));
-	if (t != NULL && uri != NULL) {
-		/* Focus the page first, so the address field shows the real URI
-		 * as soon as the load starts instead of what was typed. */
-		gtk_widget_grab_focus(GTK_WIDGET(t->view));
-		webkit_web_view_load_uri(t->view, uri);
-		sync_entry(b);
+/* ---- Completing addresses ----------------------------------------------- */
+
+/* As the user types, the address completes to a site (or page) visited
+ * before, the rest selected, and a list of pages from history drops down
+ * over the page. Up and Down choose from it, Shift+Delete forgets one. */
+
+static void list_hide(struct browser *b) {
+	g_clear_pointer(&b->suggestions, history_entries_free);
+	b->selected = -1;
+	gtk_widget_set_visible(b->list, FALSE);
+}
+
+/* Shows the pages for text under the address field (the top pages for
+ * none), keeping the selected row if it's still there. */
+static void list_show(struct browser *b, const char *text) {
+	if (b->suggestions != NULL) {
+		history_entries_free(b->suggestions);
 	}
+	b->suggestions = history_suggest(text, SUGGEST_ROWS);
+	int n = b->suggestions->len;
+	if (n == 0) {
+		list_hide(b);
+		return;
+	}
+	b->selected = MIN(b->selected, n - 1);
+	/* Its top line sits on the toolbar's bottom one, its left on the
+	 * address field's border. */
+	gtk_widget_set_margin_top(b->list,
+		(gtk_widget_get_visible(b->tabbar) ? TAB_H : 0) + TOOL_H);
+	gtk_widget_set_margin_start(b->list, BUTTONS * (GADGET + 1) - 1);
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->list),
+		n * ROW_H + 2);
+	gtk_widget_set_visible(b->list, TRUE);
+	gtk_widget_queue_draw(b->list);
+}
+
+static struct history_entry *selected_entry(struct browser *b) {
+	if (b->suggestions == NULL || b->selected < 0 ||
+			b->selected >= (int)b->suggestions->len) {
+		return NULL;
+	}
+	return g_ptr_array_index(b->suggestions, b->selected);
+}
+
+/* Puts text in the field while completing: the user's still editing. */
+static void entry_put(struct browser *b, const char *text) {
+	b->entry_setting = true;
+	gtk_editable_set_text(GTK_EDITABLE(b->entry), text);
+	gtk_editable_set_position(GTK_EDITABLE(b->entry), -1);
+	b->entry_setting = false;
+}
+
+/* The field shows the selected row's address, or what was typed. */
+static void show_selected(struct browser *b) {
+	struct history_entry *e = selected_entry(b);
+	entry_put(b, e != NULL ? e->uri : b->typed != NULL ? b->typed : "");
+	gtk_widget_queue_draw(b->list);
+}
+
+static void forget_completion(struct browser *b) {
+	g_clear_pointer(&b->completion, g_free);
+	g_clear_pointer(&b->completion_uri, g_free);
+}
+
+/* After an edit: completes inline if the edit added to the end, and
+ * refreshes the list. */
+static gboolean complete(gpointer data) {
+	struct browser *b = data;
+	GtkEditable *e = GTK_EDITABLE(b->entry);
+	b->complete_idle = 0;
+	const char *text = gtk_editable_get_text(e);
+	g_free(b->typed);
+	b->typed = g_strdup(text);
+	forget_completion(b);
+	b->selected = -1;
+	int len = g_utf8_strlen(text, -1);
+	char *completed, *uri;
+	if (b->inserted && gtk_editable_get_position(e) == len &&
+			!gtk_editable_get_selection_bounds(e, NULL, NULL) &&
+			history_complete(text, &completed, &uri)) {
+		b->completion = completed;
+		b->completion_uri = uri;
+		entry_put(b, completed);
+		gtk_editable_select_region(e, len, -1);
+	}
+	if (text[0] != '\0') {
+		list_show(b, b->typed);
+	} else {
+		list_hide(b);
+	}
+	return G_SOURCE_REMOVE;
+}
+
+/* Whether the user's last edit added text or took it away: only adding
+ * completes, or Backspace would put back what it removed. */
+static void entry_inserted(GtkEditable *editable, const char *text, int len,
+		int *position, struct browser *b) {
+	if (!b->entry_setting) {
+		b->inserted = true;
+	}
+}
+
+static void entry_deleted(GtkEditable *editable, int start, int end,
+		struct browser *b) {
+	if (!b->entry_setting) {
+		b->inserted = false;
+	}
+}
+
+static void entry_focus_left(GtkEventControllerFocus *focus, struct browser *b) {
+	list_hide(b);
+}
+
+/* Goes to uri in the active tab; typed if it came from the address field
+ * rather than a search. */
+static void go_to(struct browser *b, const char *uri, bool typed) {
+	struct tab *t = active_tab(b);
+	list_hide(b);
+	forget_completion(b);
+	if (t == NULL || uri == NULL) {
+		return;
+	}
+	t->typed = typed;
+	/* Focus the page first, so the address field shows the real URI as
+	 * soon as the load starts instead of what was typed. */
+	gtk_widget_grab_focus(GTK_WIDGET(t->view));
+	webkit_web_view_load_uri(t->view, uri);
+	sync_entry(b);
+}
+
+static void entry_activate(GtkEntry *entry, struct browser *b) {
+	const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+	struct history_entry *e = selected_entry(b);
+	bool search = false;
+	char *uri;
+	if (e != NULL) {
+		uri = g_strdup(e->uri);
+	} else if (b->completion != NULL && strcmp(text, b->completion) == 0) {
+		uri = g_strdup(b->completion_uri);
+	} else {
+		uri = input_to_uri(text, &search);
+	}
+	go_to(b, uri, !search);
 	g_free(uri);
 }
 
-/* Escape in the address field puts the page's address back. */
+/* Up and Down move through the list (Down opens it), Shift+Delete forgets
+ * the selected page, and Escape first closes the list, then puts the
+ * page's address back. */
 static gboolean entry_key(GtkEventControllerKey *ctrl, guint keyval,
 		guint keycode, GdkModifierType state, struct browser *b) {
-	if (keyval != GDK_KEY_Escape) {
-		return FALSE;
+	bool open = gtk_widget_get_visible(b->list);
+	switch (keyval) {
+	case GDK_KEY_Down:
+	case GDK_KEY_Up:
+		if (!open) {
+			if (keyval == GDK_KEY_Up) {
+				return FALSE;
+			}
+			/* An untouched address lists the top pages. */
+			const char *text = gtk_editable_get_text(GTK_EDITABLE(b->entry));
+			g_free(b->typed);
+			b->typed = g_strdup(text);
+			b->selected = -1;
+			list_show(b, b->entry_edited ? text : "");
+			return TRUE;
+		}
+		int n = b->suggestions->len;
+		/* -1 is back in the field, with what was typed. */
+		b->selected += keyval == GDK_KEY_Down ? 1 : -1;
+		if (b->selected < -1) {
+			b->selected = n - 1;
+		} else if (b->selected >= n) {
+			b->selected = -1;
+		}
+		forget_completion(b);
+		show_selected(b);
+		return TRUE;
+	case GDK_KEY_Delete:
+	case GDK_KEY_KP_Delete:
+		if (!open || !(state & GDK_SHIFT_MASK) || selected_entry(b) == NULL) {
+			return FALSE;
+		}
+		history_forget(selected_entry(b)->uri);
+		list_show(b, b->typed != NULL ? b->typed : "");
+		show_selected(b);
+		return TRUE;
+	case GDK_KEY_Escape:
+		if (open || b->completion != NULL) {
+			list_hide(b);
+			forget_completion(b);
+			entry_put(b, b->typed != NULL ? b->typed : "");
+			return TRUE;
+		}
+		struct tab *t = active_tab(b);
+		if (t != NULL) {
+			gtk_widget_grab_focus(GTK_WIDGET(t->view));
+			b->entry_edited = false;
+			sync_entry(b);
+		}
+		return TRUE;
 	}
-	struct tab *t = active_tab(b);
-	if (t != NULL) {
-		gtk_widget_grab_focus(GTK_WIDGET(t->view));
-		b->entry_edited = false;
-		sync_entry(b);
+	return FALSE;
+}
+
+/* The list: the address on the left, the title on the right. */
+static void paint_list(struct browser *b, cairo_t *cr, int w, int h) {
+	black(cr);
+	fill(cr, 0, 0, w, 1);
+	fill(cr, 0, 0, 1, h);
+	fill(cr, w - 1, 0, 1, h);
+	fill(cr, 0, h - 1, w, 1);
+	if (b->suggestions == NULL) {
+		return;
 	}
-	return TRUE;
+	int split = w * 11 / 20;
+	for (guint i = 0; i < b->suggestions->len; i++) {
+		struct history_entry *e = g_ptr_array_index(b->suggestions, i);
+		int y = 1 + i * ROW_H;
+		black(cr);
+		if ((int)i == b->selected) {
+			fill(cr, 1, y, w - 2, ROW_H);
+			white(cr);
+		}
+		cairo_save(cr);
+		cairo_rectangle(cr, 1, y, split - 1 - PAD, ROW_H);
+		cairo_clip(cr);
+		text(cr, history_bare(e->uri), 6, y, ROW_H);
+		cairo_restore(cr);
+		if (e->title != NULL) {
+			cairo_save(cr);
+			cairo_rectangle(cr, split, y, w - 1 - split - 4, ROW_H);
+			cairo_clip(cr);
+			text(cr, e->title, split, y, ROW_H);
+			cairo_restore(cr);
+		}
+	}
+}
+
+static void draw_list(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_list, data);
+}
+
+static int list_row(struct browser *b, double y) {
+	int row = ((int)y - 1) / ROW_H;
+	return y >= 1 && b->suggestions != NULL &&
+		row < (int)b->suggestions->len ? row : -1;
+}
+
+/* The pointer selects rows too; the field keeps what was typed. */
+static void list_motion(GtkEventControllerMotion *motion, double x, double y,
+		struct browser *b) {
+	int row = list_row(b, y);
+	if (row >= 0 && row != b->selected) {
+		b->selected = row;
+		gtk_widget_queue_draw(b->list);
+	}
+}
+
+static void list_pressed(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	int row = list_row(b, y);
+	if (row >= 0) {
+		struct history_entry *e = g_ptr_array_index(b->suggestions, row);
+		char *uri = g_strdup(e->uri);
+		go_to(b, uri, true);
+		g_free(uri);
+	}
 }
 
 /* Keyboard shortcuts and menu items; the values are the menu item ids. */
 enum action {
 	ACT_NEW_TAB, ACT_CLOSE_TAB, ACT_FOCUS_URL, ACT_NEXT_TAB, ACT_PREV_TAB,
 	ACT_RELOAD, ACT_BACK, ACT_FORWARD, ACT_ZOOM_IN, ACT_ZOOM_OUT,
-	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW,
+	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
 };
 
 static struct browser *browser_new(GtkApplication *app);
+
+/* ---- The Clear History alert --------------------------------------------- */
+
+static const char *const alert_lines[] = {
+	"Clear all history?",
+	"Pages you've visited won't be suggested",
+	"any more. Cookies and logins stay.",
+};
+static const char *const alert_labels[] = { "Clear", "Cancel" };
+
+static double measure(const char *s) {
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+	cairo_t *cr = cairo_create(img);
+	cairo_select_font_face(cr, font_family, CAIRO_FONT_SLANT_NORMAL,
+		CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, FONT_SIZE);
+	double w = text_width(cr, s);
+	cairo_destroy(cr);
+	cairo_surface_destroy(img);
+	return w;
+}
+
+/* A GEM alert: a box in a box, the lines, then the buttons at the right,
+ * the safe one (Cancel) the default with a thicker border. Sizes itself. */
+static void paint_alert(struct browser *b, cairo_t *cr, int w, int h) {
+	black(cr);
+	fill(cr, 0, 0, w, 1);
+	fill(cr, 0, h - 1, w, 1);
+	fill(cr, 0, 0, 1, h);
+	fill(cr, w - 1, 0, 1, h);
+	fill(cr, 3, 3, w - 6, 2);
+	fill(cr, 3, h - 5, w - 6, 2);
+	fill(cr, 3, 3, 2, h - 6);
+	fill(cr, w - 5, 3, 2, h - 6);
+	for (guint i = 0; i < G_N_ELEMENTS(alert_lines); i++) {
+		text(cr, alert_lines[i], 3 + 2 * PAD, 3 + 2 * PAD + i * 18, 18);
+	}
+	int bw = MAX(text_width(cr, alert_labels[0]),
+		text_width(cr, alert_labels[1])) + 2 * PAD;
+	int by = h - 3 - 2 * PAD - BUTTON_H;
+	int bx = w - 3 - 2 * PAD - 2 * bw - PAD;
+	for (int i = 0; i < 2; i++) {
+		int x = bx + i * (bw + PAD), t = i == 1 ? 2 : 1;
+		fill(cr, x, by, bw, t);
+		fill(cr, x, by + BUTTON_H - t, bw, t);
+		fill(cr, x, by, t, BUTTON_H);
+		fill(cr, x + bw - t, by, t, BUTTON_H);
+		text(cr, alert_labels[i],
+			x + (bw - text_width(cr, alert_labels[i])) / 2, by, BUTTON_H);
+		int *r = b->alert_buttons[i];
+		r[0] = x, r[1] = by, r[2] = bw, r[3] = BUTTON_H;
+	}
+}
+
+static void draw_alert(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_alert, data);
+}
+
+/* The alert holds the window: the rest of it takes no input meanwhile. */
+static void alert_show(struct browser *b, bool show) {
+	if (show) {
+		double tw = 0;
+		for (guint i = 0; i < G_N_ELEMENTS(alert_lines); i++) {
+			tw = MAX(tw, measure(alert_lines[i]));
+		}
+		int bw = MAX(measure(alert_labels[0]), measure(alert_labels[1])) +
+			2 * PAD;
+		gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->alert),
+			MAX((int)tw, 2 * bw + PAD) + 4 * PAD + 6);
+		gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->alert),
+			G_N_ELEMENTS(alert_lines) * 18 + BUTTON_H + 6 * PAD + 6);
+		list_hide(b);
+	}
+	gtk_widget_set_sensitive(b->box, !show);
+	gtk_widget_set_visible(b->alert, show);
+	app_menu_update(b->menu);
+}
+
+static void alert_answer(struct browser *b, bool clear) {
+	alert_show(b, false);
+	if (clear) {
+		history_clear();
+	}
+}
+
+static void alert_pressed(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	for (int i = 0; i < 2; i++) {
+		int *r = b->alert_buttons[i];
+		if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) {
+			alert_answer(b, i == 0);
+		}
+	}
+}
+
+/* Return takes the default, Cancel; so does Escape. */
+static gboolean alert_key(GtkEventControllerKey *ctrl, guint keyval,
+		guint keycode, GdkModifierType state, struct browser *b) {
+	if (!gtk_widget_get_visible(b->alert)) {
+		return FALSE;
+	}
+	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter ||
+			keyval == GDK_KEY_Escape) {
+		alert_answer(b, false);
+	}
+	return TRUE;
+}
 
 static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	struct browser *b = g_object_get_data(G_OBJECT(widget), "browser");
 	struct tab *t = active_tab(b);
 	int n = b->tabs->len;
+	if (gtk_widget_get_visible(b->alert) && GPOINTER_TO_INT(data) != ACT_QUIT) {
+		return TRUE;
+	}
 	switch (GPOINTER_TO_INT(data)) {
 	case ACT_NEW_WINDOW: {
 		struct browser *nb = browser_new(shared.app);
@@ -1019,6 +1585,9 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_QUIT:
 		gtk_window_destroy(GTK_WINDOW(b->window));
 		break;
+	case ACT_CLEAR_HISTORY:
+		alert_show(b, true);
+		break;
 	}
 	return TRUE;
 }
@@ -1056,12 +1625,18 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_NEXT_TAB, "Next Tab", "^Tab", one_tab);
 	app_menu_add_item(m, ACT_PREV_TAB, "Previous Tab", "^Shift+Tab", one_tab);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_CLEAR_HISTORY, "Clear History...", NULL,
+		gtk_widget_get_visible(b->alert) ? APP_MENU_DISABLED : 0);
 }
 
 static void menu_activate(uint32_t id, void *data) {
 	struct browser *b = data;
+	if (gtk_widget_get_visible(b->alert) && id != ACT_QUIT) {
+		return;
+	}
 	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
-			id == ACT_QUIT) {
+			id == ACT_QUIT || id == ACT_CLEAR_HISTORY) {
 		shortcut(b->window, NULL, GINT_TO_POINTER(id));
 	}
 }
@@ -1141,7 +1716,21 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	if (b->scroll != NULL) {
 		gemwm_scroll_v1_destroy(b->scroll);
 	}
+	for (guint i = 0; i < b->tabs->len; i++) {
+		struct tab *t = g_ptr_array_index(b->tabs, i);
+		if (t->record_timer != 0) {
+			g_source_remove(t->record_timer);
+			t->record_timer = 0;
+		}
+	}
+	if (b->complete_idle != 0) {
+		g_source_remove(b->complete_idle);
+	}
 	g_ptr_array_free(b->tabs, TRUE);
+	g_clear_pointer(&b->suggestions, history_entries_free);
+	g_free(b->typed);
+	g_free(b->completion);
+	g_free(b->completion_uri);
 	g_free(b->hover_link);
 	g_free(b->download_status);
 	g_free(b);
@@ -1190,6 +1779,10 @@ static void shared_init(GtkApplication *app) {
 	g_signal_connect(shared.session, "download-started",
 		G_CALLBACK(on_download_started), NULL);
 	g_free(cookies);
+	g_mkdir_with_parents(data, 0700);
+	char *history = g_build_filename(data, "history.sqlite", NULL);
+	history_open(history);
+	g_free(history);
 	g_free(data);
 	g_free(cache);
 
@@ -1203,6 +1796,22 @@ static void shared_init(GtkApplication *app) {
 	shared.scroll_script = webkit_user_script_new(scroll_script,
 		WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
 		WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, NULL, NULL);
+
+	shared.media_missing = find_missing_media();
+	char *note = NULL;
+	if (shared.media_missing != NULL) {
+		g_printerr("gemweb: video and sound won't play; install %s\n",
+			shared.media_missing);
+		shared.media_script = webkit_user_script_new(media_script,
+			WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+			WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, NULL, NULL);
+		note = g_strdup_printf("<p>Video and sound won't play until<br>"
+			"%s %s installed.</p>", shared.media_missing,
+			strchr(shared.media_missing, ',') ? "are" : "is");
+	}
+	shared.start_page = g_strconcat(start_page, note ? note : "",
+		start_page_end, NULL);
+	g_free(note);
 
 	shared.settings = webkit_settings_new();
 	webkit_settings_set_enable_developer_extras(shared.settings, TRUE);
@@ -1223,6 +1832,8 @@ static struct browser *browser_new(GtkApplication *app) {
 	g_signal_connect(b->window, "map", G_CALLBACK(window_mapped), b);
 
 	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+	b->box = box;
+	b->selected = -1;
 	b->tabbar = pixel_area(b, TAB_H, draw_tabbar, G_CALLBACK(tabbar_pressed));
 
 	GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -1235,9 +1846,18 @@ static struct browser *browser_new(GtkApplication *app) {
 	gtk_widget_set_hexpand(b->entry, TRUE);
 	g_signal_connect(b->entry, "activate", G_CALLBACK(entry_activate), b);
 	g_signal_connect(b->entry, "changed", G_CALLBACK(entry_changed), b);
+	GtkEditable *text = gtk_editable_get_delegate(GTK_EDITABLE(b->entry));
+	g_signal_connect(text, "insert-text", G_CALLBACK(entry_inserted), b);
+	g_signal_connect(text, "delete-text", G_CALLBACK(entry_deleted), b);
 	GtkEventController *keys = gtk_event_controller_key_new();
+	/* Before the entry's own keys: Up and Down move it to the start and
+	 * end otherwise. */
+	gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
 	g_signal_connect(keys, "key-pressed", G_CALLBACK(entry_key), b);
 	gtk_widget_add_controller(b->entry, keys);
+	GtkEventController *focus = gtk_event_controller_focus_new();
+	g_signal_connect(focus, "leave", G_CALLBACK(entry_focus_left), b);
+	gtk_widget_add_controller(b->entry, focus);
 	gtk_box_append(GTK_BOX(toolbar), b->buttons);
 	gtk_box_append(GTK_BOX(toolbar), b->entry);
 
@@ -1249,7 +1869,27 @@ static struct browser *browser_new(GtkApplication *app) {
 	gtk_box_append(GTK_BOX(box), toolbar);
 	gtk_box_append(GTK_BOX(box), b->info);
 	gtk_box_append(GTK_BOX(box), b->stack);
-	gtk_window_set_child(GTK_WINDOW(b->window), box);
+
+	/* Over it all: the address field's list, and the alert. */
+	GtkWidget *overlay = gtk_overlay_new();
+	gtk_overlay_set_child(GTK_OVERLAY(overlay), box);
+	b->list = pixel_area(b, 0, draw_list, G_CALLBACK(list_pressed));
+	gtk_widget_set_valign(b->list, GTK_ALIGN_START);
+	gtk_widget_set_visible(b->list, FALSE);
+	GtkEventController *motion = gtk_event_controller_motion_new();
+	g_signal_connect(motion, "motion", G_CALLBACK(list_motion), b);
+	gtk_widget_add_controller(b->list, motion);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->list);
+	b->alert = pixel_area(b, 0, draw_alert, G_CALLBACK(alert_pressed));
+	gtk_widget_set_halign(b->alert, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign(b->alert, GTK_ALIGN_CENTER);
+	gtk_widget_set_visible(b->alert, FALSE);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->alert);
+	gtk_window_set_child(GTK_WINDOW(b->window), overlay);
+	GtkEventController *alert_keys = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(alert_keys, GTK_PHASE_CAPTURE);
+	g_signal_connect(alert_keys, "key-pressed", G_CALLBACK(alert_key), b);
+	gtk_widget_add_controller(b->window, alert_keys);
 	add_shortcuts(b->window);
 	b->menu = app_menu_new(b->window, build_menus, menu_activate, b);
 	return b;
@@ -1260,6 +1900,13 @@ static struct browser *browser_new(GtkApplication *app) {
 static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 	int argc;
 	char **argv = g_application_command_line_get_arguments(cmdline, &argc);
+	/* A second `gemweb` hands its arguments to this one and exits: say so
+	 * on its terminal, or it looks as if a fresh GemWeb started. */
+	if (g_application_command_line_get_is_remote(cmdline)) {
+		g_application_command_line_printerr(cmdline,
+			"gemweb: opening in the GemWeb already running (pid %d)\n",
+			(int)getpid());
+	}
 	if (shared.app == NULL) {
 		load_css();
 		shared_init(GTK_APPLICATION(app));

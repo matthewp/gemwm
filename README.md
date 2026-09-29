@@ -491,7 +491,12 @@ set `TERMINAL` in `~/.config/gemwm/env`.
 ## GemWeb
 
 A WebKit browser whose tabs, buttons and info line are drawn like GemWM's
-windows. It's built when `webkitgtk-6.0` is installed.
+windows. It's built when `webkitgtk-6.0` is installed. Video and sound need
+GStreamer's plugins too, which distributions often leave optional
+(`gst-plugins-base`, `gst-plugins-good`, `gst-libav`; add `gst-plugin-va`
+for hardware decoding); when any are missing, GemWeb names them on its
+new-tab page and in the info line, on a new window's first page and on
+pages with video or sound.
 
     gemweb               # opens a new window
     gemweb URL...        # opens tabs in the last-used window
@@ -515,6 +520,15 @@ Middle-click or Ctrl+click opens a link in a background tab; middle-click a
 tab to close it. Text that isn't an address is searched with DuckDuckGo, or
 with `$GEMWEB_SEARCH` (`%s` marks the query). Downloads go to
 `~/Downloads`; cookies and site data live in `~/.local/share/gemweb`.
+
+The address field completes from history: typing the start of a site you've
+visited fills in the rest (selected, so typing on replaces it), and a list
+of pages drops down, matching the start of an address or any words in its
+address or title, most visited (and most typed) and most recent first. Up
+and Down choose from the list (Down in an untouched field lists your top
+pages), Shift+Delete forgets the chosen page, and Escape closes the list.
+History is kept in `~/.local/share/gemweb/history.sqlite`, to the top 5,000
+pages; Go > Clear History... empties it.
 
 Under GemWM a page scrolls with the window frame's own scroll bars, and its
 built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
