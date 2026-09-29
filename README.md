@@ -517,9 +517,21 @@ Web Browser always opens GemWeb.
 | Ctrl+plus / minus / 0       | zoom                      |
 
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
-tab to close it. Text that isn't an address is searched with DuckDuckGo, or
-with `$GEMWEB_SEARCH` (`%s` marks the query). Downloads go to
+tab to close it. Text that isn't an address is searched. Downloads go to
 `~/Downloads`; cookies and site data live in `~/.local/share/gemweb`.
+
+The home page and search engine are set in `~/.config/gemweb/settings`
+(changes apply to the next page loaded, no restart needed):
+
+    [General]
+    home = https://example.com/
+    search = kagi
+
+`home` is an address, or `start` for GemWeb's own start page; it's Google
+if unset. `search` is `duckduckgo` (the default), `google`, `bing`,
+`brave`, `startpage` or `kagi`, or any search URL with `%s` where the query
+goes, like `https://search.example/?q=%s`. `$GEMWEB_HOME` and
+`$GEMWEB_SEARCH`, if set, take precedence.
 
 The address field completes from history: typing the start of a site you've
 visited fills in the rest (selected, so typing on replaces it), and a list

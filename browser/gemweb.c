@@ -38,6 +38,7 @@
 #define FONT_SIZE font_size /* GEMWM_FONT_SIZE, else 14 */
 #define BUTTONS 4      /* back, forward, reload, home */
 #define DEFAULT_HOME "https://www.google.com/"
+#define DEFAULT_SEARCH "https://duckduckgo.com/?q=%s"
 #define SUGGEST_ROWS 8 /* the address field's list of pages from history */
 #define ROW_H 19
 #define BUTTON_H 22    /* an alert's buttons */
@@ -954,8 +955,59 @@ static void on_download_started(WebKitNetworkSession *session,
 
 /* ---- Tabs --------------------------------------------------------------- */
 
+/* ---- Settings ----------------------------------------------------------- */
+
+/* A setting from ~/.config/gemweb/settings, under [General], or NULL.
+ * $env, if set, wins (for scripts and tests). The file is read each time,
+ * so an edit applies to the next page loaded. */
+static char *setting(const char *key, const char *env) {
+	const char *value = g_getenv(env);
+	if (value != NULL) {
+		return g_strdup(value);
+	}
+	char *path = g_build_filename(g_get_user_config_dir(), "gemweb",
+		"settings", NULL);
+	GKeyFile *kf = g_key_file_new();
+	char *s = NULL;
+	if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+		s = g_key_file_get_string(kf, "General", key, NULL);
+	}
+	g_key_file_free(kf);
+	g_free(path);
+	return s != NULL ? g_strstrip(s) : NULL;
+}
+
+/* The search engine: search = a URL with %s for the query, or one of these
+ * names. */
+static char *search_engine(void) {
+	static const struct { const char *name, *url; } engines[] = {
+		{ "duckduckgo", "https://duckduckgo.com/?q=%s" },
+		{ "google", "https://www.google.com/search?q=%s" },
+		{ "bing", "https://www.bing.com/search?q=%s" },
+		{ "brave", "https://search.brave.com/search?q=%s" },
+		{ "startpage", "https://www.startpage.com/do/search?q=%s" },
+		{ "kagi", "https://kagi.com/search?q=%s" },
+	};
+	char *engine = setting("search", "GEMWEB_SEARCH");
+	for (guint i = 0; engine != NULL && i < G_N_ELEMENTS(engines); i++) {
+		if (g_ascii_strcasecmp(engine, engines[i].name) == 0) {
+			g_free(engine);
+			return g_strdup(engines[i].url);
+		}
+	}
+	if (engine == NULL || strstr(engine, "%s") == NULL) {
+		if (engine != NULL) {
+			g_printerr("gemweb: search = %s has no %%s for the query; "
+				"using DuckDuckGo\n", engine);
+		}
+		g_free(engine);
+		return g_strdup(DEFAULT_SEARCH);
+	}
+	return engine;
+}
+
 /* What the user typed, as a URI: addresses as-is, bare names get https://,
- * anything else is a search ($GEMWEB_SEARCH, with %s for the query). */
+ * anything else is a search with the search engine. */
 static char *input_to_uri(const char *input, bool *search) {
 	char *s = g_strstrip(g_strdup(input));
 	char *uri;
@@ -976,14 +1028,12 @@ static char *input_to_uri(const char *input, bool *search) {
 			(strchr(s, '.') != NULL || g_str_has_prefix(s, "localhost"))) {
 		uri = g_strconcat("https://", s, NULL);
 	} else {
-		const char *engine = g_getenv("GEMWEB_SEARCH");
-		if (engine == NULL || strstr(engine, "%s") == NULL) {
-			engine = "https://duckduckgo.com/?q=%s";
-		}
+		char *engine = search_engine();
 		char *q = g_uri_escape_string(s, NULL, TRUE);
 		const char *at = strstr(engine, "%s");
 		uri = g_strdup_printf("%.*s%s%s", (int)(at - engine), engine, q, at + 2);
 		g_free(q);
+		g_free(engine);
 		if (search != NULL) {
 			*search = true;
 		}
@@ -992,16 +1042,16 @@ static char *input_to_uri(const char *input, bool *search) {
 	return uri;
 }
 
-/* The home page: $GEMWEB_HOME, or Google. "about:blank" (or empty) means
- * GemWeb's own start page. */
-static const char *home_page(void) {
-	const char *home = g_getenv("GEMWEB_HOME");
-	return home != NULL ? home : DEFAULT_HOME;
-}
-
+/* The home page: home = an address, or "start" (or nothing) for GemWeb's
+ * own start page; Google if it isn't set. */
 static void load_home(struct tab *t) {
-	const char *home = home_page();
-	char *uri = strcmp(home, "about:blank") == 0 ? NULL : input_to_uri(home, NULL);
+	char *home = setting("home", "GEMWEB_HOME");
+	if (home == NULL) {
+		home = g_strdup(DEFAULT_HOME);
+	}
+	char *uri = strcmp(home, "start") == 0 || strcmp(home, "about:blank") == 0 ?
+		NULL : input_to_uri(home, NULL);
+	g_free(home);
 	if (uri != NULL) {
 		webkit_web_view_load_uri(t->view, uri);
 	} else {
