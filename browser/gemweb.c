@@ -56,7 +56,8 @@ static int font_size;
 
 struct browser;
 
-enum dialog { DIALOG_NONE, DIALOG_CLEAR_HISTORY, DIALOG_UNLOCK };
+enum dialog { DIALOG_NONE, DIALOG_CLEAR_HISTORY, DIALOG_UNLOCK, DIALOG_SCRIPT };
+enum field { FIELD_NONE, FIELD_PASSWORD, FIELD_TEXT };
 
 struct tab {
 	struct browser *browser;
@@ -105,12 +106,20 @@ struct browser {
 	GPtrArray *suggestions;
 	int selected;
 
-	/* A dialog over the window: Clear History, or unlocking passwords. */
+	/* A dialog over the window: Clear History, unlocking passwords, or a
+	 * page's alert(), confirm() or prompt(). Its lines, its buttons (the
+	 * second the default; no first for just OK), the one that does it,
+	 * and maybe a field. */
 	GtkWidget *dialog_box, *dialog_area, *dialog_field;
 	enum dialog dialog;
+	GPtrArray *dialog_lines;
+	const char *dialog_labels[2];
+	int dialog_act;
+	enum field dialog_field_kind;
 	char *dialog_error;
 	int dialog_field_y;
 	int dialog_buttons[2][4]; /* x, y, w, h */
+	WebKitScriptDialog *script; /* the page's, while it's up */
 
 	/* Passwords: the key gadget, the list of logins when a site has
 	 * several, the host they're for, and what's happening. */
@@ -133,6 +142,14 @@ struct browser {
 	/* A web app's window (gemweb --app): just its page, named after it. */
 	bool app;
 	char *app_uri, *app_name;
+
+	/* The right-click menu: its items, the one under the pointer, what
+	 * was clicked on, and where the pointer is (in the overlay). */
+	GtkWidget *overlay, *ctx;
+	GArray *ctx_items; /* struct ctx_item */
+	int ctx_hover;
+	char *ctx_link, *ctx_image, *ctx_media;
+	double pointer_x, pointer_y;
 };
 
 /* Shared by every window: cookies and logins, the GEM scroll-bar style,
@@ -178,6 +195,11 @@ static gboolean on_enter_fullscreen(WebKitWebView *view, struct tab *t);
 static gboolean on_leave_fullscreen(WebKitWebView *view, struct tab *t);
 static void ads_apply(struct tab *t);
 static void sync_info(struct browser *b);
+static gboolean on_script_dialog(WebKitWebView *view, WebKitScriptDialog *d,
+	struct tab *t);
+static char *site_of(const char *uri);
+static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
+	WebKitHitTestResult *hit, struct tab *t);
 static bool app_owns(struct browser *b, const char *uri);
 static void open_in_browser(const char *uri);
 static struct browser *app_window(const char *uri, const char *name);
@@ -1335,6 +1357,8 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "decide-policy", G_CALLBACK(on_decide_policy), t);
 	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
 	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
+	g_signal_connect(t->view, "script-dialog", G_CALLBACK(on_script_dialog), t);
+	g_signal_connect(t->view, "context-menu", G_CALLBACK(on_context_menu), t);
 	find_connect(t);
 	g_signal_connect(t->view, "enter-fullscreen",
 		G_CALLBACK(on_enter_fullscreen), t);
@@ -1675,25 +1699,15 @@ enum action {
 
 static struct browser *browser_new(GtkApplication *app);
 
-/* ---- Dialogs: Clear History, and unlocking passwords -------------------- */
+/* ---- Dialogs ------------------------------------------------------------- */
 
-/* A GEM alert box over the window: its lines, maybe a password field and
- * a line for what went wrong, then two buttons at the right, the second
- * the default with a thicker border. Escape is the first. */
-static const struct dialog_text {
-	const char *lines[3];
-	const char *labels[2];
-	int act; /* the button that does it */
-	bool field;
-} dialogs[] = {
-	[DIALOG_CLEAR_HISTORY] = {
-		{ "Clear all history?", "Pages you've visited won't be suggested",
-			"any more. Cookies and logins stay." },
-		{ "Clear", "Cancel" }, 0, false },
-	[DIALOG_UNLOCK] = {
-		{ "Your passwords are locked.", "Master password:" },
-		{ "Cancel", "Unlock" }, 1, true },
-};
+/* A GEM alert box over the window: its lines, maybe a field and a line for
+ * what went wrong, then the buttons at the right, the second the default
+ * with a thicker border. Return takes the default, Escape the one that
+ * doesn't act. */
+
+#define DIALOG_TEXT_W 440 /* page messages wrap at this */
+#define DIALOG_MAX_LINES 14
 
 static double measure(const char *s) {
 	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
@@ -1707,29 +1721,78 @@ static double measure(const char *s) {
 	return w;
 }
 
-static int dialog_lines(const struct dialog_text *d) {
-	int n = 0;
-	while (n < 3 && d->lines[n] != NULL) {
-		n++;
+/* Adds text to lines, wrapped at width: at spaces, or inside a word too
+ * long for a line; its own newlines kept. At most DIALOG_MAX_LINES. */
+static void wrap_text(GPtrArray *lines, const char *text, double width) {
+	char **paras = g_strsplit(text, "\n", -1);
+	for (int p = 0; paras[p] != NULL; p++) {
+		GString *line = g_string_new(NULL);
+		char **words = g_strsplit(g_strstrip(paras[p]), " ", -1);
+		for (int i = 0; words[i] != NULL; i++) {
+			const char *w = words[i];
+			if (w[0] == '\0') {
+				continue;
+			}
+			GString *try = g_string_new(line->str);
+			g_string_append_printf(try, "%s%s", line->len ? " " : "", w);
+			if (measure(try->str) <= width || line->len == 0) {
+				g_string_assign(line, try->str);
+			} else {
+				g_ptr_array_add(lines, g_string_free(line, FALSE));
+				line = g_string_new(w);
+			}
+			g_string_free(try, TRUE);
+			/* A word wider than a line breaks where it must. */
+			while (measure(line->str) > width && line->len > 1) {
+				glong n = g_utf8_strlen(line->str, -1);
+				while (n > 1) {
+					char *head = g_utf8_substring(line->str, 0, --n);
+					bool fits = measure(head) <= width;
+					if (fits) {
+						g_ptr_array_add(lines, head);
+						g_string_erase(line, 0,
+							g_utf8_offset_to_pointer(line->str, n) - line->str);
+						break;
+					}
+					g_free(head);
+				}
+			}
+		}
+		g_strfreev(words);
+		g_ptr_array_add(lines, g_string_free(line, FALSE));
 	}
-	return n;
+	g_strfreev(paras);
+	if (lines->len > DIALOG_MAX_LINES) {
+		g_ptr_array_set_size(lines, DIALOG_MAX_LINES);
+		char *last = lines->pdata[DIALOG_MAX_LINES - 1];
+		lines->pdata[DIALOG_MAX_LINES - 1] = g_strconcat(last, "...", NULL);
+		g_free(last);
+	}
+}
+
+static int button_width(struct browser *b) {
+	double w = measure(b->dialog_labels[1]);
+	if (b->dialog_labels[0] != NULL) {
+		w = MAX(w, measure(b->dialog_labels[0]));
+	}
+	return (int)w + 2 * PAD;
 }
 
 /* Sizes the box and places the field for the dialog shown. */
 static void dialog_layout(struct browser *b) {
-	const struct dialog_text *d = &dialogs[b->dialog];
-	int n = dialog_lines(d);
-	double tw = d->field ? 280 : 0;
+	bool field = b->dialog_field_kind != FIELD_NONE;
+	int n = b->dialog_lines->len;
+	double tw = field ? 280 : 0;
 	for (int i = 0; i < n; i++) {
-		tw = MAX(tw, measure(d->lines[i]));
+		tw = MAX(tw, measure(b->dialog_lines->pdata[i]));
 	}
 	if (b->dialog_error != NULL) {
 		tw = MAX(tw, measure(b->dialog_error));
 	}
-	int bw = MAX(measure(d->labels[0]), measure(d->labels[1])) + 2 * PAD;
+	int bw = button_width(b);
 	int w = MAX((int)tw, 2 * bw + PAD) + 4 * PAD + 6;
 	int y = 3 + 2 * PAD + n * 18;
-	if (d->field) {
+	if (field) {
 		b->dialog_field_y = y + PAD / 2;
 		y = b->dialog_field_y + FIELD_H + PAD / 2 + 18; /* then the error */
 		gtk_widget_set_margin_start(b->dialog_field, 3 + 2 * PAD);
@@ -1737,7 +1800,7 @@ static void dialog_layout(struct browser *b) {
 		gtk_widget_set_size_request(b->dialog_field, w - 2 * (3 + 2 * PAD),
 			FIELD_H);
 	}
-	gtk_widget_set_visible(b->dialog_field, d->field);
+	gtk_widget_set_visible(b->dialog_field, field);
 	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->dialog_area), w);
 	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->dialog_area),
 		y + PAD + BUTTON_H + 2 * PAD + 3);
@@ -1745,7 +1808,6 @@ static void dialog_layout(struct browser *b) {
 }
 
 static void paint_dialog(struct browser *b, cairo_t *cr, int w, int h) {
-	const struct dialog_text *d = &dialogs[b->dialog];
 	black(cr);
 	fill(cr, 0, 0, w, 1);
 	fill(cr, 0, h - 1, w, 1);
@@ -1755,27 +1817,30 @@ static void paint_dialog(struct browser *b, cairo_t *cr, int w, int h) {
 	fill(cr, 3, h - 5, w - 6, 2);
 	fill(cr, 3, 3, 2, h - 6);
 	fill(cr, w - 5, 3, 2, h - 6);
-	int n = dialog_lines(d);
-	for (int i = 0; i < n; i++) {
-		text(cr, d->lines[i], 3 + 2 * PAD, 3 + 2 * PAD + i * 18, 18);
+	for (guint i = 0; i < b->dialog_lines->len; i++) {
+		text(cr, b->dialog_lines->pdata[i], 3 + 2 * PAD, 3 + 2 * PAD + i * 18,
+			18);
 	}
-	if (d->field && b->dialog_error != NULL) {
+	if (b->dialog_field_kind != FIELD_NONE && b->dialog_error != NULL) {
 		text(cr, b->dialog_error, 3 + 2 * PAD,
 			b->dialog_field_y + FIELD_H + PAD / 2, 18);
 	}
-	int bw = MAX(text_width(cr, d->labels[0]),
-		text_width(cr, d->labels[1])) + 2 * PAD;
+	int bw = button_width(b);
 	int by = h - 3 - 2 * PAD - BUTTON_H;
 	int bx = w - 3 - 2 * PAD - 2 * bw - PAD;
 	for (int i = 0; i < 2; i++) {
+		int *r = b->dialog_buttons[i];
+		r[0] = r[1] = r[2] = r[3] = 0;
+		if (b->dialog_labels[i] == NULL) {
+			continue;
+		}
 		int x = bx + i * (bw + PAD), t = i == 1 ? 2 : 1;
 		fill(cr, x, by, bw, t);
 		fill(cr, x, by + BUTTON_H - t, bw, t);
 		fill(cr, x, by, t, BUTTON_H);
 		fill(cr, x + bw - t, by, t, BUTTON_H);
-		text(cr, d->labels[i],
-			x + (bw - text_width(cr, d->labels[i])) / 2, by, BUTTON_H);
-		int *r = b->dialog_buttons[i];
+		text(cr, b->dialog_labels[i],
+			x + (bw - text_width(cr, b->dialog_labels[i])) / 2, by, BUTTON_H);
 		r[0] = x, r[1] = by, r[2] = bw, r[3] = BUTTON_H;
 	}
 }
@@ -1789,21 +1854,62 @@ static bool dialog_up(struct browser *b) {
 	return b->dialog != DIALOG_NONE;
 }
 
-/* The dialog holds the window: the rest of it takes no input meanwhile. */
-static void dialog_show(struct browser *b, enum dialog dialog) {
+/* Shows (or, for DIALOG_NONE, takes away) the dialog set up in b. It holds
+ * the window: the rest of it takes no input meanwhile. */
+static void dialog_open(struct browser *b, enum dialog dialog) {
 	b->dialog = dialog;
 	g_clear_pointer(&b->dialog_error, g_free);
-	gtk_editable_set_text(GTK_EDITABLE(b->dialog_field), "");
 	if (dialog != DIALOG_NONE) {
+		gtk_entry_set_visibility(GTK_ENTRY(b->dialog_field),
+			b->dialog_field_kind != FIELD_PASSWORD);
+		gtk_entry_set_input_purpose(GTK_ENTRY(b->dialog_field),
+			b->dialog_field_kind == FIELD_PASSWORD ?
+			GTK_INPUT_PURPOSE_PASSWORD : GTK_INPUT_PURPOSE_FREE_FORM);
 		dialog_layout(b);
 		list_hide(b);
+	} else {
+		gtk_editable_set_text(GTK_EDITABLE(b->dialog_field), "");
 	}
 	gtk_widget_set_sensitive(b->box, dialog == DIALOG_NONE);
 	gtk_widget_set_visible(b->dialog_box, dialog != DIALOG_NONE);
-	if (dialogs[dialog].field) {
+	if (dialog != DIALOG_NONE && b->dialog_field_kind != FIELD_NONE) {
 		gtk_widget_grab_focus(b->dialog_field);
+		gtk_editable_select_region(GTK_EDITABLE(b->dialog_field), 0, -1);
+	} else if (dialog == DIALOG_NONE && active_tab(b) != NULL) {
+		/* Back to the page, not the first thing that takes focus. */
+		gtk_widget_grab_focus(GTK_WIDGET(active_tab(b)->view));
 	}
 	app_menu_update(b->menu);
+}
+
+/* One of GemWeb's own dialogs. */
+static void dialog_show(struct browser *b, enum dialog dialog) {
+	static const struct {
+		const char *lines[3];
+		const char *labels[2];
+		int act;
+		enum field field;
+	} dialogs[] = {
+		[DIALOG_CLEAR_HISTORY] = {
+			{ "Clear all history?", "Pages you've visited won't be suggested",
+				"any more. Cookies and logins stay." },
+			{ "Clear", "Cancel" }, 0, FIELD_NONE },
+		[DIALOG_UNLOCK] = {
+			{ "Your passwords are locked.", "Master password:" },
+			{ "Cancel", "Unlock" }, 1, FIELD_PASSWORD },
+	};
+	if (dialog != DIALOG_NONE) {
+		g_ptr_array_set_size(b->dialog_lines, 0);
+		for (int i = 0; i < 3 && dialogs[dialog].lines[i] != NULL; i++) {
+			g_ptr_array_add(b->dialog_lines, g_strdup(dialogs[dialog].lines[i]));
+		}
+		b->dialog_labels[0] = dialogs[dialog].labels[0];
+		b->dialog_labels[1] = dialogs[dialog].labels[1];
+		b->dialog_act = dialogs[dialog].act;
+		b->dialog_field_kind = dialogs[dialog].field;
+		gtk_editable_set_text(GTK_EDITABLE(b->dialog_field), "");
+	}
+	dialog_open(b, dialog);
 }
 
 static void dialog_error(struct browser *b, const char *error) {
@@ -1812,12 +1918,87 @@ static void dialog_error(struct browser *b, const char *error) {
 	dialog_layout(b);
 }
 
+/* ---- A page's own dialogs: alert(), confirm(), prompt(), leaving ---- */
+
+/* WebKit waits for the answer, which comes when a button's pressed. */
+static void script_answer(struct browser *b, bool yes) {
+	WebKitScriptDialog *d = b->script;
+	b->script = NULL;
+	if (d == NULL) {
+		return;
+	}
+	switch (webkit_script_dialog_get_dialog_type(d)) {
+	case WEBKIT_SCRIPT_DIALOG_CONFIRM:
+	case WEBKIT_SCRIPT_DIALOG_BEFORE_UNLOAD_CONFIRM:
+		webkit_script_dialog_confirm_set_confirmed(d, yes);
+		break;
+	case WEBKIT_SCRIPT_DIALOG_PROMPT:
+		if (yes) {
+			webkit_script_dialog_prompt_set_text(d,
+				gtk_editable_get_text(GTK_EDITABLE(b->dialog_field)));
+		}
+		break;
+	default:
+		break;
+	}
+	webkit_script_dialog_close(d);
+	webkit_script_dialog_unref(d);
+}
+
+static gboolean on_script_dialog(WebKitWebView *view, WebKitScriptDialog *d,
+		struct tab *t) {
+	struct browser *b = t->browser;
+	if (dialog_up(b)) {
+		return FALSE; /* one at a time: WebKit's own, this once */
+	}
+	/* A tab behind asks: it comes forward. */
+	guint index;
+	if (!is_active(t) && g_ptr_array_find(b->tabs, t, &index)) {
+		tab_select(b, index);
+	}
+	WebKitScriptDialogType type = webkit_script_dialog_get_dialog_type(d);
+	g_ptr_array_set_size(b->dialog_lines, 0);
+	b->dialog_field_kind = FIELD_NONE;
+	if (type == WEBKIT_SCRIPT_DIALOG_BEFORE_UNLOAD_CONFIRM) {
+		/* Staying is safe: it's the default. */
+		g_ptr_array_add(b->dialog_lines, g_strdup("Leave this page?"));
+		g_ptr_array_add(b->dialog_lines,
+			g_strdup("Changes you made may not be saved."));
+		b->dialog_labels[0] = "Leave";
+		b->dialog_labels[1] = "Stay";
+		b->dialog_act = 0;
+	} else {
+		char *site = site_of(webkit_web_view_get_uri(view));
+		char *says = g_strdup_printf("%s says:", site ? site : "This page");
+		g_ptr_array_add(b->dialog_lines, says);
+		g_free(site);
+		const char *message = webkit_script_dialog_get_message(d);
+		if (message != NULL && message[0] != '\0') {
+			wrap_text(b->dialog_lines, message, DIALOG_TEXT_W);
+		}
+		b->dialog_labels[0] = type == WEBKIT_SCRIPT_DIALOG_ALERT ? NULL :
+			"Cancel";
+		b->dialog_labels[1] = "OK";
+		b->dialog_act = 1;
+		if (type == WEBKIT_SCRIPT_DIALOG_PROMPT) {
+			const char *text = webkit_script_dialog_prompt_get_default_text(d);
+			b->dialog_field_kind = FIELD_TEXT;
+			gtk_editable_set_text(GTK_EDITABLE(b->dialog_field),
+				text != NULL ? text : "");
+		}
+	}
+	b->script = webkit_script_dialog_ref(d);
+	dialog_open(b, DIALOG_SCRIPT);
+	return TRUE;
+}
+
 static void unlock_submit(struct browser *b, char *password);
 static void unlock_cancelled(struct browser *b);
 
 static void dialog_answer(struct browser *b, int button) {
 	enum dialog dialog = b->dialog;
-	if (dialog == DIALOG_UNLOCK && button == dialogs[dialog].act) {
+	bool yes = button == b->dialog_act;
+	if (dialog == DIALOG_UNLOCK && yes) {
 		if (!b->unlocking) {
 			GtkEditable *field = GTK_EDITABLE(b->dialog_field);
 			char *password = g_strdup(gtk_editable_get_text(field));
@@ -1826,8 +2007,11 @@ static void dialog_answer(struct browser *b, int button) {
 		}
 		return;
 	}
-	dialog_show(b, DIALOG_NONE);
-	if (dialog == DIALOG_CLEAR_HISTORY && button == dialogs[dialog].act) {
+	if (dialog == DIALOG_SCRIPT) {
+		script_answer(b, yes); /* before the field's emptied */
+	}
+	dialog_open(b, DIALOG_NONE);
+	if (dialog == DIALOG_CLEAR_HISTORY && yes) {
 		history_clear();
 	} else if (dialog == DIALOG_UNLOCK) {
 		unlock_cancelled(b);
@@ -1838,15 +2022,16 @@ static void dialog_pressed(GtkGestureClick *gesture, int n_press, double x,
 		double y, struct browser *b) {
 	for (int i = 0; i < 2; i++) {
 		int *r = b->dialog_buttons[i];
-		if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) {
+		if (r[2] > 0 && x >= r[0] && x < r[0] + r[2] && y >= r[1] &&
+				y < r[1] + r[3]) {
 			dialog_answer(b, i);
 			return;
 		}
 	}
 }
 
-/* Return takes the default button, Escape the other; other keys go to the
- * password field, if there is one. */
+/* Return takes the default button; Escape the one that doesn't act (or,
+ * with only OK, OK). Other keys go to the field, if there is one. */
 static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
 		guint keycode, GdkModifierType state, struct browser *b) {
 	if (!dialog_up(b)) {
@@ -1855,9 +2040,10 @@ static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
 	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
 		dialog_answer(b, 1);
 	} else if (keyval == GDK_KEY_Escape) {
-		dialog_answer(b, 0);
+		dialog_answer(b, b->dialog_labels[0] == NULL ? 1 :
+			b->dialog_act == 0 ? 1 : 0);
 	} else {
-		return !dialogs[b->dialog].field;
+		return b->dialog_field_kind == FIELD_NONE;
 	}
 	return TRUE;
 }
@@ -2887,6 +3073,407 @@ static void print_page(struct browser *b) {
 	}
 }
 
+/* ---- The right-click menu --------------------------------------------------- */
+
+/* In place of WebKit's GTK menu, a GEM drop-down at the pointer, with what
+ * fits what was clicked: a link, an image, a video, a text field, a
+ * selection, or the page itself. */
+
+enum ctx {
+	CTX_SEPARATOR, CTX_OPEN_LINK_TAB, CTX_OPEN_LINK_WINDOW, CTX_COPY_LINK,
+	CTX_DOWNLOAD_LINK, CTX_OPEN_IMAGE, CTX_SAVE_IMAGE, CTX_COPY_IMAGE,
+	CTX_OPEN_MEDIA, CTX_COPY_MEDIA, CTX_UNDO, CTX_REDO, CTX_CUT, CTX_COPY,
+	CTX_PASTE, CTX_SELECT_ALL, CTX_SEARCH, CTX_BACK, CTX_FORWARD, CTX_RELOAD,
+	CTX_READER, CTX_PRINT, CTX_INSPECT,
+};
+
+struct ctx_item {
+	enum ctx action;
+	const char *label;
+	bool enabled, checked;
+};
+
+#define CTX_PAD 16 /* left of a label, room for a check mark */
+
+static void ctx_add(struct browser *b, enum ctx action, const char *label,
+		bool enabled) {
+	GArray *items = b->ctx_items;
+	if (action == CTX_SEPARATOR && (items->len == 0 ||
+			g_array_index(items, struct ctx_item, items->len - 1).action ==
+			CTX_SEPARATOR)) {
+		return;
+	}
+	struct ctx_item item = { action, label, enabled, false };
+	g_array_append_val(items, item);
+}
+
+static void ctx_hide(struct browser *b) {
+	gtk_widget_set_visible(b->ctx, FALSE);
+}
+
+static void paint_ctx(struct browser *b, cairo_t *cr, int w, int h) {
+	static const char *grey_rows[] = { "#.", ".#" };
+	cairo_pattern_t *grey = dither(grey_rows, 2, 2, true);
+	black(cr);
+	fill(cr, 0, 0, w, 1);
+	fill(cr, 0, h - 1, w, 1);
+	fill(cr, 0, 0, 1, h);
+	fill(cr, w - 1, 0, 1, h);
+	for (guint i = 0; i < b->ctx_items->len; i++) {
+		struct ctx_item *item = &g_array_index(b->ctx_items, struct ctx_item, i);
+		int y = 1 + i * ROW_H;
+		if (item->action == CTX_SEPARATOR) {
+			/* GEM's dotted rule. */
+			cairo_save(cr);
+			cairo_rectangle(cr, 1, y + ROW_H / 2, w - 2, 1);
+			cairo_clip(cr);
+			black(cr);
+			cairo_mask(cr, grey);
+			cairo_restore(cr);
+			continue;
+		}
+		bool hover = item->enabled && (int)i == b->ctx_hover;
+		if (hover) {
+			black(cr);
+			fill(cr, 1, y, w - 2, ROW_H);
+		}
+		cairo_push_group(cr);
+		hover ? white(cr) : black(cr);
+		text(cr, item->label, CTX_PAD, y, ROW_H);
+		if (item->checked) {
+			cairo_set_line_width(cr, 2);
+			cairo_move_to(cr, 4, y + ROW_H / 2.0);
+			cairo_line_to(cr, 7, y + ROW_H / 2.0 + 3);
+			cairo_line_to(cr, 12, y + ROW_H / 2.0 - 4);
+			cairo_stroke(cr);
+		}
+		cairo_pop_group_to_source(cr);
+		if (item->enabled) {
+			cairo_paint(cr);
+		} else {
+			cairo_mask(cr, grey);
+		}
+	}
+	cairo_pattern_destroy(grey);
+}
+
+static void draw_ctx(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	paint_pixelated(cr, w, h, paint_ctx, data);
+}
+
+/* Opens at the pointer, kept inside the window: upward if there's no room
+ * below. */
+static void ctx_show(struct browser *b) {
+	double w = 0;
+	for (guint i = 0; i < b->ctx_items->len; i++) {
+		struct ctx_item *item = &g_array_index(b->ctx_items, struct ctx_item, i);
+		if (item->label != NULL) {
+			w = MAX(w, measure(item->label));
+		}
+	}
+	int mw = (int)w + CTX_PAD + 2 * PAD, mh = b->ctx_items->len * ROW_H + 2;
+	int ow = gtk_widget_get_width(b->overlay);
+	int oh = gtk_widget_get_height(b->overlay);
+	int x = (int)b->pointer_x, y = (int)b->pointer_y;
+	x = MAX(0, MIN(x, ow - mw));
+	y = y + mh <= oh ? y : MAX(0, y - mh);
+	gtk_widget_set_margin_start(b->ctx, x);
+	gtk_widget_set_margin_top(b->ctx, y);
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(b->ctx), mw);
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(b->ctx), mh);
+	b->ctx_hover = -1;
+	gtk_widget_set_visible(b->ctx, TRUE);
+	gtk_widget_queue_draw(b->ctx);
+}
+
+static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
+		WebKitHitTestResult *hit, struct tab *t) {
+	struct browser *b = t->browser;
+	if (dialog_up(b)) {
+		return TRUE;
+	}
+	g_array_set_size(b->ctx_items, 0);
+	set_status(&b->ctx_link, webkit_hit_test_result_context_is_link(hit) ?
+		g_strdup(webkit_hit_test_result_get_link_uri(hit)) : NULL);
+	set_status(&b->ctx_image, webkit_hit_test_result_context_is_image(hit) ?
+		g_strdup(webkit_hit_test_result_get_image_uri(hit)) : NULL);
+	set_status(&b->ctx_media, webkit_hit_test_result_context_is_media(hit) ?
+		g_strdup(webkit_hit_test_result_get_media_uri(hit)) : NULL);
+	bool editable = webkit_hit_test_result_context_is_editable(hit);
+	bool selection = webkit_hit_test_result_context_is_selection(hit);
+
+	if (b->ctx_link != NULL) {
+		ctx_add(b, CTX_OPEN_LINK_TAB, b->app ? "Open Link in Browser" :
+			"Open Link in New Tab", true);
+		ctx_add(b, CTX_OPEN_LINK_WINDOW, "Open Link in New Window", true);
+		ctx_add(b, CTX_COPY_LINK, "Copy Link Address", true);
+		ctx_add(b, CTX_DOWNLOAD_LINK, "Download Link", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	}
+	if (b->ctx_image != NULL) {
+		ctx_add(b, CTX_OPEN_IMAGE, "Open Image in New Tab", true);
+		ctx_add(b, CTX_SAVE_IMAGE, "Save Image", true);
+		ctx_add(b, CTX_COPY_IMAGE, "Copy Image Address", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	}
+	if (b->ctx_media != NULL) {
+		ctx_add(b, CTX_OPEN_MEDIA, "Open Video in New Tab", true);
+		ctx_add(b, CTX_COPY_MEDIA, "Copy Video Address", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	}
+	if (editable) {
+		ctx_add(b, CTX_UNDO, "Undo", true);
+		ctx_add(b, CTX_REDO, "Redo", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+		ctx_add(b, CTX_CUT, "Cut", true);
+		ctx_add(b, CTX_COPY, "Copy", true);
+		ctx_add(b, CTX_PASTE, "Paste", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+		ctx_add(b, CTX_SELECT_ALL, "Select All", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	} else if (selection) {
+		ctx_add(b, CTX_COPY, "Copy", true);
+		ctx_add(b, CTX_SEARCH, "Search the Web for It", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	}
+	if (b->ctx_items->len == 0) {
+		ctx_add(b, CTX_BACK, "Back", webkit_web_view_can_go_back(view));
+		ctx_add(b, CTX_FORWARD, "Forward", webkit_web_view_can_go_forward(view));
+		ctx_add(b, CTX_RELOAD, "Reload", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+		ctx_add(b, CTX_READER, "Reader View", t->reading || can_read(t));
+		g_array_index(b->ctx_items, struct ctx_item, b->ctx_items->len - 1)
+			.checked = t->reading;
+		ctx_add(b, CTX_PRINT, "Print...", true);
+		ctx_add(b, CTX_SEPARATOR, NULL, false);
+	}
+	ctx_add(b, CTX_INSPECT, "Inspect Page", true);
+	ctx_show(b);
+	return TRUE; /* not WebKit's */
+}
+
+/* A link opened elsewhere: a new tab behind this one, or from an app, the
+ * browser. */
+static void open_link(struct browser *b, const char *uri) {
+	if (b->app) {
+		open_in_browser(uri);
+	} else {
+		tab_new(b, NULL, uri, false);
+	}
+}
+
+static void ctx_copy(struct browser *b, const char *text) {
+	gdk_clipboard_set_text(gtk_widget_get_clipboard(b->window), text);
+}
+
+static void searched(GObject *source, GAsyncResult *result, gpointer data) {
+	WebKitWebView *view = WEBKIT_WEB_VIEW(source);
+	struct tab *t = g_object_get_data(G_OBJECT(view), "tab");
+	JSCValue *v = webkit_web_view_evaluate_javascript_finish(view, result, NULL);
+	if (t != NULL && v != NULL && jsc_value_is_string(v)) {
+		char *text = jsc_value_to_string(v);
+		char *engine = search_engine();
+		char *q = g_uri_escape_string(g_strstrip(text), NULL, TRUE);
+		const char *at = strstr(engine, "%s");
+		char *uri = g_strdup_printf("%.*s%s%s", (int)(at - engine), engine,
+			q, at + 2);
+		if (text[0] != '\0') {
+			open_link(t->browser, uri);
+		}
+		g_free(uri);
+		g_free(q);
+		g_free(engine);
+		g_free(text);
+	}
+	g_clear_object(&v);
+}
+
+static void ctx_run(struct browser *b, int index) {
+	struct tab *t = active_tab(b);
+	if (t == NULL || index < 0 || index >= (int)b->ctx_items->len) {
+		return;
+	}
+	struct ctx_item *item = &g_array_index(b->ctx_items, struct ctx_item, index);
+	if (!item->enabled) {
+		return;
+	}
+	enum ctx action = item->action;
+	ctx_hide(b);
+	gtk_widget_grab_focus(GTK_WIDGET(t->view));
+	WebKitWebView *view = t->view;
+	switch (action) {
+	case CTX_OPEN_LINK_TAB:
+		open_link(b, b->ctx_link);
+		break;
+	case CTX_OPEN_LINK_WINDOW: {
+		struct browser *nb = browser_new(shared.app);
+		tab_new(nb, NULL, b->ctx_link, true);
+		gtk_window_present(GTK_WINDOW(nb->window));
+		break;
+	}
+	case CTX_COPY_LINK:
+		ctx_copy(b, b->ctx_link);
+		break;
+	case CTX_DOWNLOAD_LINK:
+		webkit_web_view_download_uri(view, b->ctx_link);
+		break;
+	case CTX_OPEN_IMAGE:
+		open_link(b, b->ctx_image);
+		break;
+	case CTX_SAVE_IMAGE:
+		webkit_web_view_download_uri(view, b->ctx_image);
+		break;
+	case CTX_COPY_IMAGE:
+		ctx_copy(b, b->ctx_image);
+		break;
+	case CTX_OPEN_MEDIA:
+		open_link(b, b->ctx_media);
+		break;
+	case CTX_COPY_MEDIA:
+		ctx_copy(b, b->ctx_media);
+		break;
+	case CTX_UNDO:
+		webkit_web_view_execute_editing_command(view, WEBKIT_EDITING_COMMAND_UNDO);
+		break;
+	case CTX_REDO:
+		webkit_web_view_execute_editing_command(view, WEBKIT_EDITING_COMMAND_REDO);
+		break;
+	case CTX_CUT:
+		webkit_web_view_execute_editing_command(view, WEBKIT_EDITING_COMMAND_CUT);
+		break;
+	case CTX_COPY:
+		webkit_web_view_execute_editing_command(view, WEBKIT_EDITING_COMMAND_COPY);
+		break;
+	case CTX_PASTE:
+		webkit_web_view_execute_editing_command(view,
+			WEBKIT_EDITING_COMMAND_PASTE);
+		break;
+	case CTX_SELECT_ALL:
+		webkit_web_view_execute_editing_command(view,
+			WEBKIT_EDITING_COMMAND_SELECT_ALL);
+		break;
+	case CTX_SEARCH:
+		webkit_web_view_evaluate_javascript(view,
+			"window.getSelection().toString()", -1, PASSWORD_WORLD, NULL, NULL,
+			searched, NULL);
+		break;
+	case CTX_BACK:
+		webkit_web_view_go_back(view);
+		break;
+	case CTX_FORWARD:
+		webkit_web_view_go_forward(view);
+		break;
+	case CTX_RELOAD:
+		webkit_web_view_reload(view);
+		break;
+	case CTX_READER:
+		reader_toggle(b);
+		break;
+	case CTX_PRINT:
+		print_page(b);
+		break;
+	case CTX_INSPECT:
+		webkit_web_inspector_show(webkit_web_view_get_inspector(view));
+		break;
+	case CTX_SEPARATOR:
+		break;
+	}
+}
+
+static int ctx_row(struct browser *b, double y) {
+	int row = ((int)y - 1) / ROW_H;
+	return y >= 1 && row < (int)b->ctx_items->len ? row : -1;
+}
+
+static void ctx_motion(GtkEventControllerMotion *motion, double x, double y,
+		struct browser *b) {
+	int row = ctx_row(b, y);
+	if (row != b->ctx_hover) {
+		b->ctx_hover = row;
+		gtk_widget_queue_draw(b->ctx);
+	}
+}
+
+static void ctx_pressed(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	ctx_run(b, ctx_row(b, y));
+}
+
+/* Up and Down go through the items that can be chosen, Return chooses,
+ * Escape closes. */
+static gboolean ctx_key(GtkEventControllerKey *ctrl, guint keyval,
+		guint keycode, GdkModifierType state, struct browser *b) {
+	int n = b->ctx_items->len;
+	if (keyval == GDK_KEY_Escape) {
+		ctx_hide(b);
+		return TRUE;
+	}
+	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+		ctx_run(b, b->ctx_hover);
+		return TRUE;
+	}
+	if (keyval != GDK_KEY_Up && keyval != GDK_KEY_Down) {
+		return FALSE;
+	}
+	int step = keyval == GDK_KEY_Down ? 1 : -1;
+	int i = b->ctx_hover < 0 ? (step > 0 ? -1 : n) : b->ctx_hover;
+	for (int tries = 0; tries < n; tries++) {
+		i = (i + step + n) % n;
+		struct ctx_item *item = &g_array_index(b->ctx_items, struct ctx_item, i);
+		if (item->action != CTX_SEPARATOR && item->enabled) {
+			b->ctx_hover = i;
+			break;
+		}
+	}
+	gtk_widget_queue_draw(b->ctx);
+	return TRUE;
+}
+
+/* A click anywhere else closes it (and goes on to what it was on). The
+ * page keeps the keyboard focus, so it can't close on losing that. */
+static void ctx_click_away(GtkGestureClick *gesture, int n_press, double x,
+		double y, struct browser *b) {
+	graphene_rect_t r;
+	if (gtk_widget_get_visible(b->ctx) &&
+			gtk_widget_compute_bounds(b->ctx, b->overlay, &r) &&
+			!graphene_rect_contains_point(&r, &GRAPHENE_POINT_INIT(x, y))) {
+		ctx_hide(b);
+	}
+}
+
+/* While it's open, the window's keys are its: any but its own close it. */
+static gboolean ctx_window_key(GtkEventControllerKey *ctrl, guint keyval,
+		guint keycode, GdkModifierType state, struct browser *b) {
+	if (!gtk_widget_get_visible(b->ctx)) {
+		return FALSE;
+	}
+	if (ctx_key(ctrl, keyval, keycode, state, b)) {
+		return TRUE;
+	}
+	ctx_hide(b);
+	return FALSE;
+}
+
+/* Where the pointer is, for where the menu opens. */
+static void pointer_moved(GtkEventControllerMotion *motion, double x,
+		double y, struct browser *b) {
+	b->pointer_x = x;
+	b->pointer_y = y;
+}
+
+static GtkWidget *ctx_new(struct browser *b) {
+	b->ctx_items = g_array_new(FALSE, TRUE, sizeof(struct ctx_item));
+	GtkWidget *ctx = pixel_area(b, 0, draw_ctx, G_CALLBACK(ctx_pressed));
+	gtk_widget_set_halign(ctx, GTK_ALIGN_START);
+	gtk_widget_set_valign(ctx, GTK_ALIGN_START);
+	gtk_widget_set_visible(ctx, FALSE);
+	GtkEventController *motion = gtk_event_controller_motion_new();
+	g_signal_connect(motion, "motion", G_CALLBACK(ctx_motion), b);
+	gtk_widget_add_controller(ctx, motion);
+	return ctx;
+}
+
 /* ---- Fullscreen ----------------------------------------------------------- */
 
 /* A page going fullscreen (a video, say) gets the whole window, which
@@ -3237,6 +3824,13 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	g_free(b->login_host);
 	g_free(b->notice);
 	g_free(b->dialog_error);
+	/* A page still waiting for an answer gets "no". */
+	script_answer(b, false);
+	g_ptr_array_unref(b->dialog_lines);
+	g_array_unref(b->ctx_items);
+	g_free(b->ctx_link);
+	g_free(b->ctx_image);
+	g_free(b->ctx_media);
 	g_free(b->app_uri);
 	g_free(b->app_name);
 	g_ptr_array_free(b->tabs, TRUE);
@@ -3405,7 +3999,12 @@ static struct browser *browser_new(GtkApplication *app) {
 
 	/* Over it all: the address field's list, and the alert. */
 	GtkWidget *overlay = gtk_overlay_new();
+	b->overlay = overlay;
 	gtk_overlay_set_child(GTK_OVERLAY(overlay), box);
+	GtkEventController *pointer = gtk_event_controller_motion_new();
+	gtk_event_controller_set_propagation_phase(pointer, GTK_PHASE_CAPTURE);
+	g_signal_connect(pointer, "motion", G_CALLBACK(pointer_moved), b);
+	gtk_widget_add_controller(overlay, pointer);
 	b->list = pixel_area(b, 0, draw_list, G_CALLBACK(list_pressed));
 	gtk_widget_set_valign(b->list, GTK_ALIGN_START);
 	gtk_widget_set_visible(b->list, FALSE);
@@ -3428,12 +4027,25 @@ static struct browser *browser_new(GtkApplication *app) {
 	g_signal_connect(logins_focus, "leave", G_CALLBACK(logins_focus_left), b);
 	gtk_widget_add_controller(b->logins_list, logins_focus);
 	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->logins_list);
+	b->ctx = ctx_new(b);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), b->ctx);
+	GtkGesture *away = gtk_gesture_click_new();
+	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(away), 0);
+	gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(away),
+		GTK_PHASE_CAPTURE);
+	g_signal_connect(away, "pressed", G_CALLBACK(ctx_click_away), b);
+	gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(away));
+	GtkEventController *ctx_keys = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(ctx_keys, GTK_PHASE_CAPTURE);
+	g_signal_connect(ctx_keys, "key-pressed", G_CALLBACK(ctx_window_key), b);
+	gtk_widget_add_controller(b->window, ctx_keys);
 
 	/* The dialog: its drawing, with a password field laid over it. */
+	b->dialog_lines = g_ptr_array_new_with_free_func(g_free);
 	b->dialog_box = gtk_overlay_new();
 	b->dialog_area = pixel_area(b, 0, draw_dialog, G_CALLBACK(dialog_pressed));
 	gtk_overlay_set_child(GTK_OVERLAY(b->dialog_box), b->dialog_area);
-	b->dialog_field = gtk_password_entry_new();
+	b->dialog_field = gtk_entry_new();
 	gtk_widget_add_css_class(b->dialog_field, "gem-field");
 	gtk_widget_set_halign(b->dialog_field, GTK_ALIGN_START);
 	gtk_widget_set_valign(b->dialog_field, GTK_ALIGN_START);

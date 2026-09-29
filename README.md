@@ -610,6 +610,14 @@ pages), Shift+Delete forgets the chosen page, and Escape closes the list.
 History is kept in `~/.local/share/gemweb/history.sqlite`, to the top 5,000
 pages; Go > Clear History... empties it.
 
+Right-clicking opens a GEM menu for what's under the pointer: a link (open
+it in a new tab or window, copy its address, download it), an image or a
+video, a text field (undo, cut, copy, paste, select all), selected text
+(copy it, or search the web for it), or the page (back, forward, reload,
+Reader View, print); Inspect Page opens WebKit's inspector. A page's own
+`alert()`, `confirm()` and `prompt()`, and "Leave this page?", come up as
+GEM alert boxes naming the site that asks.
+
 File > Print... (Ctrl+P) prints the page with GemWM's print dialog (see
 [Printing](#printing)), to a printer or a PDF in Documents; in Reader View
 it prints just the article.
