@@ -651,7 +651,20 @@ Archive (A) moves a message to the folder the server flags as the archive
 (`\Archive`, or Gmail's All Mail), else one called Archive, which is made
 the first time it's needed; Delete moves it to Trash (and out of Trash,
 deletes it for good). Either way, reading, the next message opens.
+In the list, Shift-click (or Shift+Up/Down) selects a run of messages,
+Ctrl-click adds or removes one, and Ctrl+A selects them all; Archive,
+Delete and Mark as Read (^U: read, or unread if they all are) then act on
+all of them at once. To put messages in another folder, drag them onto it
+in the folder list, or choose **Move to Folder...** (M) and pick it from
+the dialog's pop-up.
 It checks for new mail every three minutes, or on F5.
+
+Mail is kept in `~/.cache/gemmail`: each folder's newest 1000 messages
+are listed, and the newest 100 of the folder you're in are fetched ahead,
+so GemMail opens showing your mail as it was left, then asks the server
+only what's changed (new mail, what's gone, what's been read elsewhere:
+CONDSTORE, where the server has it). Without a connection, what's cached
+still reads. Deleting the folder only makes the next start slower.
 
 An HTML message runs no scripts and loads nothing from the web (no
 tracking pixels) until you press **Show Images**; its links open in the

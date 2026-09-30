@@ -3,6 +3,7 @@
  */
 #include <gmime/gmime.h>
 #include <string.h>
+#include "cache.h"
 #include "imap.h"
 #include "net.h"
 
@@ -14,6 +15,8 @@ struct mail {
 	GAsyncQueue *jobs;
 	mailimap *imap;     /* NULL until connected */
 	char *selected;     /* the mailbox selected, if any */
+	struct cache *cache; /* the thread's own */
+	guint64 queued;     /* jobs so far: the queue's order, within priority */
 
 	/* The password, once known (a secret); asked for through the main
 	 * thread when the command gives none, or it's wrong. */
@@ -26,7 +29,13 @@ struct mail {
 	void *ask_data;
 };
 
+/* What goes first: what someone's waiting on, before fetching ahead. */
+enum { PRIORITY_NOW, PRIORITY_LATER };
+
 struct job {
+	int priority;
+	guint64 order;
+	bool again; /* more to do: back in the queue, not finished */
 	void (*run)(struct mail *m, struct job *j);
 	GSourceFunc finish; /* on the main thread, given the job */
 	char *mailbox, *other;
@@ -37,6 +46,7 @@ struct job {
 	char *from;
 	char **recipients;
 	GPtrArray *list;
+	GArray *uids;
 	char *error;
 	GCallback done;
 	void *data;
@@ -400,6 +410,7 @@ static int run_list_folders(struct mail *m, struct job *j) {
 		}
 	}
 	mailimap_list_result_free(list);
+	cache_set_folders(m->cache, j->list);
 	return MAILIMAP_NO_ERROR;
 }
 
@@ -472,100 +483,266 @@ static void read_flags(struct summary *s, struct mailimap_msg_att_dynamic *dyn) 
 	}
 }
 
-/* By date, newest first; messages with the same date (or none), the
- * last to arrive first. */
-static gint newest_first(gconstpointer a, gconstpointer b) {
-	const struct summary *x = *(struct summary *const *)a;
-	const struct summary *y = *(struct summary *const *)b;
-	if (x->date != y->date) {
-		return x->date < y->date ? 1 : -1;
+/* A fetched message's summary: whatever of it was asked for. */
+static struct summary *read_summary(struct mailimap_msg_att *att) {
+	struct summary *s = g_new0(struct summary, 1);
+	for (clistiter *i = clist_begin(att->att_list); i != NULL;
+			i = clist_next(i)) {
+		struct mailimap_msg_att_item *item = clist_content(i);
+		if (item->att_type == MAILIMAP_MSG_ATT_ITEM_DYNAMIC) {
+			read_flags(s, item->att_data.att_dyn);
+			continue;
+		}
+		if (item->att_type != MAILIMAP_MSG_ATT_ITEM_STATIC) {
+			continue;
+		}
+		struct mailimap_msg_att_static *st = item->att_data.att_static;
+		if (st->att_type == MAILIMAP_MSG_ATT_UID) {
+			s->uid = st->att_data.att_uid;
+		} else if (st->att_type == MAILIMAP_MSG_ATT_RFC822_SIZE) {
+			s->size = st->att_data.att_rfc822_size;
+		} else if (st->att_type == MAILIMAP_MSG_ATT_BODY_SECTION &&
+				st->att_data.att_body_section != NULL &&
+				st->att_data.att_body_section->sec_body_part != NULL) {
+			parse_headers(s, st->att_data.att_body_section->sec_body_part,
+				st->att_data.att_body_section->sec_length);
+		}
 	}
-	return x->uid < y->uid ? 1 : x->uid > y->uid ? -1 : 0;
+	return s;
 }
 
+/* The UIDs as few ranges as they'll go (sorted, lowest first). */
+static struct mailimap_set *uid_set(const guint32 *uids, guint n) {
+	struct mailimap_set *set = mailimap_set_new_empty();
+	for (guint i = 0; i < n;) {
+		guint k = i;
+		while (k + 1 < n && uids[k + 1] == uids[k] + 1) {
+			k++;
+		}
+		mailimap_set_add_interval(set, uids[i], uids[k]);
+		i = k + 1;
+	}
+	return set;
+}
+
+static int compare_uids(gconstpointer a, gconstpointer b) {
+	guint32 x = *(const guint32 *)a, y = *(const guint32 *)b;
+	return x < y ? -1 : x > y;
+}
+
+static bool has_uid(GArray *sorted, guint32 uid) {
+	return bsearch(&uid, sorted->data, sorted->len, sizeof(guint32),
+		compare_uids) != NULL;
+}
+
+/* Summaries of the messages given, into the cache: a hundred at a time,
+ * so a big first sync isn't one huge answer. */
+static int fetch_summaries(struct mail *m, const char *mailbox, GArray *uids) {
+	for (guint at = 0; at < uids->len; at += 100) {
+		guint n = MIN(100, uids->len - at);
+		struct mailimap_set *set = uid_set(&g_array_index(uids, guint32, at), n);
+		struct mailimap_fetch_type *type =
+			mailimap_fetch_type_new_fetch_att_list_empty();
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_uid());
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_flags());
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_rfc822_size());
+		clist *fields = clist_new();
+		clist_append(fields, strdup("From"));
+		clist_append(fields, strdup("Subject"));
+		clist_append(fields, strdup("Date"));
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_body_peek_section(
+				mailimap_section_new_header_fields(
+				mailimap_header_list_new(fields))));
+		clist *result = NULL;
+		int r = mailimap_uid_fetch(m->imap, set, type, &result);
+		mailimap_fetch_type_free(type);
+		mailimap_set_free(set);
+		if (r != MAILIMAP_NO_ERROR) {
+			return r;
+		}
+		cache_begin(m->cache);
+		for (clistiter *c = clist_begin(result); c != NULL; c = clist_next(c)) {
+			struct summary *s = read_summary(clist_content(c));
+			if (s->from == NULL) {
+				parse_headers(s, "", 0);
+			}
+			if (s->uid != 0) {
+				cache_put(m->cache, mailbox, s);
+			}
+			g_free(s->from);
+			g_free(s->subject);
+			g_free(s);
+		}
+		cache_commit(m->cache);
+		mailimap_fetch_list_free(result);
+	}
+	return MAILIMAP_NO_ERROR;
+}
+
+/* The flags of the messages from first on (only those changed since
+ * modseq, if the server keeps track), into the cache. */
+static int fetch_flags(struct mail *m, const char *mailbox, guint32 first,
+		guint64 modseq) {
+	struct mailimap_set *set = mailimap_set_new_interval(first, 0);
+	struct mailimap_fetch_type *type =
+		mailimap_fetch_type_new_fetch_att_list_empty();
+	mailimap_fetch_type_new_fetch_att_list_add(type, mailimap_fetch_att_new_uid());
+	mailimap_fetch_type_new_fetch_att_list_add(type,
+		mailimap_fetch_att_new_flags());
+	clist *result = NULL;
+	int r = modseq != 0 ?
+		mailimap_uid_fetch_changedsince(m->imap, set, type, modseq, &result) :
+		mailimap_uid_fetch(m->imap, set, type, &result);
+	mailimap_fetch_type_free(type);
+	mailimap_set_free(set);
+	if (r != MAILIMAP_NO_ERROR) {
+		return r;
+	}
+	cache_begin(m->cache);
+	for (clistiter *c = clist_begin(result); c != NULL; c = clist_next(c)) {
+		struct summary *s = read_summary(clist_content(c));
+		cache_set_flags(m->cache, mailbox, s->uid, s->seen, s->answered,
+			s->flagged);
+		g_free(s);
+	}
+	cache_commit(m->cache);
+	mailimap_fetch_list_free(result);
+	return MAILIMAP_NO_ERROR;
+}
+
+/* Brings the cache of a folder up to the server: its newest limit
+ * messages, asking only what's changed since last time. Then the list is
+ * the cache's. */
 static int run_list_messages(struct mail *m, struct job *j) {
 	/* Selected afresh, for the latest count. */
 	g_clear_pointer(&m->selected, g_free);
-	int r = select_mailbox(m, j->mailbox);
+	guint64 modseq = 0;
+	bool condstore = mailimap_has_condstore(m->imap);
+	int r = condstore ?
+		mailimap_select_condstore(m->imap, j->mailbox, &modseq) :
+		mailimap_select(m->imap, j->mailbox);
 	if (r != MAILIMAP_NO_ERROR) {
 		j->error = imap_error(m, "Couldn't open the folder", r);
 		return r;
 	}
-	j->list = g_ptr_array_new();
-	guint32 exists = m->imap->imap_selection_info != NULL ?
-		m->imap->imap_selection_info->sel_exists : 0;
-	if (exists == 0) {
-		return MAILIMAP_NO_ERROR;
+	m->selected = g_strdup(j->mailbox);
+	struct mailimap_selection_info *sel = m->imap->imap_selection_info;
+	struct folder_state now = {
+		.uidvalidity = sel != NULL ? sel->sel_uidvalidity : 0,
+		.uidnext = sel != NULL ? sel->sel_uidnext : 0,
+		.exists = sel != NULL ? sel->sel_exists : 0,
+		.modseq = modseq,
+	};
+	struct folder_state was;
+	bool known = cache_state(m->cache, j->mailbox, &was);
+	if (known && was.uidvalidity != now.uidvalidity) {
+		/* The folder was remade: every UID means something else now. */
+		cache_forget_folder(m->cache, j->mailbox);
+		known = false;
 	}
-	guint32 first = exists > j->limit ? exists - j->limit + 1 : 1;
-	struct mailimap_set *set = mailimap_set_new_interval(first, exists);
-	struct mailimap_fetch_type *type = mailimap_fetch_type_new_fetch_att_list_empty();
-	mailimap_fetch_type_new_fetch_att_list_add(type, mailimap_fetch_att_new_uid());
-	mailimap_fetch_type_new_fetch_att_list_add(type, mailimap_fetch_att_new_flags());
-	mailimap_fetch_type_new_fetch_att_list_add(type,
-		mailimap_fetch_att_new_rfc822_size());
-	clist *fields = clist_new();
-	clist_append(fields, strdup("From"));
-	clist_append(fields, strdup("Subject"));
-	clist_append(fields, strdup("Date"));
-	mailimap_fetch_type_new_fetch_att_list_add(type,
-		mailimap_fetch_att_new_body_peek_section(
-			mailimap_section_new_header_fields(mailimap_header_list_new(fields))));
-	clist *result = NULL;
-	r = mailimap_fetch(m->imap, set, type, &result);
-	mailimap_fetch_type_free(type);
-	mailimap_set_free(set);
+	/* Nothing's happened since: no new mail, none gone, no flag changed. */
+	if (known && now.modseq != 0 && now.modseq == was.modseq &&
+			now.uidnext == was.uidnext && now.exists == was.exists &&
+			now.uidnext != 0) {
+		goto done;
+	}
+	/* Which messages are the newest limit: their UIDs, from the last
+	 * limit by position. */
+	GArray *wanted = g_array_new(FALSE, FALSE, sizeof(guint32));
+	if (now.exists > 0) {
+		guint32 first = now.exists > j->limit ? now.exists - j->limit + 1 : 1;
+		struct mailimap_search_key *key = mailimap_search_key_new_set(
+			mailimap_set_new_interval(first, now.exists));
+		clist *found = NULL;
+		r = mailimap_uid_search(m->imap, NULL, key, &found);
+		mailimap_search_key_free(key);
+		if (r != MAILIMAP_NO_ERROR) {
+			g_array_free(wanted, TRUE);
+			j->error = imap_error(m, "Couldn't read the folder", r);
+			return r;
+		}
+		for (clistiter *c = clist_begin(found); c != NULL; c = clist_next(c)) {
+			g_array_append_val(wanted, *(guint32 *)clist_content(c));
+		}
+		mailimap_search_result_free(found);
+		g_array_sort(wanted, compare_uids);
+	}
+	/* Gone from the server, or too old to keep: out of the cache. */
+	GArray *cached = cache_uids(m->cache, j->mailbox);
+	cache_begin(m->cache);
+	for (guint i = 0; i < cached->len; i++) {
+		guint32 uid = g_array_index(cached, guint32, i);
+		if (!has_uid(wanted, uid)) {
+			cache_remove(m->cache, j->mailbox, uid);
+		}
+	}
+	cache_commit(m->cache);
+	/* The ones already had: their flags, as they are now. */
+	if (known && cached->len > 0 && wanted->len > 0) {
+		r = fetch_flags(m, j->mailbox, g_array_index(wanted, guint32, 0),
+			was.modseq != 0 && condstore ? was.modseq : 0);
+	}
+	/* The ones not had yet. */
+	GArray *missing = g_array_new(FALSE, FALSE, sizeof(guint32));
+	for (guint i = 0; i < wanted->len; i++) {
+		guint32 uid = g_array_index(wanted, guint32, i);
+		if (!has_uid(cached, uid)) {
+			g_array_append_val(missing, uid);
+		}
+	}
+	if (r == MAILIMAP_NO_ERROR) {
+		r = fetch_summaries(m, j->mailbox, missing);
+	}
+	g_array_free(missing, TRUE);
+	g_array_free(cached, TRUE);
+	g_array_free(wanted, TRUE);
 	if (r != MAILIMAP_NO_ERROR) {
 		j->error = imap_error(m, "Couldn't read the folder", r);
 		return r;
 	}
-	for (clistiter *c = clist_begin(result); c != NULL; c = clist_next(c)) {
-		struct mailimap_msg_att *att = clist_content(c);
-		struct summary *s = g_new0(struct summary, 1);
-		for (clistiter *i = clist_begin(att->att_list); i != NULL;
-				i = clist_next(i)) {
-			struct mailimap_msg_att_item *item = clist_content(i);
-			if (item->att_type == MAILIMAP_MSG_ATT_ITEM_DYNAMIC) {
-				read_flags(s, item->att_data.att_dyn);
-				continue;
-			}
-			if (item->att_type != MAILIMAP_MSG_ATT_ITEM_STATIC) {
-				continue;
-			}
-			struct mailimap_msg_att_static *st = item->att_data.att_static;
-			if (st->att_type == MAILIMAP_MSG_ATT_UID) {
-				s->uid = st->att_data.att_uid;
-			} else if (st->att_type == MAILIMAP_MSG_ATT_RFC822_SIZE) {
-				s->size = st->att_data.att_rfc822_size;
-			} else if (st->att_type == MAILIMAP_MSG_ATT_BODY_SECTION &&
-					st->att_data.att_body_section != NULL &&
-					st->att_data.att_body_section->sec_body_part != NULL) {
-				parse_headers(s, st->att_data.att_body_section->sec_body_part,
-					st->att_data.att_body_section->sec_length);
-			}
-		}
-		if (s->from == NULL) {
-			parse_headers(s, "", 0);
-		}
-		g_ptr_array_add(j->list, s);
-	}
-	mailimap_fetch_list_free(result);
-	g_ptr_array_sort(j->list, newest_first);
+done:
+	cache_set_state(m->cache, j->mailbox, &now);
+	j->list = cache_messages(m->cache, j->mailbox, j->limit);
 	return MAILIMAP_NO_ERROR;
 }
 
-static int store_flag(struct mail *m, guint32 uid, struct mailimap_flag *flag,
-		bool add) {
+static int store_flag(struct mail *m, struct mailimap_set *set,
+		struct mailimap_flag *flag, bool add) {
 	struct mailimap_flag_list *flags = mailimap_flag_list_new_empty();
 	mailimap_flag_list_add(flags, flag);
 	struct mailimap_store_att_flags *store = add ?
 		mailimap_store_att_flags_new_add_flags_silent(flags) :
 		mailimap_store_att_flags_new_remove_flags_silent(flags);
-	struct mailimap_set *set = mailimap_set_new_single(uid);
 	int r = mailimap_uid_store(m->imap, set, store);
-	mailimap_set_free(set);
 	mailimap_store_att_flags_free(store);
 	return r;
+}
+
+/* A fetched message's whole text, and its UID. */
+static GBytes *read_body(struct mailimap_msg_att *att, guint32 *uid) {
+	GBytes *bytes = NULL;
+	for (clistiter *i = clist_begin(att->att_list); i != NULL;
+			i = clist_next(i)) {
+		struct mailimap_msg_att_item *item = clist_content(i);
+		if (item->att_type != MAILIMAP_MSG_ATT_ITEM_STATIC) {
+			continue;
+		}
+		struct mailimap_msg_att_static *st = item->att_data.att_static;
+		if (st->att_type == MAILIMAP_MSG_ATT_UID) {
+			*uid = st->att_data.att_uid;
+		} else if (st->att_type == MAILIMAP_MSG_ATT_BODY_SECTION &&
+				st->att_data.att_body_section != NULL &&
+				st->att_data.att_body_section->sec_body_part != NULL &&
+				bytes == NULL) {
+			bytes = g_bytes_new(st->att_data.att_body_section->sec_body_part,
+				st->att_data.att_body_section->sec_length);
+		}
+	}
+	return bytes;
 }
 
 static int run_fetch(struct mail *m, struct job *j) {
@@ -588,39 +765,91 @@ static int run_fetch(struct mail *m, struct job *j) {
 	}
 	for (clistiter *c = clist_begin(result); c != NULL && j->bytes == NULL;
 			c = clist_next(c)) {
-		struct mailimap_msg_att *att = clist_content(c);
-		for (clistiter *i = clist_begin(att->att_list); i != NULL;
-				i = clist_next(i)) {
-			struct mailimap_msg_att_item *item = clist_content(i);
-			if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC &&
-					item->att_data.att_static->att_type ==
-					MAILIMAP_MSG_ATT_BODY_SECTION) {
-				struct mailimap_msg_att_body_section *sec =
-					item->att_data.att_static->att_data.att_body_section;
-				if (sec != NULL && sec->sec_body_part != NULL) {
-					j->bytes = g_bytes_new(sec->sec_body_part, sec->sec_length);
-				}
-			}
-		}
+		guint32 uid;
+		j->bytes = read_body(clist_content(c), &uid);
 	}
 	mailimap_fetch_list_free(result);
 	if (j->bytes == NULL) {
 		j->error = g_strdup("That message is gone");
 		return MAILIMAP_NO_ERROR;
 	}
+	cache_set_body(m->cache, j->mailbox, j->uid, j->bytes);
 	if (j->flag) {
-		store_flag(m, j->uid, mailimap_flag_new_seen(), true);
+		struct mailimap_set *one = mailimap_set_new_single(j->uid);
+		if (store_flag(m, one, mailimap_flag_new_seen(), true) ==
+				MAILIMAP_NO_ERROR) {
+			cache_set_seen(m->cache, j->mailbox, j->uid, true);
+		}
+		mailimap_set_free(one);
 	}
 	return MAILIMAP_NO_ERROR;
+}
+
+/* Fetches ahead: the next few messages not yet had, into the cache; the
+ * rest, after whatever else is waiting. */
+static int run_prefetch(struct mail *m, struct job *j) {
+	GArray *some = g_array_new(FALSE, FALSE, sizeof(guint32));
+	while (j->uids->len > 0 && some->len < 10) {
+		guint32 uid = g_array_index(j->uids, guint32, 0);
+		g_array_remove_index(j->uids, 0);
+		if (!cache_has_body(m->cache, j->mailbox, uid)) {
+			g_array_append_val(some, uid);
+		}
+	}
+	int r = MAILIMAP_NO_ERROR;
+	if (some->len > 0) {
+		r = select_mailbox(m, j->mailbox);
+	}
+	if (some->len > 0 && r == MAILIMAP_NO_ERROR) {
+		g_array_sort(some, compare_uids);
+		struct mailimap_set *set = uid_set((guint32 *)some->data, some->len);
+		struct mailimap_fetch_type *type =
+			mailimap_fetch_type_new_fetch_att_list_empty();
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_uid());
+		mailimap_fetch_type_new_fetch_att_list_add(type,
+			mailimap_fetch_att_new_body_peek_section(mailimap_section_new(NULL)));
+		clist *result = NULL;
+		r = mailimap_uid_fetch(m->imap, set, type, &result);
+		mailimap_fetch_type_free(type);
+		mailimap_set_free(set);
+		for (clistiter *c = r == MAILIMAP_NO_ERROR ? clist_begin(result) : NULL;
+				c != NULL; c = clist_next(c)) {
+			guint32 uid = 0;
+			GBytes *body = read_body(clist_content(c), &uid);
+			if (body != NULL && uid != 0) {
+				cache_set_body(m->cache, j->mailbox, uid, body);
+			}
+			g_clear_pointer(&body, g_bytes_unref);
+		}
+		if (r == MAILIMAP_NO_ERROR) {
+			mailimap_fetch_list_free(result);
+		}
+	}
+	g_array_free(some, TRUE);
+	j->again = r == MAILIMAP_NO_ERROR && j->uids->len > 0;
+	return r;
 }
 
 static int run_set_seen(struct mail *m, struct job *j) {
 	int r = select_mailbox(m, j->mailbox);
 	if (r == MAILIMAP_NO_ERROR) {
-		r = store_flag(m, j->uid, mailimap_flag_new_seen(), j->flag);
+		struct mailimap_set *set = uid_set((guint32 *)j->uids->data,
+			j->uids->len);
+		r = store_flag(m, set, mailimap_flag_new_seen(), j->flag);
+		mailimap_set_free(set);
+	}
+	if (r == MAILIMAP_NO_ERROR) {
+		cache_begin(m->cache);
+		for (guint i = 0; i < j->uids->len; i++) {
+			cache_set_seen(m->cache, j->mailbox,
+				g_array_index(j->uids, guint32, i), j->flag);
+		}
+		cache_commit(m->cache);
 	}
 	if (r != MAILIMAP_NO_ERROR) {
-		j->error = imap_error(m, "Couldn't mark the message", r);
+		j->error = imap_error(m, j->uids->len > 1 ?
+			"Couldn't mark the messages" : "Couldn't mark the message", r);
 	}
 	return r;
 }
@@ -637,29 +866,39 @@ static int run_move(struct mail *m, struct job *j) {
 		j->error = imap_error(m, "Couldn't open the folder", r);
 		return r;
 	}
-	struct mailimap_set *set = mailimap_set_new_single(j->uid);
+	struct mailimap_set *set = uid_set((guint32 *)j->uids->data, j->uids->len);
 	if (j->other != NULL && strcmp(j->other, j->mailbox) != 0) {
 		if (mailimap_has_extension(m->imap, (char *)"MOVE")) {
 			r = mailimap_uid_move(m->imap, set, j->other);
 		} else {
 			r = mailimap_uid_copy(m->imap, set, j->other);
 			if (r == MAILIMAP_NO_ERROR) {
-				r = store_flag(m, j->uid, mailimap_flag_new_deleted(), true);
+				r = store_flag(m, set, mailimap_flag_new_deleted(), true);
 			}
 			if (r == MAILIMAP_NO_ERROR) {
 				r = mailimap_expunge(m->imap);
 			}
 		}
 	} else {
-		r = store_flag(m, j->uid, mailimap_flag_new_deleted(), true);
+		r = store_flag(m, set, mailimap_flag_new_deleted(), true);
 		if (r == MAILIMAP_NO_ERROR) {
 			r = mailimap_expunge(m->imap);
 		}
 	}
 	mailimap_set_free(set);
+	if (r == MAILIMAP_NO_ERROR) {
+		cache_begin(m->cache);
+		for (guint i = 0; i < j->uids->len; i++) {
+			cache_remove(m->cache, j->mailbox, g_array_index(j->uids, guint32, i));
+		}
+		cache_commit(m->cache);
+	}
 	if (r != MAILIMAP_NO_ERROR) {
+		bool many = j->uids->len > 1;
 		j->error = imap_error(m, j->other != NULL ?
-			"Couldn't move the message" : "Couldn't delete the message", r);
+			(many ? "Couldn't move the messages" : "Couldn't move the message") :
+			(many ? "Couldn't delete the messages" :
+			"Couldn't delete the message"), r);
 	}
 	return r;
 }
@@ -797,12 +1036,34 @@ static void run_with(struct mail *m, struct job *j, job_fn fn) {
 	}
 }
 
+static gint job_order(gconstpointer a, gconstpointer b, gpointer data) {
+	const struct job *x = a, *y = b;
+	if (x->priority != y->priority) {
+		return x->priority - y->priority;
+	}
+	return x->order < y->order ? -1 : x->order > y->order;
+}
+
+/* Into the queue, behind the jobs as pressing, ahead of the rest. */
+static void queue(struct mail *m, struct job *j) {
+	g_async_queue_lock(m->jobs);
+	j->order = m->queued++;
+	g_async_queue_push_sorted_unlocked(m->jobs, j, job_order, NULL);
+	g_async_queue_unlock(m->jobs);
+}
+
 static gpointer thread_main(gpointer data) {
 	struct mail *m = data;
+	m->cache = cache_open();
 	for (;;) {
 		struct job *j = g_async_queue_pop(m->jobs);
 		j->run(m, j);
-		g_idle_add(j->finish, j);
+		if (j->again) {
+			j->again = false;
+			queue(m, j);
+		} else {
+			g_idle_add(j->finish, j);
+		}
 	}
 	return NULL;
 }
@@ -835,6 +1096,9 @@ static void job_free(struct job *j) {
 	g_free(j->other);
 	g_free(j->from);
 	g_strfreev(j->recipients);
+	if (j->uids != NULL) {
+		g_array_free(j->uids, TRUE);
+	}
 	g_clear_pointer(&j->bytes, g_bytes_unref);
 	g_free(j->error);
 	g_free(j);
@@ -854,8 +1118,8 @@ static gboolean finish_folders(struct job *j) {
 }
 
 void mail_list_folders(struct mail *m, mail_folders_fn done, void *data) {
-	g_async_queue_push(m->jobs, job_new(do_list_folders,
-		(GSourceFunc)finish_folders, G_CALLBACK(done), data));
+	queue(m, job_new(do_list_folders, (GSourceFunc)finish_folders,
+		G_CALLBACK(done), data));
 }
 
 static void do_list_messages(struct mail *m, struct job *j) {
@@ -875,7 +1139,7 @@ void mail_list_messages(struct mail *m, const char *mailbox, guint limit,
 		(GSourceFunc)finish_messages, G_CALLBACK(done), data);
 	j->mailbox = g_strdup(mailbox);
 	j->limit = limit;
-	g_async_queue_push(m->jobs, j);
+	queue(m, j);
 }
 
 static void do_fetch(struct mail *m, struct job *j) {
@@ -895,7 +1159,7 @@ void mail_fetch(struct mail *m, const char *mailbox, guint32 uid,
 	j->mailbox = g_strdup(mailbox);
 	j->uid = uid;
 	j->flag = mark_seen;
-	g_async_queue_push(m->jobs, j);
+	queue(m, j);
 }
 
 static gboolean finish_done(struct job *j) {
@@ -910,29 +1174,36 @@ static void do_set_seen(struct mail *m, struct job *j) {
 	run_with(m, j, run_set_seen);
 }
 
-void mail_set_seen(struct mail *m, const char *mailbox, guint32 uid,
-		bool seen, mail_done_fn done, void *data) {
+/* The messages a job's for, lowest first. */
+static void set_uids(struct job *j, const guint32 *uids, guint n) {
+	j->uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	g_array_append_vals(j->uids, uids, n);
+	g_array_sort(j->uids, compare_uids);
+}
+
+void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
+		guint n, bool seen, mail_done_fn done, void *data) {
 	struct job *j = job_new(do_set_seen, (GSourceFunc)finish_done,
 		G_CALLBACK(done), data);
 	j->mailbox = g_strdup(mailbox);
-	j->uid = uid;
+	set_uids(j, uids, n);
 	j->flag = seen;
-	g_async_queue_push(m->jobs, j);
+	queue(m, j);
 }
 
 static void do_move(struct mail *m, struct job *j) {
 	run_with(m, j, run_move);
 }
 
-void mail_move(struct mail *m, const char *mailbox, guint32 uid,
-		const char *to, bool create, mail_done_fn done, void *data) {
+void mail_move(struct mail *m, const char *mailbox, const guint32 *uids,
+		guint n, const char *to, bool create, mail_done_fn done, void *data) {
 	struct job *j = job_new(do_move, (GSourceFunc)finish_done,
 		G_CALLBACK(done), data);
 	j->mailbox = g_strdup(mailbox);
 	j->other = g_strdup(to);
-	j->uid = uid;
+	set_uids(j, uids, n);
 	j->flag = create;
-	g_async_queue_push(m->jobs, j);
+	queue(m, j);
 }
 
 static void do_send(struct mail *m, struct job *j) {
@@ -951,5 +1222,28 @@ void mail_send(struct mail *m, GBytes *message, const char *from,
 	j->from = g_strdup(from);
 	j->recipients = g_strdupv(recipients);
 	j->mailbox = g_strdup(sent);
-	g_async_queue_push(m->jobs, j);
+	queue(m, j);
+}
+
+static void do_prefetch(struct mail *m, struct job *j) {
+	run_with(m, j, run_prefetch);
+}
+
+static gboolean finish_prefetch(struct job *j) {
+	job_free(j);
+	return G_SOURCE_REMOVE;
+}
+
+void mail_prefetch(struct mail *m, const char *mailbox, const guint32 *uids,
+		guint n) {
+	if (n == 0) {
+		return;
+	}
+	struct job *j = job_new(do_prefetch, (GSourceFunc)finish_prefetch, NULL,
+		NULL);
+	j->priority = PRIORITY_LATER;
+	j->mailbox = g_strdup(mailbox);
+	j->uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	g_array_append_vals(j->uids, uids, n);
+	queue(m, j);
 }

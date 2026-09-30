@@ -20,6 +20,7 @@
 #include <webkit/webkit.h>
 #include "account.h"
 #include "app-menu.h"
+#include "cache.h"
 #include "gem-draw.h"
 #include "imap.h"
 #include "message.h"
@@ -32,13 +33,16 @@
 #define BUTTON_H 22
 #define INFO_H 20       /* the info line, with its rule */
 #define FIELD_H 24
-#define LIMIT 300       /* messages listed per folder */
+#define LIMIT 1000      /* messages listed (and kept) per folder */
+#define AHEAD 100       /* the newest fetched ahead, to read offline */
+#define AHEAD_SIZE (2 * 1024 * 1024) /* but none bigger */
 #define REFRESH 180     /* seconds between checks for new mail */
 
 enum action {
 	ACT_NONE, ACT_BACK, ACT_REPLY, ACT_REPLY_ALL, ACT_FORWARD, ACT_DELETE,
 	ACT_UNREAD, ACT_SHOW_IMAGES, ACT_ATTACHMENT, ACT_NEW, ACT_GET_MAIL,
-	ACT_ARCHIVE,
+	ACT_ARCHIVE, ACT_SELECT_ALL, ACT_MOVE, ACT_MOVE_POPUP, ACT_MOVE_OK,
+	ACT_MOVE_CANCEL,
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 };
@@ -61,11 +65,21 @@ static struct {
 	struct account *account;
 	char *account_error;
 	struct mail *mail;
+	struct cache *cache;
 
 	GPtrArray *folder_list; /* struct folder */
 	int folder;             /* selected, or -1 */
 	GPtrArray *messages;    /* struct summary */
-	int selected;           /* in messages, or -1 */
+	int selected;           /* in messages, or -1: where the keys are */
+	int anchor;             /* where a Shift range starts */
+	GHashTable *picked;     /* the messages selected, by UID */
+	int pending_pick;       /* pressed on a selected one: picked alone on
+	                         * release, unless it's dragged */
+	int drop_folder;        /* the folder messages are dragged over, or -1 */
+	int drag_row;           /* where a drag in the list started */
+	bool dragging_messages;
+	double ghost_x, ghost_y; /* the pointer, dragging, in the ghost's space */
+	GtkWidget *ghost;       /* what's dragged, drawn over the window */
 	int top;                /* first row shown */
 	bool loading;
 
@@ -83,9 +97,13 @@ static struct {
 
 	GtkWidget *password;    /* its dialog, while asking */
 	char *session;          /* the password manager's, once unlocked */
-} ui = { .folder = -1, .selected = -1 };
+} ui = { .folder = -1, .selected = -1, .anchor = -1, .pending_pick = -1,
+	.drop_folder = -1 };
 
 static void load_messages(void);
+static GtkWidget *pixel_area(int w, int h, GtkDrawingAreaDrawFunc draw,
+	GCallback pressed);
+static void move_to(struct folder *dest);
 static void open_message(int index);
 static void show_list(void);
 static void compose(struct draft *d);
@@ -223,7 +241,7 @@ static void paint_folders(cairo_t *cr, int w, int h, void *data) {
 	for (guint i = 0; i < ui.folder_list->len; i++) {
 		struct folder *f = ui.folder_list->pdata[i];
 		int y = PAD / 2 + i * ROW_H;
-		bool on = (int)i == ui.folder;
+		bool on = (int)i == ui.folder || (int)i == ui.drop_folder;
 		gem_black(cr);
 		if (on) {
 			gem_fill(cr, 0, y, w - 1, ROW_H);
@@ -257,6 +275,7 @@ static void choose_folder(int index) {
 	ui.folder = index;
 	g_clear_pointer(&ui.messages, summaries_free);
 	ui.selected = -1;
+	g_hash_table_remove_all(ui.picked);
 	ui.top = 0;
 	show_list();
 	gtk_widget_queue_draw(ui.folders);
@@ -270,12 +289,7 @@ static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 
 /* ---- Loading ------------------------------------------------------------ */
 
-static void got_folders(GPtrArray *folders, const char *error, void *data) {
-	if (error != NULL) {
-		set_status("%s", error);
-		gtk_widget_queue_draw(ui.folders);
-		return;
-	}
+static void show_folders(GPtrArray *folders) {
 	char *was = current_folder() != NULL ?
 		g_strdup(current_folder()->mailbox) : NULL;
 	folders_free(ui.folder_list);
@@ -300,6 +314,73 @@ static void got_folders(GPtrArray *folders, const char *error, void *data) {
 	app_menu_update(ui.menu);
 }
 
+static void got_folders(GPtrArray *folders, const char *error, void *data) {
+	if (error != NULL) {
+		set_status("%s", error);
+		gtk_widget_queue_draw(ui.folders);
+		g_free(data);
+		return;
+	}
+	show_folders(folders);
+	if (data != NULL) {
+		set_status("%s", (char *)data); /* what was done, over the counts */
+		g_free(data);
+	}
+}
+
+/* The newest messages not yet had, fetched while nothing else is
+ * happening: there to open at once, or offline. */
+static void fetch_ahead(struct folder *f) {
+	GArray *uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	for (guint i = 0; i < ui.messages->len && i < AHEAD; i++) {
+		struct summary *s = ui.messages->pdata[i];
+		if (s->size <= AHEAD_SIZE) {
+			g_array_append_val(uids, s->uid);
+		}
+	}
+	mail_prefetch(ui.mail, f->mailbox, (guint32 *)uids->data, uids->len);
+	g_array_free(uids, TRUE);
+}
+
+static void show_messages(struct folder *f, GPtrArray *messages) {
+	/* Keep the selection on the same messages. */
+	guint32 uid = ui.messages != NULL && ui.selected >= 0 &&
+		ui.selected < (int)ui.messages->len ?
+		((struct summary *)ui.messages->pdata[ui.selected])->uid : 0;
+	guint32 anchor = ui.messages != NULL && ui.anchor >= 0 &&
+		ui.anchor < (int)ui.messages->len ?
+		((struct summary *)ui.messages->pdata[ui.anchor])->uid : 0;
+	GHashTable *was = ui.picked;
+	ui.picked = g_hash_table_new(NULL, NULL);
+	summaries_free(ui.messages);
+	ui.messages = g_ptr_array_new();
+	ui.selected = ui.anchor = -1;
+	guint unseen = 0;
+	for (guint i = 0; i < messages->len; i++) {
+		struct summary *s = g_memdup2(messages->pdata[i], sizeof(struct summary));
+		s->from = g_strdup(s->from);
+		s->subject = g_strdup(s->subject);
+		g_ptr_array_add(ui.messages, s);
+		unseen += !s->seen;
+		if (uid != 0 && s->uid == uid) {
+			ui.selected = i;
+		}
+		if (anchor != 0 && s->uid == anchor) {
+			ui.anchor = i;
+		}
+		if (g_hash_table_contains(was, GUINT_TO_POINTER(s->uid))) {
+			g_hash_table_add(ui.picked, GUINT_TO_POINTER(s->uid));
+		}
+	}
+	g_hash_table_destroy(was);
+	f->messages = MAX(f->messages, messages->len);
+	f->unseen = MAX(f->unseen, unseen);
+	gtk_widget_queue_draw(ui.list);
+	gtk_widget_queue_draw(ui.scroll);
+	gtk_widget_queue_draw(ui.folders);
+	app_menu_update(ui.menu);
+}
+
 static void got_messages(GPtrArray *messages, const char *error, void *data) {
 	char *mailbox = data;
 	ui.loading = false;
@@ -314,36 +395,23 @@ static void got_messages(GPtrArray *messages, const char *error, void *data) {
 		gtk_widget_queue_draw(ui.list);
 		return;
 	}
-	/* Keep the selection on the same message. */
-	guint32 uid = ui.messages != NULL && ui.selected >= 0 ?
-		((struct summary *)ui.messages->pdata[ui.selected])->uid : 0;
-	summaries_free(ui.messages);
-	ui.messages = g_ptr_array_new();
-	ui.selected = -1;
-	guint unseen = 0;
-	for (guint i = 0; i < messages->len; i++) {
-		struct summary *s = g_memdup2(messages->pdata[i], sizeof(struct summary));
-		s->from = g_strdup(s->from);
-		s->subject = g_strdup(s->subject);
-		g_ptr_array_add(ui.messages, s);
-		unseen += !s->seen;
-		if (uid != 0 && s->uid == uid) {
-			ui.selected = i;
-		}
-	}
-	f->messages = MAX(f->messages, messages->len);
-	f->unseen = MAX(f->unseen, unseen);
+	show_messages(f, messages);
 	status_counts();
-	gtk_widget_queue_draw(ui.list);
-	gtk_widget_queue_draw(ui.scroll);
-	gtk_widget_queue_draw(ui.folders);
-	app_menu_update(ui.menu);
+	fetch_ahead(f);
 }
 
 static void load_messages(void) {
 	struct folder *f = current_folder();
 	if (f == NULL || ui.mail == NULL) {
 		return;
+	}
+	if (ui.messages == NULL) {
+		/* What was there last time, while the server's asked. */
+		GPtrArray *cached = cache_messages(ui.cache, f->mailbox, LIMIT);
+		if (cached->len > 0) {
+			show_messages(f, cached);
+		}
+		summaries_free(cached);
 	}
 	ui.loading = true;
 	set_status("Checking %s...", f->name);
@@ -404,6 +472,83 @@ static void diamond(cairo_t *cr, int cx, int cy) {
 	cairo_fill(cr);
 }
 
+/* ---- Selecting ----------------------------------------------------------- */
+
+static bool is_picked(const struct summary *s) {
+	return g_hash_table_contains(ui.picked, GUINT_TO_POINTER(s->uid));
+}
+
+static void pick(int i) {
+	struct summary *s = ui.messages->pdata[i];
+	g_hash_table_add(ui.picked, GUINT_TO_POINTER(s->uid));
+}
+
+static void picked_changed(void) {
+	guint n = g_hash_table_size(ui.picked);
+	if (n > 1) {
+		set_status("%u messages selected", n);
+	} else {
+		status_counts();
+	}
+	gtk_widget_queue_draw(ui.list);
+	app_menu_update(ui.menu);
+}
+
+/* Just this one. */
+static void pick_one(int i) {
+	g_hash_table_remove_all(ui.picked);
+	ui.selected = ui.anchor = i;
+	if (i >= 0 && i < message_count()) {
+		pick(i);
+	}
+}
+
+/* From the anchor to this one; added to what's selected if keep. */
+static void pick_range(int i, bool keep) {
+	if (!keep) {
+		g_hash_table_remove_all(ui.picked);
+	}
+	if (ui.anchor < 0 || ui.anchor >= message_count()) {
+		ui.anchor = i;
+	}
+	for (int k = MIN(ui.anchor, i); k <= MAX(ui.anchor, i); k++) {
+		pick(k);
+	}
+	ui.selected = i;
+}
+
+static void pick_toggle(int i) {
+	struct summary *s = ui.messages->pdata[i];
+	if (!g_hash_table_remove(ui.picked, GUINT_TO_POINTER(s->uid))) {
+		pick(i);
+	}
+	ui.selected = ui.anchor = i;
+}
+
+static void pick_all(void) {
+	for (int i = 0; i < message_count(); i++) {
+		pick(i);
+	}
+	picked_changed();
+}
+
+/* What an action's for: the message open, else those selected (in the
+ * list's order), else the one the keys are on. */
+static GPtrArray *targets(void) {
+	GPtrArray *t = g_ptr_array_new();
+	for (int i = 0; i < message_count(); i++) {
+		struct summary *s = ui.messages->pdata[i];
+		if (ui.open != NULL ? s->uid == ui.open_uid : is_picked(s)) {
+			g_ptr_array_add(t, s);
+		}
+	}
+	if (t->len == 0 && ui.open == NULL && ui.selected >= 0 &&
+			ui.selected < message_count()) {
+		g_ptr_array_add(t, ui.messages->pdata[ui.selected]);
+	}
+	return t;
+}
+
 static void paint_list(cairo_t *cr, int w, int h, void *data) {
 	int from_x = 20, from_w = MIN(200, w / 4), date_w = 90;
 	int subject_x = from_x + from_w + PAD;
@@ -435,7 +580,7 @@ static void paint_list(cairo_t *cr, int w, int h, void *data) {
 		struct summary *s = ui.messages->pdata[i];
 		int y = ROW_H + r * ROW_H;
 		gem_black(cr);
-		if (i == ui.selected) {
+		if (is_picked(s)) {
 			gem_fill(cr, 0, y, w, ROW_H);
 			gem_white(cr);
 		}
@@ -468,11 +613,137 @@ static void list_pressed(GtkGestureClick *g, int n, double x, double y,
 	if (i < 0) {
 		return;
 	}
-	ui.selected = i;
-	gtk_widget_queue_draw(ui.list);
-	app_menu_update(ui.menu);
-	if (n == 2) {
+	GdkModifierType state = gtk_event_controller_get_current_event_state(
+		GTK_EVENT_CONTROLLER(g));
+	bool ctrl = state & GDK_CONTROL_MASK, shift = state & GDK_SHIFT_MASK;
+	ui.pending_pick = -1;
+	if (shift) {
+		pick_range(i, ctrl);
+	} else if (ctrl) {
+		pick_toggle(i);
+	} else if (n == 1 && is_picked(ui.messages->pdata[i]) &&
+			g_hash_table_size(ui.picked) > 1) {
+		/* Maybe to drag them all: just this one only if it's let go. */
+		ui.pending_pick = i;
+		ui.selected = i;
+	} else {
+		pick_one(i);
+	}
+	picked_changed();
+	if (n == 2 && !ctrl && !shift) {
 		open_message(i);
+	}
+}
+
+static void list_released(GtkGestureClick *g, int n, double x, double y,
+		gpointer data) {
+	if (ui.pending_pick >= 0 && ui.pending_pick < message_count()) {
+		pick_one(ui.pending_pick);
+		picked_changed();
+	}
+	ui.pending_pick = -1;
+}
+
+/* ---- Dragging messages to a folder --------------------------------------- */
+
+static int folder_at(double y) {
+	int i = ((int)y - PAD / 2) / ROW_H;
+	return ui.folder_list != NULL && y >= PAD / 2 &&
+		i < (int)ui.folder_list->len ? i : -1;
+}
+
+/* A folder they can go to: any other that holds mail. */
+static bool can_drop(int i) {
+	struct folder *f = i >= 0 ? ui.folder_list->pdata[i] : NULL;
+	return f != NULL && f->selectable && i != ui.folder;
+}
+
+static void set_drop_folder(int i) {
+	if (i != ui.drop_folder) {
+		ui.drop_folder = i;
+		gtk_widget_queue_draw(ui.folders);
+	}
+}
+
+/* Dragged in the window, as GEM's desktop does: an outline follows the
+ * pointer, and the folder under it lights up. */
+static void paint_ghost(cairo_t *cr, int w, int h, void *data) {
+	/* See-through, but for the outline. */
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	if (!ui.dragging_messages) {
+		return;
+	}
+	guint n = g_hash_table_size(ui.picked);
+	struct summary *s = ui.selected >= 0 && ui.selected < message_count() ?
+		ui.messages->pdata[ui.selected] : NULL;
+	char *label = n > 1 ? g_strdup_printf("%u messages", n) :
+		g_strdup(s != NULL && s->subject[0] ? s->subject : "(no subject)");
+	int gw = MIN((int)gem_text_width(cr, label), 260) + 2 * PAD + 2;
+	int gh = ROW_H + 2;
+	int x = (int)ui.ghost_x - PAD, y = (int)ui.ghost_y - gh / 2;
+	gem_white(cr);
+	gem_fill(cr, x, y, gw, gh);
+	gem_black(cr);
+	gem_frame(cr, x, y, gw, gh, 1);
+	clipped(cr, label, x + PAD + 1, y + 1, gw - 2 * PAD - 2, ROW_H);
+	g_free(label);
+}
+
+static void draw_ghost(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	gem_draw_pixelated(cr, w, h, paint_ghost, NULL);
+}
+
+static void list_drag_begin(GtkGestureDrag *g, double x, double y,
+		gpointer data) {
+	ui.drag_row = ui.open == NULL ? row_at(y) : -1;
+}
+
+static void list_drag_update(GtkGestureDrag *g, double dx, double dy,
+		gpointer data) {
+	double sx, sy;
+	if (ui.drag_row < 0 || !gtk_gesture_drag_get_start_point(g, &sx, &sy)) {
+		return;
+	}
+	if (!ui.dragging_messages) {
+		if (dx * dx + dy * dy < 8 * 8 || ui.drag_row >= message_count()) {
+			return;
+		}
+		ui.dragging_messages = true;
+		ui.pending_pick = -1;
+		if (!is_picked(ui.messages->pdata[ui.drag_row])) {
+			pick_one(ui.drag_row);
+		}
+		picked_changed();
+		gtk_widget_set_visible(ui.ghost, TRUE);
+	}
+	graphene_point_t at = GRAPHENE_POINT_INIT(sx + dx, sy + dy), in;
+	if (gtk_widget_compute_point(ui.list, ui.ghost, &at, &in)) {
+		ui.ghost_x = in.x;
+		ui.ghost_y = in.y;
+	}
+	int i = -1;
+	if (gtk_widget_compute_point(ui.list, ui.folders, &at, &in) &&
+			in.x >= 0 && in.x < gtk_widget_get_width(ui.folders)) {
+		i = folder_at(in.y);
+	}
+	set_drop_folder(can_drop(i) ? i : -1);
+	gtk_widget_queue_draw(ui.ghost);
+}
+
+static void list_drag_end(GtkGestureDrag *g, double dx, double dy,
+		gpointer data) {
+	if (!ui.dragging_messages) {
+		return;
+	}
+	int i = ui.drop_folder;
+	ui.dragging_messages = false;
+	gtk_widget_set_visible(ui.ghost, FALSE);
+	set_drop_folder(-1);
+	if (i >= 0) {
+		move_to(ui.folder_list->pdata[i]);
 	}
 }
 
@@ -766,7 +1037,17 @@ static void open_message(int index) {
 		return;
 	}
 	struct summary *s = ui.messages->pdata[index];
-	ui.selected = index;
+	pick_one(index);
+	GBytes *cached = cache_body(ui.cache, current_folder()->mailbox, s->uid);
+	if (cached != NULL) {
+		if (!s->seen) {
+			mail_set_seen(ui.mail, current_folder()->mailbox, &s->uid, 1, true,
+				NULL, NULL);
+		}
+		fetched(cached, NULL, GUINT_TO_POINTER(s->uid));
+		g_bytes_unref(cached);
+		return;
+	}
 	set_status("Opening...");
 	mail_fetch(ui.mail, current_folder()->mailbox, s->uid, !s->seen, fetched,
 		GUINT_TO_POINTER(s->uid));
@@ -914,7 +1195,7 @@ static void moved(const char *error, void *data) {
 	} else {
 		set_status("%s", mv->done);
 		/* The other folder's count grows. */
-		mail_list_folders(ui.mail, got_folders, NULL);
+		mail_list_folders(ui.mail, got_folders, g_strdup(mv->done));
 	}
 	g_free(mv->mailbox);
 	g_free(mv->done);
@@ -928,13 +1209,19 @@ static struct folder *archive_folder(void) {
 	return f != NULL ? f : folder_with_role(ROLE_ALL);
 }
 
+static void send_away(struct folder *f, GPtrArray *t, const char *to,
+	bool create, struct moving *mv);
+
 static void take_away(bool archive) {
 	struct folder *f = current_folder();
-	struct summary *s = ui.open != NULL ? summary_for(ui.open_uid) :
-		selected_summary();
-	if (f == NULL || s == NULL) {
+	GPtrArray *t = f != NULL ? targets() : NULL;
+	if (t == NULL || t->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
 		return;
 	}
+	guint n = t->len;
 	const char *to;
 	bool create = false;
 	struct moving *mv = g_new0(struct moving, 1);
@@ -942,41 +1229,69 @@ static void take_away(bool archive) {
 	if (archive) {
 		struct folder *a = archive_folder();
 		if (a == f) {
-			set_status("It's in %s already", f->name);
+			set_status("%s in %s already", n > 1 ? "They're" : "It's", f->name);
 			g_free(mv->mailbox);
 			g_free(mv);
+			g_ptr_array_free(t, TRUE);
 			return;
 		}
 		/* No archive folder yet: one's made, as Thunderbird does. */
 		to = a != NULL ? a->mailbox :
 			ui.account->archive != NULL ? ui.account->archive : "Archive";
 		create = a == NULL;
-		mv->done = g_strdup_printf("Archived in %s.", a != NULL ? a->name : to);
+		const char *where = a != NULL ? a->name : to;
+		mv->done = n > 1 ?
+			g_strdup_printf("Archived %u messages in %s.", n, where) :
+			g_strdup_printf("Archived in %s.", where);
 	} else {
 		/* Out of Trash, it's gone for good. */
 		struct folder *trash = folder_with_role(ROLE_TRASH);
 		to = trash != NULL && trash != f ? trash->mailbox : NULL;
-		mv->done = g_strdup(to != NULL ? "Moved to Trash." : "Deleted.");
+		mv->done = n > 1 ?
+			g_strdup_printf(to != NULL ? "Moved %u messages to Trash." :
+			"Deleted %u messages.", n) :
+			g_strdup(to != NULL ? "Moved to Trash." : "Deleted.");
 	}
-	mail_move(ui.mail, f->mailbox, s->uid, to, create, moved, mv);
+	send_away(f, t, to, create, mv);
+}
 
-	int index = 0;
-	while (ui.messages->pdata[index] != s) {
-		index++;
+/* Sends the messages t (freed) from f to another folder (to NULL: gone
+ * for good): out of the list at once, the next one selected (or, reading,
+ * opened). */
+static void send_away(struct folder *f, GPtrArray *t, const char *to,
+		bool create, struct moving *mv) {
+	guint n = t->len;
+	guint32 *uids = g_new(guint32, n);
+	for (guint k = 0; k < n; k++) {
+		uids[k] = ((struct summary *)t->pdata[k])->uid;
 	}
-	if (!s->seen && f->unseen > 0) {
-		f->unseen--;
+	mail_move(ui.mail, f->mailbox, uids, n, to, create, moved, mv);
+	g_free(uids);
+
+	/* Out of the list; the next is whatever's now where the first was. */
+	int first = -1;
+	for (guint k = 0; k < n; k++) {
+		struct summary *s = t->pdata[k];
+		guint index;
+		g_ptr_array_find(ui.messages, s, &index);
+		if (first < 0) {
+			first = index;
+		}
+		if (!s->seen && f->unseen > 0) {
+			f->unseen--;
+		}
+		if (f->messages > 0) {
+			f->messages--;
+		}
+		g_free(s->from);
+		g_free(s->subject);
+		g_free(s);
+		g_ptr_array_remove_index(ui.messages, index);
 	}
-	if (f->messages > 0) {
-		f->messages--;
-	}
-	g_free(s->from);
-	g_free(s->subject);
-	g_free(s);
-	g_ptr_array_remove_index(ui.messages, index);
+	g_ptr_array_free(t, TRUE);
 	/* The next: the one after (older), or before if it was the last. */
-	int next = MIN(index, message_count() - 1);
-	ui.selected = next;
+	int next = MIN(first, message_count() - 1);
+	pick_one(next);
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.scroll);
 	gtk_widget_queue_draw(ui.folders);
@@ -992,20 +1307,495 @@ static void take_away(bool archive) {
 	app_menu_update(ui.menu);
 }
 
+/* Marks read, or if all are read already, unread. */
 static void toggle_seen(void) {
-	struct summary *s = ui.open != NULL ? summary_for(ui.open_uid) :
-		selected_summary();
 	struct folder *f = current_folder();
-	if (s == NULL || f == NULL) {
+	GPtrArray *t = f != NULL ? targets() : NULL;
+	if (t == NULL || t->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
 		return;
 	}
-	s->seen = !s->seen;
-	f->unseen = s->seen ? (f->unseen > 0 ? f->unseen - 1 : 0) : f->unseen + 1;
-	mail_set_seen(ui.mail, f->mailbox, s->uid, s->seen, NULL, NULL);
-	status_counts();
+	bool seen = false;
+	for (guint k = 0; k < t->len; k++) {
+		seen |= !((struct summary *)t->pdata[k])->seen;
+	}
+	GArray *uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	for (guint k = 0; k < t->len; k++) {
+		struct summary *s = t->pdata[k];
+		if (s->seen != seen) {
+			s->seen = seen;
+			f->unseen = seen ? (f->unseen > 0 ? f->unseen - 1 : 0) :
+				f->unseen + 1;
+			g_array_append_val(uids, s->uid);
+		}
+	}
+	mail_set_seen(ui.mail, f->mailbox, (guint32 *)uids->data, uids->len, seen,
+		NULL, NULL);
+	g_array_free(uids, TRUE);
+	g_ptr_array_free(t, TRUE);
+	if (g_hash_table_size(ui.picked) > 1) {
+		picked_changed();
+	} else {
+		status_counts();
+	}
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.folders);
 	app_menu_update(ui.menu);
+}
+
+/* Moves what's selected (or open) to another folder. */
+static void move_to(struct folder *dest) {
+	struct folder *f = current_folder();
+	GPtrArray *t = f != NULL && dest != NULL && dest != f &&
+		dest->selectable ? targets() : NULL;
+	if (t == NULL || t->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
+		return;
+	}
+	struct moving *mv = g_new0(struct moving, 1);
+	mv->mailbox = g_strdup(f->mailbox);
+	mv->done = t->len > 1 ?
+		g_strdup_printf("Moved %u messages to %s.", t->len, dest->name) :
+		g_strdup_printf("Moved to %s.", dest->name);
+	send_away(f, t, dest->mailbox, false, mv);
+}
+
+/* ---- Move to Folder: a GEM dialog with a pop-up of the folders ---------- */
+
+static struct {
+	GtkWidget *window, *area, *popover, *popup_area;
+	GArray *hits;
+	GPtrArray *mailboxes; /* those it can go to: the server's names */
+	char *title;
+	int chosen, hover;
+	int top;       /* the first folder shown in the pop-up, scrolled */
+	int arrow;     /* the arrow the pointer's on (ARROW_UP/DOWN), or 0 */
+	guint scroller; /* scrolling while it's there */
+} mover;
+
+/* The pop-up's most rows; with more folders than that, its first and last
+ * rows are arrows that scroll it, as GEM's scrolling pop-ups do. */
+#define POPUP_ROWS 14
+enum { ARROW_UP = -2, ARROW_DOWN = -3 };
+
+static char *last_move; /* the folder chosen last time */
+
+static struct folder *folder_named(const char *mailbox) {
+	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
+		struct folder *f = ui.folder_list->pdata[i];
+		if (strcmp(f->mailbox, mailbox) == 0) {
+			return f;
+		}
+	}
+	return NULL;
+}
+
+static struct folder *mover_folder(int i) {
+	return i >= 0 && i < (int)mover.mailboxes->len ?
+		folder_named(mover.mailboxes->pdata[i]) : NULL;
+}
+
+/* A GEM pop-up button: a shadowed box showing the choice. */
+static void paint_mover(cairo_t *cr, int w, int h, void *data) {
+	g_array_set_size(mover.hits, 0);
+	gem_black(cr);
+	gem_frame(cr, 0, 0, w, h, 1);
+	gem_frame(cr, 3, 3, w - 6, h - 6, 2);
+	int x = 3 + 2 * PAD, y = 3 + 2 * PAD;
+	gem_text(cr, mover.title, x, y, ROW_H);
+	y += ROW_H + PAD;
+	int pw = w - 2 * x - 2;
+	gem_frame(cr, x, y, pw, BUTTON_H, 1);
+	gem_fill(cr, x + 2, y + BUTTON_H, pw, 2);
+	gem_fill(cr, x + pw, y + 2, 2, BUTTON_H);
+	struct folder *f = mover_folder(mover.chosen);
+	clipped(cr, f != NULL ? f->name : "", x + PAD, y, pw - 2 * PAD, BUTTON_H);
+	add_hit(mover.hits, x, y, pw + 2, BUTTON_H + 2, ACT_MOVE_POPUP, 0);
+	int by = h - 3 - 2 * PAD - BUTTON_H;
+	int bw = MAX(gem_text_width(cr, "Cancel"), gem_text_width(cr, "Move")) +
+		2 * PAD;
+	int bx = w - 3 - 2 * PAD - 2 * bw - PAD;
+	for (int i = 0; i < 2; i++) {
+		const char *label = i == 0 ? "Cancel" : "Move";
+		int bxi = bx + i * (bw + PAD);
+		gem_frame(cr, bxi, by, bw, BUTTON_H, i == 1 ? 2 : 1);
+		gem_text(cr, label, bxi + (bw - gem_text_width(cr, label)) / 2, by,
+			BUTTON_H);
+		add_hit(mover.hits, bxi, by, bw, BUTTON_H,
+			i == 0 ? ACT_MOVE_CANCEL : ACT_MOVE_OK, 0);
+	}
+}
+
+static void draw_mover(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	gem_draw_pixelated(cr, w, h, paint_mover, NULL);
+}
+
+/* The pop-up: the folders, the chosen one checked, the one under the
+ * pointer inverted. */
+static bool popup_scrolls(void) {
+	return (int)mover.mailboxes->len > POPUP_ROWS;
+}
+
+/* How many folders it shows at once. */
+static int popup_shown(void) {
+	return popup_scrolls() ? POPUP_ROWS - 2 : (int)mover.mailboxes->len;
+}
+
+static void popup_scroll_to(int top) {
+	top = CLAMP(top, 0, (int)mover.mailboxes->len - popup_shown());
+	if (top != mover.top) {
+		mover.top = top;
+		gtk_widget_queue_draw(mover.popup_area);
+	}
+}
+
+/* Scrolled so the folder i is in view. */
+static void popup_reveal(int i) {
+	if (i < mover.top) {
+		popup_scroll_to(i);
+	} else if (i >= mover.top + popup_shown()) {
+		popup_scroll_to(i - popup_shown() + 1);
+	}
+}
+
+/* An arrow row: up or down, greyed when there's no further to go. */
+static void popup_arrow(cairo_t *cr, int w, int y, bool up) {
+	int cx = w / 2, cy = y + ROW_H / 2;
+	gem_black(cr);
+	for (int k = 0; k < 5; k++) {
+		int row = up ? cy - 2 + k : cy + 2 - k;
+		gem_fill(cr, cx - k, row, 2 * k + 1, 1);
+	}
+	bool end = up ? mover.top == 0 :
+		mover.top + popup_shown() >= (int)mover.mailboxes->len;
+	if (end) {
+		gem_grey_out(cr, 1, y, w - 4, ROW_H);
+	}
+}
+
+static void paint_popup(cairo_t *cr, int w, int h, void *data) {
+	gem_black(cr);
+	gem_frame(cr, 0, 0, w - 2, h - 2, 1);
+	gem_fill(cr, 2, h - 2, w - 2, 2);
+	gem_fill(cr, w - 2, 2, 2, h - 2);
+	int y = 1;
+	if (popup_scrolls()) {
+		popup_arrow(cr, w - 2, y, true);
+		y += ROW_H;
+	}
+	for (int r = 0; r < popup_shown(); r++, y += ROW_H) {
+		int i = mover.top + r;
+		struct folder *f = mover_folder(i);
+		gem_black(cr);
+		if (i == mover.hover) {
+			gem_fill(cr, 1, y, w - 4, ROW_H);
+			gem_white(cr);
+		}
+		if (i == mover.chosen) {
+			cairo_set_line_width(cr, 2);
+			cairo_move_to(cr, 4, y + ROW_H / 2.0);
+			cairo_line_to(cr, 7, y + ROW_H / 2.0 + 3);
+			cairo_line_to(cr, 12, y + ROW_H / 2.0 - 4);
+			cairo_stroke(cr);
+		}
+		if (f != NULL) {
+			clipped(cr, f->name, 18 + f->depth * 12, y, w - 22 - f->depth * 12,
+				ROW_H);
+		}
+	}
+	if (popup_scrolls()) {
+		popup_arrow(cr, w - 2, y, false);
+	}
+}
+
+static void draw_popup(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	gem_draw_pixelated(cr, w, h, paint_popup, NULL);
+}
+
+/* The folder at y, an arrow, or -1. */
+static int popup_row(double y) {
+	int r = ((int)y - 1) / ROW_H;
+	if (y < 1) {
+		return -1;
+	}
+	if (popup_scrolls()) {
+		if (r == 0) {
+			return ARROW_UP;
+		}
+		if (r == POPUP_ROWS - 1) {
+			return ARROW_DOWN;
+		}
+		r--;
+	}
+	return r < popup_shown() ? mover.top + r : -1;
+}
+
+static gboolean popup_scroll_tick(gpointer data) {
+	popup_scroll_to(mover.top + (mover.arrow == ARROW_UP ? -1 : 1));
+	return G_SOURCE_CONTINUE;
+}
+
+/* On an arrow, it scrolls, and keeps scrolling while the pointer stays. */
+static void popup_set_arrow(int arrow) {
+	if (arrow == mover.arrow) {
+		return;
+	}
+	mover.arrow = arrow;
+	if (mover.scroller != 0) {
+		g_source_remove(mover.scroller);
+		mover.scroller = 0;
+	}
+	if (arrow != 0) {
+		popup_scroll_tick(NULL);
+		mover.scroller = g_timeout_add(90, popup_scroll_tick, NULL);
+	}
+}
+
+static void popup_motion(GtkEventControllerMotion *c, double x, double y,
+		gpointer data) {
+	int i = popup_row(y);
+	popup_set_arrow(i == ARROW_UP || i == ARROW_DOWN ? i : 0);
+	i = i >= 0 ? i : -1;
+	if (i != mover.hover) {
+		mover.hover = i;
+		gtk_widget_queue_draw(mover.popup_area);
+	}
+}
+
+static void popup_leave(GtkEventControllerMotion *c, gpointer data) {
+	popup_set_arrow(0);
+}
+
+static gboolean popup_wheel(GtkEventControllerScroll *c, double dx, double dy,
+		gpointer data) {
+	popup_scroll_to(mover.top + (int)(dy * 3));
+	return TRUE;
+}
+
+static void popup_choose(int i) {
+	if (i >= 0) {
+		mover.chosen = i;
+	}
+	gtk_popover_popdown(GTK_POPOVER(mover.popover));
+	gtk_widget_queue_draw(mover.area);
+}
+
+static void popup_released(GtkGestureClick *g, int n, double x, double y,
+		gpointer data) {
+	int i = popup_row(y);
+	if (i == ARROW_UP || i == ARROW_DOWN) {
+		return; /* the arrows scroll; they don't choose */
+	}
+	popup_choose(i);
+}
+
+/* Up and Down go through the folders, Return chooses. */
+static gboolean popup_key(GtkEventControllerKey *c, guint keyval,
+		guint keycode, GdkModifierType state, gpointer data) {
+	int n = (int)mover.mailboxes->len;
+	int i = mover.hover >= 0 ? mover.hover : mover.chosen;
+	switch (keyval) {
+	case GDK_KEY_Up:
+	case GDK_KEY_Down:
+		i = CLAMP(i + (keyval == GDK_KEY_Up ? -1 : 1), 0, n - 1);
+		break;
+	case GDK_KEY_Page_Up:
+	case GDK_KEY_Page_Down:
+		i = CLAMP(i + (keyval == GDK_KEY_Page_Up ? -1 : 1) * popup_shown(), 0,
+			n - 1);
+		break;
+	case GDK_KEY_Home:
+		i = 0;
+		break;
+	case GDK_KEY_End:
+		i = n - 1;
+		break;
+	case GDK_KEY_Return:
+	case GDK_KEY_KP_Enter:
+	case GDK_KEY_space:
+		popup_choose(i);
+		return TRUE;
+	default:
+		return FALSE;
+	}
+	mover.hover = i;
+	popup_reveal(i);
+	gtk_widget_queue_draw(mover.popup_area);
+	return TRUE;
+}
+
+static void popup_closed(GtkPopover *popover, gpointer data) {
+	popup_set_arrow(0);
+}
+
+static void mover_close(bool ok) {
+	if (mover.window == NULL) {
+		return;
+	}
+	struct folder *dest = ok ? mover_folder(mover.chosen) : NULL;
+	if (dest != NULL) {
+		g_free(last_move);
+		last_move = g_strdup(dest->mailbox);
+	}
+	gtk_window_destroy(GTK_WINDOW(mover.window));
+	if (dest != NULL) {
+		move_to(dest);
+	}
+}
+
+static void mover_destroyed(GtkWidget *w, gpointer data) {
+	popup_set_arrow(0);
+	g_ptr_array_free(mover.mailboxes, TRUE);
+	g_array_unref(mover.hits);
+	g_free(mover.title);
+	memset(&mover, 0, sizeof(mover));
+}
+
+static void open_popup(void) {
+	const struct hit *h = NULL;
+	for (guint i = 0; i < mover.hits->len; i++) {
+		if (g_array_index(mover.hits, struct hit, i).action == ACT_MOVE_POPUP) {
+			h = &g_array_index(mover.hits, struct hit, i);
+		}
+	}
+	if (h == NULL) {
+		return;
+	}
+	/* Over the button, as wide, the chosen folder where the button was. */
+	gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(mover.popup_area),
+		h->w + 2);
+	int rows = popup_scrolls() ? POPUP_ROWS : (int)mover.mailboxes->len;
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(mover.popup_area),
+		rows * ROW_H + 4);
+	GdkRectangle at = { h->x, h->y, h->w, 1 };
+	gtk_popover_set_pointing_to(GTK_POPOVER(mover.popover), &at);
+	mover.hover = mover.chosen;
+	/* The chosen folder in the middle, where it can be. */
+	mover.top = -1;
+	popup_scroll_to(mover.chosen - popup_shown() / 2);
+	gtk_popover_popup(GTK_POPOVER(mover.popover));
+}
+
+static void mover_pressed(GtkGestureClick *g, int n, double x, double y,
+		gpointer data) {
+	const struct hit *h = hit_at(mover.hits, x, y);
+	if (h == NULL) {
+		return;
+	}
+	if (h->action == ACT_MOVE_POPUP) {
+		open_popup();
+	} else {
+		mover_close(h->action == ACT_MOVE_OK);
+	}
+}
+
+/* Return moves, Escape cancels; Up and Down change the folder. */
+static gboolean mover_key(GtkEventControllerKey *c, guint keyval,
+		guint keycode, GdkModifierType state, gpointer data) {
+	switch (keyval) {
+	case GDK_KEY_Return:
+	case GDK_KEY_KP_Enter:
+		mover_close(true);
+		return TRUE;
+	case GDK_KEY_Escape:
+		mover_close(false);
+		return TRUE;
+	case GDK_KEY_Up:
+	case GDK_KEY_Down:
+		mover.chosen = CLAMP(mover.chosen + (keyval == GDK_KEY_Up ? -1 : 1), 0,
+			(int)mover.mailboxes->len - 1);
+		gtk_widget_queue_draw(mover.area);
+		return TRUE;
+	case GDK_KEY_space:
+		open_popup();
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void move_dialog(void) {
+	struct folder *f = current_folder();
+	GPtrArray *t = f != NULL ? targets() : NULL;
+	guint n = t != NULL ? t->len : 0;
+	if (t != NULL) {
+		g_ptr_array_free(t, TRUE);
+	}
+	if (n == 0 || mover.window != NULL) {
+		return;
+	}
+	mover.mailboxes = g_ptr_array_new_with_free_func(g_free);
+	for (guint i = 0; i < ui.folder_list->len; i++) {
+		struct folder *o = ui.folder_list->pdata[i];
+		if (o != f && o->selectable) {
+			if (g_strcmp0(o->mailbox, last_move) == 0) {
+				mover.chosen = mover.mailboxes->len;
+			}
+			g_ptr_array_add(mover.mailboxes, g_strdup(o->mailbox));
+		}
+	}
+	if (mover.mailboxes->len == 0) {
+		g_ptr_array_free(mover.mailboxes, TRUE);
+		mover.mailboxes = NULL;
+		set_status("There's no other folder to move to");
+		return;
+	}
+	mover.title = n > 1 ? g_strdup_printf("Move %u messages to:", n) :
+		g_strdup("Move this message to:");
+	mover.hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
+	mover.hover = -1;
+	mover.window = gtk_window_new();
+	gtk_window_set_title(GTK_WINDOW(mover.window), "Move to Folder");
+	gtk_window_set_transient_for(GTK_WINDOW(mover.window), GTK_WINDOW(ui.window));
+	gtk_window_set_application(GTK_WINDOW(mover.window), ui.app);
+	gtk_window_set_modal(GTK_WINDOW(mover.window), TRUE);
+	gtk_window_set_resizable(GTK_WINDOW(mover.window), FALSE);
+	gtk_widget_add_css_class(mover.window, "gem-mail");
+	mover.area = pixel_area(320, 3 + 2 * PAD + ROW_H + PAD + BUTTON_H + 2 +
+		2 * PAD + BUTTON_H + 2 * PAD + 3, draw_mover, G_CALLBACK(mover_pressed));
+	gtk_window_set_child(GTK_WINDOW(mover.window), mover.area);
+	/* Something has the focus, for the pop-up to hand it back to. */
+	gtk_widget_set_focusable(mover.area, TRUE);
+
+	mover.popover = gtk_popover_new();
+	gtk_popover_set_has_arrow(GTK_POPOVER(mover.popover), FALSE);
+	gtk_popover_set_position(GTK_POPOVER(mover.popover), GTK_POS_BOTTOM);
+	gtk_widget_add_css_class(mover.popover, "gem-popup");
+	gtk_widget_set_parent(mover.popover, mover.area);
+	/* A popover goes before what it's on. */
+	g_signal_connect_swapped(mover.area, "destroy",
+		G_CALLBACK(gtk_widget_unparent), mover.popover);
+	mover.popup_area = pixel_area(0, 0, draw_popup, NULL);
+	GtkGesture *release = gtk_gesture_click_new();
+	g_signal_connect(release, "released", G_CALLBACK(popup_released), NULL);
+	gtk_widget_add_controller(mover.popup_area, GTK_EVENT_CONTROLLER(release));
+	GtkEventController *motion = gtk_event_controller_motion_new();
+	g_signal_connect(motion, "enter", G_CALLBACK(popup_motion), NULL);
+	g_signal_connect(motion, "motion", G_CALLBACK(popup_motion), NULL);
+	g_signal_connect(motion, "leave", G_CALLBACK(popup_leave), NULL);
+	gtk_widget_add_controller(mover.popup_area, motion);
+	GtkEventController *wheel = gtk_event_controller_scroll_new(
+		GTK_EVENT_CONTROLLER_SCROLL_VERTICAL |
+		GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
+	g_signal_connect(wheel, "scroll", G_CALLBACK(popup_wheel), NULL);
+	gtk_widget_add_controller(mover.popup_area, wheel);
+	GtkEventController *popup_keys = gtk_event_controller_key_new();
+	g_signal_connect(popup_keys, "key-pressed", G_CALLBACK(popup_key), NULL);
+	gtk_widget_add_controller(mover.popover, popup_keys);
+	g_signal_connect(mover.popover, "closed", G_CALLBACK(popup_closed), NULL);
+	gtk_popover_set_child(GTK_POPOVER(mover.popover), mover.popup_area);
+
+	GtkEventController *keys = gtk_event_controller_key_new();
+	g_signal_connect(keys, "key-pressed", G_CALLBACK(mover_key), NULL);
+	gtk_widget_add_controller(mover.window, keys);
+	g_signal_connect(mover.window, "destroy", G_CALLBACK(mover_destroyed), NULL);
+	gtk_window_present(GTK_WINDOW(mover.window));
+	gtk_widget_grab_focus(mover.area);
 }
 
 static void run_action(enum action action, int index) {
@@ -1051,6 +1841,14 @@ static void run_action(enum action action, int index) {
 	case ACT_OPEN:
 		open_message(ui.selected);
 		break;
+	case ACT_MOVE:
+		move_dialog();
+		break;
+	case ACT_SELECT_ALL:
+		if (ui.open == NULL) {
+			pick_all();
+		}
+		break;
 	case ACT_QUIT:
 		gtk_window_destroy(GTK_WINDOW(ui.window));
 		break;
@@ -1073,12 +1871,18 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 		if (!listing || message_count() == 0) {
 			return FALSE;
 		}
-		ui.selected = CLAMP(ui.selected + (keyval == GDK_KEY_Up ? -1 : 1), 0,
+	{
+		int i = CLAMP(ui.selected + (keyval == GDK_KEY_Up ? -1 : 1), 0,
 			message_count() - 1);
+		if (state & GDK_SHIFT_MASK) {
+			pick_range(i, false);
+		} else {
+			pick_one(i);
+		}
 		reveal();
-		gtk_widget_queue_draw(ui.list);
-		app_menu_update(ui.menu);
+		picked_changed();
 		return TRUE;
+	}
 	case GDK_KEY_Page_Up:
 	case GDK_KEY_Page_Down:
 		if (!listing) {
@@ -1099,6 +1903,11 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 			show_list();
 			return TRUE;
 		}
+		if (keyval == GDK_KEY_Escape && g_hash_table_size(ui.picked) > 1) {
+			pick_one(ui.selected);
+			picked_changed();
+			return TRUE;
+		}
 		return FALSE;
 	case GDK_KEY_Delete:
 		take_away(false);
@@ -1109,6 +1918,12 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 		}
 		take_away(true);
 		return TRUE;
+	case GDK_KEY_m:
+		if (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) {
+			return FALSE;
+		}
+		move_dialog();
+		return TRUE;
 	}
 	return FALSE;
 }
@@ -1117,9 +1932,13 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 
 static void build_menus(struct app_menu *m, void *data) {
 	bool account = ui.account != NULL;
-	struct summary *s = ui.open != NULL ? summary_for(ui.open_uid) :
-		selected_summary();
-	uint32_t have = s != NULL ? 0 : APP_MENU_DISABLED;
+	GPtrArray *t = ui.messages != NULL ? targets() : g_ptr_array_new();
+	bool unread = false;
+	for (guint k = 0; k < t->len; k++) {
+		unread |= !((struct summary *)t->pdata[k])->seen;
+	}
+	uint32_t have = t->len > 0 ? 0 : APP_MENU_DISABLED;
+	struct summary *s = selected_summary();
 	uint32_t open = ui.open != NULL ? 0 : APP_MENU_DISABLED;
 	app_menu_add_menu(m, "File");
 	app_menu_add_item(m, ACT_NEW, "New Message", "^N",
@@ -1137,10 +1956,15 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_REPLY_ALL, "Reply All", "^Shift+R", open);
 	app_menu_add_item(m, ACT_FORWARD, "Forward", "^L", open);
 	app_menu_add_separator(m);
-	app_menu_add_item(m, ACT_UNREAD, s != NULL && !s->seen ? "Mark as Read" :
+	app_menu_add_item(m, ACT_SELECT_ALL, "Select All", "^A",
+		ui.open == NULL && message_count() > 0 ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_UNREAD, unread ? "Mark as Read" :
 		"Mark as Unread", "^U", have);
 	app_menu_add_item(m, ACT_ARCHIVE, "Archive", "A", have);
+	app_menu_add_item(m, ACT_MOVE, "Move to Folder...", "M", have);
 	app_menu_add_item(m, ACT_DELETE, "Delete", "Del", have);
+	g_ptr_array_free(t, TRUE);
 }
 
 static void menu_activate(uint32_t id, void *data) {
@@ -1695,6 +2519,9 @@ static void load_css(void) {
 		"textview.gem-body, textview.gem-body text { background: #fff;"
 		"  color: #000; font-family: monospace; font-size: 15px; }"
 		"textview.gem-body text selection { background: #000; color: #fff; }"
+		"popover.gem-popup, popover.gem-popup > contents { background: none;"
+		"  border: none; border-radius: 0; box-shadow: none; padding: 0;"
+		"  margin: 0; }"
 		"scrollbar { background: #fff; border-left: 1px solid #000; }"
 		"scrollbar slider { background: #fff; border: 1px solid #000;"
 		"  border-radius: 0; min-width: 15px; min-height: 24px; margin: 1px; }",
@@ -1731,6 +2558,7 @@ static void activate(GtkApplication *app, gpointer data) {
 		return;
 	}
 	ui.app = app;
+	ui.picked = g_hash_table_new(NULL, NULL);
 	load_css();
 	ui.header_hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
 	ui.account = account_load(&ui.account_error);
@@ -1751,6 +2579,14 @@ static void activate(GtkApplication *app, gpointer data) {
 	gtk_widget_set_hexpand(ui.stack, TRUE);
 	GtkWidget *listing = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	ui.list = pixel_area(0, 0, draw_list, G_CALLBACK(list_pressed));
+	GtkGesture *release = gtk_gesture_click_new();
+	g_signal_connect(release, "released", G_CALLBACK(list_released), NULL);
+	gtk_widget_add_controller(ui.list, GTK_EVENT_CONTROLLER(release));
+	GtkGesture *pull = gtk_gesture_drag_new();
+	g_signal_connect(pull, "drag-begin", G_CALLBACK(list_drag_begin), NULL);
+	g_signal_connect(pull, "drag-update", G_CALLBACK(list_drag_update), NULL);
+	g_signal_connect(pull, "drag-end", G_CALLBACK(list_drag_end), NULL);
+	gtk_widget_add_controller(ui.list, GTK_EVENT_CONTROLLER(pull));
 	gtk_widget_set_hexpand(ui.list, TRUE);
 	gtk_widget_set_focusable(ui.list, TRUE);
 	GtkEventController *wheel = gtk_event_controller_scroll_new(
@@ -1776,7 +2612,13 @@ static void activate(GtkApplication *app, gpointer data) {
 	gtk_box_append(GTK_BOX(main), ui.stack);
 
 	ui.info = pixel_area(0, INFO_H, draw_info, NULL);
-	gtk_box_append(GTK_BOX(outer), main);
+	GtkWidget *overlay = gtk_overlay_new();
+	gtk_overlay_set_child(GTK_OVERLAY(overlay), main);
+	ui.ghost = pixel_area(0, 0, draw_ghost, NULL);
+	gtk_widget_set_can_target(ui.ghost, FALSE);
+	gtk_widget_set_visible(ui.ghost, FALSE);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ui.ghost);
+	gtk_box_append(GTK_BOX(outer), overlay);
 	gtk_box_append(GTK_BOX(outer), ui.info);
 	gtk_window_set_child(GTK_WINDOW(ui.window), outer);
 
@@ -1787,7 +2629,7 @@ static void activate(GtkApplication *app, gpointer data) {
 		{ "<Control>n", ACT_NEW }, { "F5", ACT_GET_MAIL },
 		{ "<Control>q", ACT_QUIT }, { "<Control>r", ACT_REPLY },
 		{ "<Control><Shift>r", ACT_REPLY_ALL }, { "<Control>l", ACT_FORWARD },
-		{ "<Control>u", ACT_UNREAD },
+		{ "<Control>u", ACT_UNREAD }, { "<Control>a", ACT_SELECT_ALL },
 	};
 	add_shortcuts(ui.window, shortcuts, G_N_ELEMENTS(shortcuts));
 	ui.menu = app_menu_new(ui.window, build_menus, menu_activate, NULL);
@@ -1799,6 +2641,12 @@ static void activate(GtkApplication *app, gpointer data) {
 		return;
 	}
 	ui.mail = mail_new(ui.account, ask_password, NULL);
+	ui.cache = cache_open();
+	GPtrArray *cached = cache_folders(ui.cache);
+	if (cached != NULL) {
+		show_folders(cached); /* and the Inbox, as it was */
+		folders_free(cached);
+	}
 	ui.loading = true; /* until the first folder's listed */
 	set_status("Connecting to %s...", ui.account->imap.host);
 	mail_list_folders(ui.mail, got_folders, NULL);

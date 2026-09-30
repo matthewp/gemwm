@@ -52,26 +52,34 @@ typedef void (*mail_folders_fn)(GPtrArray *folders, const char *error,
 	void *data);
 void mail_list_folders(struct mail *m, mail_folders_fn done, void *data);
 
-/* The newest messages in a folder (struct summary, newest first). */
+/* The newest messages in a folder (struct summary, newest first), at
+ * most limit: the cache brought up to date with the server (see cache.h). */
 typedef void (*mail_messages_fn)(GPtrArray *messages, const char *error,
 	void *data);
 void mail_list_messages(struct mail *m, const char *mailbox, guint limit,
 	mail_messages_fn done, void *data);
 
-/* A whole message, as sent; marked read on the server if mark_seen. */
+/* A whole message, as sent (and kept in the cache); marked read on the
+ * server if mark_seen. */
 typedef void (*mail_message_fn)(GBytes *message, const char *error,
 	void *data);
 void mail_fetch(struct mail *m, const char *mailbox, guint32 uid,
 	bool mark_seen, mail_message_fn done, void *data);
 
+/* Fetches these messages ahead, into the cache, when nothing else is
+ * waiting (the first first). */
+void mail_prefetch(struct mail *m, const char *mailbox, const guint32 *uids,
+	guint n);
+
 /* Done: NULL error on success. */
 typedef void (*mail_done_fn)(const char *error, void *data);
-void mail_set_seen(struct mail *m, const char *mailbox, guint32 uid,
-	bool seen, mail_done_fn done, void *data);
-/* Moves it to another folder (created first if create, and it isn't
- * there); with to NULL, or the same folder, deletes it for good. */
-void mail_move(struct mail *m, const char *mailbox, guint32 uid,
-	const char *to, bool create, mail_done_fn done, void *data);
+/* Marks messages (n of them) read, or not. */
+void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
+	guint n, bool seen, mail_done_fn done, void *data);
+/* Moves messages to another folder (created first if create, and it
+ * isn't there); with to NULL, or the same folder, deletes them for good. */
+void mail_move(struct mail *m, const char *mailbox, const guint32 *uids,
+	guint n, const char *to, bool create, mail_done_fn done, void *data);
 /* Sends message (from and to the addresses given) by SMTP, then keeps a
  * copy in sent, if set. */
 void mail_send(struct mail *m, GBytes *message, const char *from,
