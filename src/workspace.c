@@ -107,6 +107,9 @@ void workspace_switch(struct server *server, struct workspace *ws) {
 		server->drag_box = server->grab_box;
 		end_interactive(server);
 	}
+	/* A cycle's windows are the old workspace's: Super+Tab here (with
+	 * Super still held from the switch) would walk back to them. */
+	view_cycle_end(server);
 	wlr_scene_node_set_enabled(&server->active_workspace->tree->node, false);
 	wlr_scene_node_set_enabled(&ws->tree->node, true);
 	server->active_workspace = ws;
