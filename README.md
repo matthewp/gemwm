@@ -667,8 +667,13 @@ CONDSTORE, where the server has it). Without a connection, what's cached
 still reads. Deleting the folder only makes the next start slower.
 
 An HTML message runs no scripts and loads nothing from the web (no
-tracking pixels) until you press **Show Images**; its links open in the
-browser, and `mailto:` ones start a new message. Messages are written as
+tracking pixels) until you press **Show Images**, for that message, or
+**Always for** its sender, which shows that address's images from then on
+(**Stop Showing Images** takes it back; the list is
+`~/.config/gemmail/show-images`). A trusted sender's images still wait if
+your mail server's `Authentication-Results` header says the message may
+not be theirs: neither DMARC nor a DKIM signature from their domain passed.
+Its links open in the browser, and `mailto:` ones start a new message. Messages are written as
 plain text, and sent copies are kept in Sent.
 
 It's built when libetpan (IMAP and SMTP), GMime 3 and WebKit are

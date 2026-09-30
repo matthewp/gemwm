@@ -13,8 +13,16 @@ struct attachment {
 	GBytes *data;
 };
 
+/* Whether the sender is who they say, as the receiving mail server's
+ * Authentication-Results header has it: DMARC passed, or a DKIM signature
+ * from the sender's domain did (VERIFIED); the header's there but neither
+ * (UNVERIFIED); or there's no such header (UNCHECKED). */
+enum sender_check { SENDER_UNCHECKED, SENDER_VERIFIED, SENDER_UNVERIFIED };
+
 struct message {
 	char *from, *to, *cc, *subject, *date; /* as shown */
+	char *sender;            /* the From address alone, lower case */
+	enum sender_check sender_check;
 	char *reply_to;                        /* where replies go */
 	char *message_id, *references;
 	char *html, *text;       /* the body: either, both, or neither */

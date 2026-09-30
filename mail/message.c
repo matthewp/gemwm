@@ -17,6 +17,86 @@ static char *addresses(InternetAddressList *list) {
 		internet_address_list_to_string(list, NULL, FALSE) : NULL;
 }
 
+/* The first From address alone, lower case: who the message says it's
+ * from, without the name, which anyone can write. */
+static char *sender_address(InternetAddressList *list) {
+	for (int i = 0; list != NULL && i < internet_address_list_length(list); i++) {
+		InternetAddress *a = internet_address_list_get_address(list, i);
+		if (INTERNET_ADDRESS_IS_MAILBOX(a)) {
+			const char *addr = internet_address_mailbox_get_addr(
+				INTERNET_ADDRESS_MAILBOX(a));
+			return addr != NULL && strchr(addr, '@') != NULL ?
+				g_ascii_strdown(addr, -1) : NULL;
+		}
+	}
+	return NULL;
+}
+
+/* A result's property, e.g. header.d: the value after key, up to a
+ * space or the end. */
+static char *property(const char *clause, const char *key) {
+	const char *at = strstr(clause, key);
+	if (at == NULL) {
+		return NULL;
+	}
+	at += strlen(key);
+	size_t n = strcspn(at, " \t\r\n;()");
+	return n > 0 ? g_strndup(at, n) : NULL;
+}
+
+/* The sender's domain is domain, or under it (relaxed alignment:
+ * news.example.org signed by example.org). */
+static bool within(const char *sender_domain, const char *domain) {
+	size_t a = strlen(sender_domain), b = strlen(domain);
+	return a == b ? strcmp(sender_domain, domain) == 0 :
+		a > b && sender_domain[a - b - 1] == '.' &&
+		strcmp(sender_domain + a - b, domain) == 0;
+}
+
+/* What the server that received it made of the sender. Its header is the
+ * topmost Authentication-Results; any below were there when it arrived,
+ * and could have been written by anyone. */
+static enum sender_check check_sender(GMimeObject *msg, const char *sender) {
+	GMimeHeaderList *headers = g_mime_object_get_header_list(msg);
+	const char *value = NULL;
+	for (int i = 0; i < g_mime_header_list_get_count(headers); i++) {
+		GMimeHeader *h = g_mime_header_list_get_header_at(headers, i);
+		if (g_ascii_strcasecmp(g_mime_header_get_name(h),
+				"Authentication-Results") == 0) {
+			value = g_mime_header_get_value(h);
+			break;
+		}
+	}
+	if (value == NULL) {
+		return SENDER_UNCHECKED;
+	}
+	const char *domain = sender != NULL ? strchr(sender, '@') + 1 : "";
+	char *lower = g_ascii_strdown(value, -1);
+	char **clauses = g_strsplit(lower, ";", -1);
+	enum sender_check check = SENDER_UNVERIFIED;
+	for (int i = 0; clauses[i] != NULL && check != SENDER_VERIFIED; i++) {
+		const char *c = g_strstrip(clauses[i]);
+		if (g_str_has_prefix(c, "dmarc=pass")) {
+			check = SENDER_VERIFIED;
+		} else if (g_str_has_prefix(c, "dkim=pass")) {
+			char *d = property(c, "header.d=");
+			if (d == NULL) {
+				char *id = property(c, "header.i=");
+				char *at = id != NULL ? strchr(id, '@') : NULL;
+				d = at != NULL ? g_strdup(at + 1) : NULL;
+				g_free(id);
+			}
+			if (d != NULL && domain[0] != '\0' && within(domain, d)) {
+				check = SENDER_VERIFIED;
+			}
+			g_free(d);
+		}
+	}
+	g_strfreev(clauses);
+	g_free(lower);
+	return check;
+}
+
 /* A part's content, decoded from its transfer encoding. */
 static GBytes *part_bytes(GMimePart *part) {
 	GMimeDataWrapper *content = g_mime_part_get_content(part);
@@ -98,6 +178,8 @@ struct message *message_parse(GBytes *raw) {
 	m->inline_parts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
 		(GDestroyNotify)attachment_free);
 	m->from = addresses(g_mime_message_get_from(msg));
+	m->sender = sender_address(g_mime_message_get_from(msg));
+	m->sender_check = check_sender(GMIME_OBJECT(msg), m->sender);
 	m->to = addresses(g_mime_message_get_to(msg));
 	m->cc = addresses(g_mime_message_get_cc(msg));
 	m->reply_to = addresses(g_mime_message_get_reply_to(msg));
@@ -123,6 +205,7 @@ void message_free(struct message *m) {
 		return;
 	}
 	g_free(m->from);
+	g_free(m->sender);
 	g_free(m->to);
 	g_free(m->cc);
 	g_free(m->reply_to);

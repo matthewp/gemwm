@@ -40,7 +40,8 @@
 
 enum action {
 	ACT_NONE, ACT_BACK, ACT_REPLY, ACT_REPLY_ALL, ACT_FORWARD, ACT_DELETE,
-	ACT_UNREAD, ACT_SHOW_IMAGES, ACT_ATTACHMENT, ACT_NEW, ACT_GET_MAIL,
+	ACT_UNREAD, ACT_SHOW_IMAGES, ACT_ALWAYS_IMAGES, ACT_STOP_IMAGES,
+	ACT_ATTACHMENT, ACT_NEW, ACT_GET_MAIL,
 	ACT_ARCHIVE, ACT_SELECT_ALL, ACT_MOVE, ACT_MOVE_POPUP, ACT_MOVE_OK,
 	ACT_MOVE_CANCEL,
 	ACT_QUIT, ACT_OPEN,
@@ -859,6 +860,69 @@ static const char page_css[] =
 	"  #000 0% 25%, #fff 0% 50%) 0 0 / 2px 2px; border-left: 1px solid #000; }"
 	"::-webkit-scrollbar-thumb { background: #fff; border: 1px solid #000; }";
 
+/* Senders whose images are shown without asking: addresses, one to a
+ * line, in ~/.config/gemmail/show-images. */
+static GHashTable *image_senders;
+
+static char *image_senders_path(void) {
+	return g_build_filename(g_get_user_config_dir(), "gemmail", "show-images",
+		NULL);
+}
+
+static GHashTable *senders(void) {
+	if (image_senders != NULL) {
+		return image_senders;
+	}
+	image_senders = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	char *path = image_senders_path(), *text = NULL;
+	if (g_file_get_contents(path, &text, NULL, NULL)) {
+		char **lines = g_strsplit(text, "\n", -1);
+		for (int i = 0; lines[i] != NULL; i++) {
+			char *line = g_strstrip(lines[i]);
+			if (line[0] != '\0' && line[0] != '#') {
+				g_hash_table_add(image_senders, g_ascii_strdown(line, -1));
+			}
+		}
+		g_strfreev(lines);
+	}
+	g_free(text);
+	g_free(path);
+	return image_senders;
+}
+
+static void set_image_sender(const char *sender, bool shown) {
+	if (shown) {
+		g_hash_table_add(senders(), g_strdup(sender));
+	} else {
+		g_hash_table_remove(senders(), sender);
+	}
+	GPtrArray *sorted = g_hash_table_get_keys_as_ptr_array(senders());
+	g_ptr_array_sort_values(sorted, (GCompareFunc)strcmp);
+	GString *text = g_string_new("# GemMail shows these senders' images "
+		"without asking.\n");
+	for (guint i = 0; i < sorted->len; i++) {
+		g_string_append_printf(text, "%s\n", (char *)sorted->pdata[i]);
+	}
+	char *path = image_senders_path();
+	char *dir = g_path_get_dirname(path);
+	g_mkdir_with_parents(dir, 0700);
+	GError *error = NULL;
+	if (!g_file_set_contents(path, text->str, -1, &error)) {
+		set_status("Couldn't save %s: %s", path, error->message);
+		g_error_free(error);
+	}
+	g_free(dir);
+	g_free(path);
+	g_string_free(text, TRUE);
+	g_ptr_array_unref(sorted);
+}
+
+/* The open message's sender is on the list. */
+static bool sender_trusted(void) {
+	return ui.open != NULL && ui.open->sender != NULL &&
+		g_hash_table_contains(senders(), ui.open->sender);
+}
+
 static bool has_remote(const char *html) {
 	static GRegex *remote;
 	if (remote == NULL) {
@@ -912,8 +976,24 @@ static void paint_header(cairo_t *cr, int w, int h, void *data) {
 	x += button(cr, hits, x, y, "Forward", ACT_FORWARD, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Archive", ACT_ARCHIVE, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Delete", ACT_DELETE, 0, false) + PAD;
-	if (m->html != NULL && has_remote(m->html) && !ui.remote_images) {
-		x += button(cr, hits, x, y, "Show Images", ACT_SHOW_IMAGES, 0, false);
+	if (m->html != NULL && has_remote(m->html)) {
+		if (!ui.remote_images) {
+			x += button(cr, hits, x, y, "Show Images", ACT_SHOW_IMAGES, 0, false) +
+				PAD;
+		}
+		if (sender_trusted()) {
+			button(cr, hits, x, y, "Stop Showing Images", ACT_STOP_IMAGES, 0,
+				false);
+		} else if (m->sender != NULL) {
+			/* Who, if there's room to say. */
+			char *always = g_strdup_printf("Always for %s", m->sender);
+			if (x + gem_text_width(cr, always) + 2 * PAD > w - PAD) {
+				g_free(always);
+				always = g_strdup("Always for Sender");
+			}
+			button(cr, hits, x, y, always, ACT_ALWAYS_IMAGES, 0, false);
+			g_free(always);
+		}
 	}
 	y += BUTTON_H + PAD;
 
@@ -1011,7 +1091,10 @@ static void fetched(GBytes *raw, const char *error, void *data) {
 	ui.open_uid = uid;
 	g_free(ui.open_mailbox);
 	ui.open_mailbox = g_strdup(current_folder()->mailbox);
-	ui.remote_images = false;
+	/* Trusted senders' images show, unless the server says the message
+	 * may not really be theirs. */
+	ui.remote_images = sender_trusted() &&
+		m->sender_check != SENDER_UNVERIFIED;
 	struct summary *s = summary_for(uid);
 	struct folder *f = current_folder();
 	if (s != NULL && !s->seen) {
@@ -1028,6 +1111,10 @@ static void fetched(GBytes *raw, const char *error, void *data) {
 	show_body();
 	if (g_strcmp0(ui.status, "Opening...") == 0) {
 		set_status(NULL); /* but not "Archived..." and the like */
+	}
+	if (sender_trusted() && !ui.remote_images && has_remote(m->html)) {
+		set_status("Images not shown: the server couldn't confirm this is "
+			"from %s", m->sender);
 	}
 	app_menu_update(ui.menu);
 }
@@ -1826,6 +1913,21 @@ static void run_action(enum action action, int index) {
 		ui.remote_images = true;
 		gtk_widget_queue_draw(ui.header);
 		show_body();
+		app_menu_update(ui.menu);
+		break;
+	case ACT_ALWAYS_IMAGES:
+	case ACT_STOP_IMAGES:
+		if (ui.open == NULL || ui.open->sender == NULL) {
+			break;
+		}
+		set_image_sender(ui.open->sender, action == ACT_ALWAYS_IMAGES);
+		ui.remote_images = action == ACT_ALWAYS_IMAGES;
+		set_status(action == ACT_ALWAYS_IMAGES ?
+			"Images from %s will show" : "Images from %s will ask first",
+			ui.open->sender);
+		gtk_widget_queue_draw(ui.header);
+		show_body();
+		app_menu_update(ui.menu);
 		break;
 	case ACT_ATTACHMENT:
 		save_attachment(index);
@@ -1964,6 +2066,18 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_ARCHIVE, "Archive", "A", have);
 	app_menu_add_item(m, ACT_MOVE, "Move to Folder...", "M", have);
 	app_menu_add_item(m, ACT_DELETE, "Delete", "Del", have);
+	app_menu_add_separator(m);
+	bool remote = ui.open != NULL && ui.open->sender != NULL &&
+		has_remote(ui.open->html);
+	app_menu_add_item(m, ACT_SHOW_IMAGES, "Show Images", NULL,
+		remote && !ui.remote_images ? 0 : APP_MENU_DISABLED);
+	if (sender_trusted()) {
+		app_menu_add_item(m, ACT_STOP_IMAGES, "Stop Showing Images", NULL,
+			remote ? 0 : APP_MENU_DISABLED);
+	} else {
+		app_menu_add_item(m, ACT_ALWAYS_IMAGES, "Always Show Sender's Images",
+			NULL, remote ? 0 : APP_MENU_DISABLED);
+	}
 	g_ptr_array_free(t, TRUE);
 }
 
