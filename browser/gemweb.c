@@ -432,6 +432,24 @@ static const char *tab_title(struct tab *t) {
 
 /* ---- Tab bar ------------------------------------------------------------ */
 
+/* A tab playing sound shows the volume menu app's speaker, with two
+ * waves, at its right: points on a 15x11 grid. */
+#define SPEAKER_W 15
+#define SPEAKER_H 11
+static const signed char speaker[][2] = {
+	{4,0}, {3,1},{4,1}, {2,2},{4,2}, {0,3},{1,3},{2,3},{4,3}, {0,4},{4,4},
+	{0,5},{4,5}, {0,6},{4,6}, {0,7},{1,7},{2,7},{4,7}, {2,8},{4,8},
+	{3,9},{4,9}, {4,10},
+	{6,3},{7,4},{7,5},{7,6},{6,7},
+	{8,2},{9,3},{10,4},{10,5},{10,6},{9,7},{8,8},
+};
+
+static void draw_speaker(cairo_t *cr, int x, int y) {
+	for (size_t i = 0; i < G_N_ELEMENTS(speaker); i++) {
+		fill(cr, x + speaker[i][0], y + speaker[i][1], 1, 1);
+	}
+}
+
 static int tab_width(struct browser *b, int w) {
 	int n = b->tabs->len;
 	int tw = n > 0 ? (w - PLUS_W) / n : TAB_MAX_W;
@@ -450,14 +468,20 @@ static void paint_tabbar(struct browser *b, cairo_t *cr, int w, int h) {
 			black(cr);
 			fill(cr, x, 0, tw - 1, h - 1);
 		}
-		cairo_save(cr);
-		cairo_rectangle(cr, x + GADGET + 1, 0, tw - GADGET - 2, h - 1);
-		cairo_clip(cr);
+		bool playing = webkit_web_view_is_playing_audio(t->view);
+		int speaker_room = playing ? SPEAKER_W + 8 : 0;
 		if (active) {
 			white(cr);
 		} else {
 			black(cr);
 		}
+		if (playing) {
+			draw_speaker(cr, x + tw - 1 - 5 - SPEAKER_W, (h - 1 - SPEAKER_H) / 2);
+		}
+		cairo_save(cr);
+		cairo_rectangle(cr, x + GADGET + 1, 0, tw - GADGET - 2 - speaker_room,
+			h - 1);
+		cairo_clip(cr);
 		text(cr, tab_title(t), x + GADGET + 7, 0, h - 1);
 		cairo_restore(cr);
 
@@ -1346,6 +1370,8 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	gtk_widget_set_vexpand(GTK_WIDGET(t->view), TRUE);
 	g_object_set_data(G_OBJECT(t->view), "tab", t);
 	g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), t);
+	g_signal_connect_swapped(t->view, "notify::is-playing-audio",
+		G_CALLBACK(gtk_widget_queue_draw), t->browser->tabbar);
 	g_signal_connect(t->view, "notify::uri", G_CALLBACK(on_uri), t);
 	g_signal_connect(t->view, "notify::estimated-load-progress",
 		G_CALLBACK(on_progress), t);
