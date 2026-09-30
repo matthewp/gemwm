@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GemWrite
+GenericName=Word Processor
+Comment=Write documents, GEM style
+Exec=gemwrite %F
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=application/vnd.oasis.opendocument.text;text/plain;
+StartupNotify=true

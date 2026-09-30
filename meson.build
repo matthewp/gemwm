@@ -273,3 +273,84 @@ if gtk4.found()
 			install_dir: get_option('datadir') / 'applications')
 	endif
 endif
+
+# GemWrite: a word processor. Its core (write/core: the document, layout,
+# OpenDocument and Markdown, the editor and its command table) is forked
+# from Ream and needs no display; gemwrite-cli runs the same commands from
+# the shell. Optional: needs GTK 4, libxml2, libarchive and enchant.
+write_core_deps = [
+	dependency('glib-2.0'),
+	dependency('pangocairo', required: false),
+	dependency('libxml-2.0', required: false),
+	dependency('libarchive', required: false),
+	dependency('zlib', required: false),
+	dependency('enchant-2', required: false),
+	libm,
+]
+write_found = gtk4.found()
+foreach d : write_core_deps
+	write_found = write_found and d.found()
+endforeach
+if write_found
+	write_c_args = [
+		'-DGEMWRITE_VERSION="@0@"'.format(meson.project_version()),
+		'-D_GNU_SOURCE',
+		'-Wno-missing-field-initializers',
+		'-Wno-sign-compare',
+	]
+	write_core = static_library(
+		'gemwrite-core',
+		['write/core/doc/document.c', 'write/core/layout/layout_pango.c',
+			'write/core/io/zip.c', 'write/core/io/odt.c',
+			'write/core/io/markdown.c', 'write/core/edit/editor.c',
+			'write/core/edit/commands.c', 'write/core/edit/spell.c'],
+		dependencies: write_core_deps,
+		include_directories: 'write/core',
+		c_args: write_c_args,
+		override_options: ['c_std=gnu11'],
+	)
+	write_core_dep = declare_dependency(link_with: write_core,
+		dependencies: write_core_deps, include_directories: 'write/core')
+
+	executable(
+		'gemwrite',
+		['write/gemwrite.c', 'write/page.c', 'write/ruler.c',
+			'write/comments.c', 'write/find.c', 'write/fonts.c',
+			'write/print.c', 'write/settings.c', 'lib/app-menu.c',
+			'lib/gem-draw.c', 'lib/gem-ui.c', 'lib/gem-alert.c',
+			'lib/gem-file.c', 'lib/gem-popup.c', 'lib/gem-scrollbar.c',
+			'lib/gem-print.c', client_protocols],
+		dependencies: [write_core_dep, gtk4, dependency('gtk4-wayland'),
+			dependency('gtk4-unix-print'), wayland_client, cairo],
+		include_directories: 'lib',
+		c_args: write_c_args,
+		override_options: ['c_std=gnu11'],
+		install: true,
+	)
+	executable('gemwrite-cli', 'write/gemwrite-cli.c',
+		dependencies: write_core_dep,
+		c_args: write_c_args,
+		override_options: ['c_std=gnu11'],
+		install: true,
+	)
+	install_data('write/org.gemwm.GemWrite.desktop',
+		install_dir: get_option('datadir') / 'applications')
+	install_man('write/gemwrite-cli.1')
+
+	foreach t : ['document', 'odt', 'markdown', 'spell']
+		exe = executable('test_' + t, 'write/tests/test_' + t + '.c',
+			dependencies: write_core_dep, c_args: write_c_args,
+			override_options: ['c_std=gnu11'])
+		out = {'odt': 'gemwrite-roundtrip.odt', 'markdown': 'gemwrite-export.md'}
+		test('gemwrite-' + t, exe,
+			args: t in out ? [meson.current_build_dir() / out[t]] : [])
+	endforeach
+	render_pages = executable('render_pages', 'write/tests/render_pages.c',
+		dependencies: write_core_dep, c_args: write_c_args,
+		override_options: ['c_std=gnu11'])
+	test('gemwrite-render', render_pages,
+		args: [meson.current_build_dir() / 'gemwrite-page1.png'])
+	test('gemwrite-cli', find_program('write/tests/test_cli.sh'),
+		args: [meson.current_build_dir() / 'gemwrite-cli',
+			meson.current_build_dir() / 'gemwrite-cli-test'])
+endif

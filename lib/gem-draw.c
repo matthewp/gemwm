@@ -63,28 +63,52 @@ void gem_bitmap(cairo_t *cr, const char *const rows[], int n_rows, int x, int y)
 	}
 }
 
-void gem_draw_pixelated(cairo_t *cr, int w, int h,
-		void (*paint)(cairo_t *cr, int w, int h, void *data), void *data) {
-	/* [font] in GemWM's config reaches us as GEMWM_FONT(_SIZE). */
+const char *gem_font_family(void) {
 	static const char *font;
-	static int size;
 	if (font == NULL) {
 		font = g_getenv("GEMWM_FONT") ? g_getenv("GEMWM_FONT") : "monospace";
+	}
+	return font;
+}
+
+int gem_font_size(void) {
+	static int size;
+	if (size == 0) {
 		size = g_getenv("GEMWM_FONT_SIZE") ? atoi(g_getenv("GEMWM_FONT_SIZE")) : 0;
 		size = size > 0 ? size : 14;
 	}
-	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-	cairo_t *c = cairo_create(img);
-	cairo_set_antialias(c, CAIRO_ANTIALIAS_NONE);
-	cairo_select_font_face(c, font, CAIRO_FONT_SLANT_NORMAL,
+	return size;
+}
+
+void gem_set_font(cairo_t *cr) {
+	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+	cairo_select_font_face(cr, gem_font_family(), CAIRO_FONT_SLANT_NORMAL,
 		CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(c, size);
+	cairo_set_font_size(cr, gem_font_size());
 	cairo_font_options_t *opts = cairo_font_options_create();
 	cairo_font_options_set_antialias(opts, CAIRO_ANTIALIAS_NONE);
 	cairo_font_options_set_hint_style(opts, CAIRO_HINT_STYLE_FULL);
 	cairo_font_options_set_hint_metrics(opts, CAIRO_HINT_METRICS_ON);
-	cairo_set_font_options(c, opts);
+	cairo_set_font_options(cr, opts);
 	cairo_font_options_destroy(opts);
+}
+
+double gem_measure(const char *s) {
+	static cairo_t *cr;
+	if (cr == NULL) {
+		cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+		cr = cairo_create(img);
+		cairo_surface_destroy(img);
+		gem_set_font(cr);
+	}
+	return gem_text_width(cr, s);
+}
+
+void gem_draw_pixelated(cairo_t *cr, int w, int h,
+		void (*paint)(cairo_t *cr, int w, int h, void *data), void *data) {
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	cairo_t *c = cairo_create(img);
+	gem_set_font(c);
 	gem_white(c);
 	cairo_paint(c);
 	paint(c, w, h, data);

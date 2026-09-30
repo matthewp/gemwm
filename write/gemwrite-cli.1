@@ -1,0 +1,663 @@
+.TH GEMWRITE-CLI 1 "September 2026" "gemwrite" "User Commands"
+.SH NAME
+gemwrite-cli \- edit GemWrite documents from the shell or a script
+.SH SYNOPSIS
+.B gemwrite-cli
+.RI [ FILE ]
+.I COMMAND
+.RI [ ARGS ]...
+.RI [ COMMAND " [" ARGS ]...]...
+.br
+.B gemwrite-cli
+.RI [ FILE ]
+.B \-\-script
+.I SCRIPT
+.br
+.B gemwrite-cli \-\-list
+.SH DESCRIPTION
+.B gemwrite-cli
+loads a document into memory, runs a sequence of editing and query commands
+against it, and exits. It needs no display, so it works over SSH, in
+containers, and from programs that drive an editor on a user's behalf.
+.PP
+It offers the same operations as the GemWrite window: most commands here
+are also menu items and keyboard shortcuts in
+.BR gemwrite ,
+because both run the same command table.
+.PP
+Each invocation is independent. The caret starts at the beginning of the
+document, the commands run in order, and the in-memory document is discarded
+when the process exits. Nothing is written to disk unless a
+.B save
+or
+.B save-as
+command runs. Commands that need to build on each other (find something, then
+format it) must therefore run in the same invocation.
+.PP
+Commands take a fixed number of arguments, so several can follow one another
+on the command line without separators. A literal
+.B \-\-
+between commands is accepted and ignored for readability.
+.SH OPTIONS
+.TP
+.I FILE
+Document to load before running commands: OpenDocument Text
+.RB ( .odt )
+by extension, otherwise UTF-8 plain text. If omitted, the run starts with an
+empty untitled document, which
+.B save-as
+can write anywhere.
+.TP
+.BI \-\-script " SCRIPT"
+Read commands from
+.I SCRIPT
+one line at a time, or from standard input when
+.I SCRIPT
+is
+.BR \- .
+See
+.B SCRIPT MODE
+below. Commands given on the command line run first.
+.TP
+.BI \-\-author " NAME"
+Sign the comments and replies this run adds as
+.IR NAME ,
+instead of the
+.B author
+key in
+.I ~/.config/gemwrite/settings.ini
+or the account's name. Useful when a program comments on someone's behalf.
+.TP
+.B \-\-list
+Print every command with its arguments, grouped as below, and exit. This
+is generated from the command table and is always complete.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH COMMANDS
+Arguments in capitals are required. Where a command says
+.IR POS ,
+see
+.B POSITIONS
+below.
+.SS File
+.TP
+.BI open " FILE"
+Discard the current document without saving and load
+.IR FILE .
+Useful only in a script that handles several files in one run.
+.TP
+.B save
+Write the document back to the file it was loaded from. Fails on an untitled
+document.
+.TP
+.BI save-as " FILE"
+Write the document to
+.I FILE
+and make that the current file. The format follows the extension.
+.TP
+.B reload
+Read the file again, dropping unsaved changes, as one undo step: the caret
+stays where it was and
+.B undo
+brings the previous text back.
+.TP
+.BI export-pdf " FILE"
+Write every page to
+.I FILE
+as a PDF, at the document's page size, as it would print: comments aren't
+marked. Like
+.BR export-markdown ,
+this is a copy, not a save.
+.TP
+.BI export-markdown " FILE"
+Write the document to
+.I FILE
+as Markdown. The document keeps its own file and its unsaved changes: this
+is a copy, not a save. Title and Heading 1 become
+.BR # ,
+Heading 2 and 3
+.B ##
+and
+.BR ### ,
+Quote paragraphs a block quote, Note paragraphs a
+.B "> [!NOTE]"
+callout, list items
+.B -
+and
+.B 1.
+lines nested by four spaces, bold and italic asterisks, underline a
+.B <u>
+tag. Alignment, spacing, fonts and comments have no Markdown form and are
+left out. Text that would read as Markdown syntax is backslash-escaped.
+.SS Editing
+.TP
+.BR undo ", " redo
+Step back or forward through the edit history. A run of typed characters at
+one spot is a single step, as is a run of backspaces; paragraph breaks,
+formatting changes, and replacements of a selection are their own steps.
+Loading a file empties the history. Fails when there is nothing to undo or
+redo.
+.TP
+.BR cut ", " copy ", " paste
+Move or copy the selection to the clipboard, or insert the clipboard at the
+caret in place of the selection. The clipboard keeps character formatting
+and paragraph styles, lasts for the run, and is not the system clipboard.
+.B cut
+and
+.B copy
+fail without a selection;
+.B paste
+fails while the clipboard is empty.
+.TP
+.BI insert-text " TEXT"
+Insert
+.I TEXT
+at the caret, replacing the selection if there is one. Newlines inside
+.I TEXT
+start new paragraphs.
+.TP
+.B new-paragraph
+Split the paragraph at the caret, like pressing Enter.
+.TP
+.BR delete-backward ", " delete-forward
+Delete the selection, or one character before or after the caret when nothing
+is selected.
+.TP
+.B delete-selection
+Delete the selection; does nothing without one.
+.TP
+.B select-all
+Select the whole document.
+.TP
+.BI goto " POS"
+Place the caret at
+.I POS
+and clear the selection.
+.TP
+.BI select " FROM TO"
+Select from position
+.I FROM
+to position
+.IR TO .
+The caret ends at
+.IR TO .
+.TP
+.BI move " UNIT COUNT"
+Move the caret
+.I COUNT
+units; negative counts move backwards. See
+.B UNITS
+below.
+.TP
+.BI extend " UNIT COUNT"
+Like
+.B move
+but grows the selection instead of moving the caret alone.
+.TP
+.BI find " TEXT"
+Make
+.I TEXT
+the search term and select its first match after the current selection,
+wrapping to the start once. Prints the match's position. Fails if there is
+no match. Matching ignores case (see
+.BR match-case ),
+and a match never spans paragraphs.
+.TP
+.BR find-next ", " find-previous
+Select the next match of the search term after the selection, or the
+previous one before it, wrapping once. Prints the match's position.
+.TP
+.BI match-case " true|false"
+Whether the search term must match case; off by default.
+.TP
+.BI replace " TEXT"
+Replace the selected match of the search term with
+.I TEXT
+and select the next match. Fails when the selection is not a match. The
+new text keeps the formatting of the first character it replaced.
+.TP
+.BI replace-all " FIND TEXT"
+Make
+.I FIND
+the search term and replace every match with
+.IR TEXT ,
+as one undo step. Prints how many were replaced; fails if there were none.
+.SS Formatting
+.TP
+.BR bold ", " italic ", " underline
+Toggle the attribute on the selection, or on the next inserted text when
+nothing is selected. With a selection, the new state is the opposite of the
+first selected character.
+.TP
+.BI set-font " FAMILY"
+Set the font family, for example
+.B Serif
+or
+.BR "DejaVu Sans" .
+.TP
+.BI set-size " POINTS"
+Set the font size in points, 4 to 400. Decimals are allowed.
+.TP
+.BR font-bigger ", " font-smaller
+Step the size through the same list the toolbar uses.
+.TP
+.BI align " left" | center | right | justify
+Set the alignment of every paragraph the selection touches.
+.TP
+.BI line-spacing " FACTOR"
+Set the line spacing of every paragraph the selection touches, as a multiple
+of the font's line height: 1 is single, 1.5 is one and a half, 2 is double.
+Any value from 0.5 to 10 is accepted.
+.TP
+.BR spacing-single ", " spacing-1.5 ", " spacing-double
+Shorthands for the common line spacings.
+.TP
+.BR indent ", " outdent
+Move the left edge of every paragraph the selection touches in or out by
+half an inch (36pt), never past the margin or so far that less than an
+inch of the line is left; a list item nests or unnests instead. Going as
+far as it goes is not an error.
+.TP
+.BR indent-left ", " indent-right ", " indent-first " " POINTS
+Set one indent of every paragraph the selection touches, in points from
+the margin (72 to an inch). The first-line indent is measured from the
+left indent and may be negative for a hanging indent. Values are clamped so
+that an inch of the line is left for text; a list item has no first-line
+indent of its own, its label hangs instead.
+.TP
+.BI tab-add " POINTS TYPE"
+Add a tab stop at a position measured from the left indent, of type
+.BR left ", " center ", " right " or " decimal
+(text lines up on its decimal point). A stop within half a point of an
+existing one replaces it. Past a paragraph's last stop, tabs fall every
+half inch.
+.TP
+.BI tab-remove " POINTS"
+Remove the tab stop at that position; fails when none of the touched
+paragraphs has one.
+.TP
+.B tab-clear
+Remove every tab stop of the touched paragraphs.
+.SS Paragraph Style
+.TP
+.BI set-style " NAME"
+Apply a named paragraph style to every paragraph the selection touches. The
+built-in names are
+.BR Standard ", " Title ", " "Heading 1" ", " "Heading 2" ", " "Heading 3" ", " Quote " (an indented italic block quotation), and " Note " (a tinted box with a rule down its left edge);
+.B styles
+lists the names in the current document.
+.TP
+.BR style-body ", " style-title ", " style-h1 ", " style-h2 ", " style-h3 ", " style-quote ", " style-note
+Shorthands for the built-in styles.
+.SS Lists
+Items of a list are paragraphs in the
+.B List Bullet
+or
+.B List Number
+style, at a level of nesting from 0 to 9. Numbers are counted, never typed:
+they run along consecutive items at one level, start over after any other
+paragraph, and nested levels count on their own (1. a. i.; bullets go
+\(bu \(ci \(sq).
+.TP
+.BR list-bullet ", " list-number
+Make every paragraph the selection touches an item of that kind, keeping the
+level of any that already are items. When they all are that kind already,
+they return to body text instead, so each command toggles.
+.B indent
+and
+.B outdent
+(see Formatting) nest an item one level deeper or step it back out;
+outdenting a top-level item makes it body text.
+.B new-paragraph
+on an empty item and
+.B delete-backward
+at the start of one step out the same way, as Enter and Backspace do in the
+window.
+.SS Spelling
+Checking uses enchant, so the dictionaries are whatever the system has
+(hunspell packages, usually) and the personal word list is the one other
+programs share. The language is the locale's, or the
+.B spell-language
+key in
+.IR ~/.config/gemwrite/settings.ini .
+.TP
+.B spell-add
+Add the misspelled word at the caret to the personal word list. Fails when
+the caret is not on a misspelled word.
+.TP
+.B spell-ignore
+Accept the misspelled word at the caret for this run.
+.TP
+.BI spell-language " LANG"
+Check with the dictionary for
+.I LANG
+(a tag such as en_US; a bare language finds any dictionary for it).
+.SS Comments
+Comments attach to a range of text and are saved as OpenDocument annotations.
+A comment can cover any range, from one word to several paragraphs, so
+select just the words it is about: the usual way is
+.B find
+with the phrase, which selects it, then
+.BR comment-add ;
+.B select
+with two positions covers an exact range. Each command here is one undo
+step. Ids come from
+.BR comments .
+.TP
+.BI comment-add " TEXT"
+Comment on the selected text; fails without a selection. Select only the
+words the comment concerns (see above) rather than the whole paragraph, so
+the reader sees what it refers to. Prints the new comment's id. The author is the
+.B \-\-author
+option if given, else the
+.B author
+key in
+.IR ~/.config/gemwrite/settings.ini ,
+else the account's full name, else the login name; the date is now.
+.TP
+.BI comment-reply " ID TEXT"
+Reply to a comment; a reply to a reply joins the same thread. Prints the new
+reply's id.
+.TP
+.BI comment-edit " ID TEXT"
+Replace a comment's or reply's text.
+.TP
+.BI comment-delete " ID"
+Remove a comment, its replies, and its mark on the text; or remove one reply.
+.TP
+.BI comment-select " ID"
+Select the text a comment is on.
+.SS Query
+Queries print one JSON value on standard output and change nothing.
+.TP
+.B text
+The whole document as plain text, paragraphs separated by newlines.
+.TP
+.B selection
+The selected text.
+.TP
+.B caret
+Caret and anchor positions and whether a selection exists.
+.TP
+.B info
+Path, modified flag, paragraph count, word count, and page count.
+.TP
+.B paragraphs
+Every paragraph with its index, style name, alignment, line spacing, left
+indent in points, list kind (none, bullet or number) and level, and text.
+This is the
+easiest way to learn positions before editing.
+.TP
+.B styles
+Paragraph style names available in the document.
+.TP
+.B attrs
+The formatting the next typed character would get: bold, italic, underline,
+family, size, paragraph style, alignment, line spacing, left, right and
+first-line indents in points, tab stops (position and type), list kind and
+level, and the id of the comment on the text at the caret (0 for none).
+.TP
+.B comments
+Every comment in document order, each followed by its replies: id, parent
+(0 for a top-level comment), author, date, text, and the start and end
+positions of its text. A comment whose text has been deleted is not listed
+(undo brings it back).
+.TP
+.BI render " PNG PAGE"
+Paint page number
+.I PAGE
+(from 0) to a PNG at 144 dpi, using the same layout engine as the window.
+.TP
+.B misspellings
+Every word the dictionary does not know, in order: the word, its start and
+end positions, and the dictionary's suggestions, best first.
+.TP
+.B spell-languages
+The language tags with a dictionary installed.
+.SH POSITIONS
+Positions name a point between characters:
+.TP
+.B start
+The beginning of the document.
+.TP
+.B end
+The end of the document.
+.TP
+.B caret
+Where the caret is now.
+.TP
+.B anchor
+The other end of the selection; equals
+.B caret
+when nothing is selected.
+.TP
+.I P
+The beginning of paragraph
+.IR P ,
+counting from 0.
+.TP
+.IB P : C
+Character
+.I C
+of paragraph
+.IR P ,
+both counting from 0.
+.I C
+counts characters, not bytes, so it matches what
+.B paragraphs
+shows even with non-ASCII text; past the end of the paragraph it means the
+end.
+.SH UNITS
+Units for
+.B move
+and
+.BR extend :
+.TP
+.B char
+One character.
+.TP
+.B word
+To the previous or next word boundary.
+.TP
+.B line
+One visual line up or down, keeping the horizontal position, like the arrow
+keys.
+.TP
+.B line-edge
+To the start (negative) or end (positive) of the current visual line, like
+Home and End.
+.TP
+.B page
+About one page of lines.
+.TP
+.B doc
+To the start (negative) or end (positive) of the document.
+.SH SCRIPT MODE
+With
+.BR \-\-script ,
+lines are read one at a time and each is run as if it had been typed on the
+command line. Blank lines and lines beginning with
+.B #
+are skipped. Words are split with shell quoting rules, so double or single
+quotes group arguments containing spaces. A line may hold several commands.
+.PP
+Query output is flushed after every line, so a program holding both pipes can
+write a command, read its reply, and decide what to send next. There is no
+prompt.
+.PP
+An error prints the line number to standard error and stops the run. Lines
+after it do not execute; anything already saved stays saved.
+.SH OUTPUT
+Query commands print JSON, one value per line. Editing commands print nothing
+on success. Errors go to standard error prefixed with the command name.
+.SH EXAMPLES
+List the commands:
+.PP
+.nf
+.RS
+gemwrite-cli \-\-list
+.RE
+.fi
+.PP
+Create a document from nothing:
+.PP
+.nf
+.RS
+gemwrite-cli style-title insert-text "Trip Report" \\
+            new-paragraph style-body \\
+            insert-text "We saw a lynx near the river." \\
+            new-paragraph list-bullet insert-text "Bring boots" \\
+            new-paragraph insert-text "Bring a map" \\
+            save-as report.odt
+.RE
+.fi
+.PP
+See what is in a file before touching it:
+.PP
+.nf
+.RS
+gemwrite-cli report.odt info
+gemwrite-cli report.odt paragraphs
+.RE
+.fi
+.PP
+Replace a word everywhere, or just its first occurrence (the
+.B find
+selects it and
+.B insert-text
+overwrites the selection):
+.PP
+.nf
+.RS
+gemwrite-cli report.odt replace-all lynx bobcat save
+gemwrite-cli report.odt find lynx insert-text bobcat save
+.RE
+.fi
+.PP
+Make the first seven characters of the first paragraph bold and check the
+result:
+.PP
+.nf
+.RS
+gemwrite-cli report.odt select 0 0:7 bold attrs save
+.RE
+.fi
+.PP
+Append a centred paragraph at the end:
+.PP
+.nf
+.RS
+gemwrite-cli report.odt goto end new-paragraph \\
+            insert-text "The End" align center save
+.RE
+.fi
+.PP
+Turn paragraph 3 into a heading:
+.PP
+.nf
+.RS
+gemwrite-cli report.odt goto 3 style-h2 save
+.RE
+.fi
+.PP
+Look at the page:
+.PP
+.nf
+.RS
+gemwrite-cli report.odt render page0.png 0
+.RE
+.fi
+.PP
+Review a document. Each comment goes on just the words it is about:
+.B find
+selects a phrase (its first occurrence after the caret, so quote enough to
+be unique), and
+.B select
+covers an exact range when the phrase is not distinctive. The last command
+lists the comments with their ranges:
+.PP
+.nf
+.RS
+gemwrite-cli \-\-author Reviewer report.odt \\
+  find "very unique" comment-add "Either unique or not; drop 'very'." \\
+  find "the the" comment-add "Doubled word." \\
+  select 4:0 4:31 comment-add "This sentence contradicts the opening." \\
+  save comments
+.RE
+.fi
+.PP
+The whole paragraph is the right range only for a comment about the
+paragraph as a whole, such as its place in the argument (an offset past
+the end of a paragraph means its end):
+.PP
+.nf
+.RS
+gemwrite-cli report.odt select 4 4:9999 comment-add "Move this above the summary." save
+.RE
+.fi
+.PP
+The same edits from a script file:
+.PP
+.nf
+.RS
+cat > edits.txt <<'END'
+# fix the species and add a closing line
+find lynx
+insert-text bobcat
+goto end
+new-paragraph
+insert-text "Filed by the ranger on duty."
+save
+END
+gemwrite-cli report.odt \-\-script edits.txt
+.RE
+.fi
+.PP
+The same from standard input:
+.PP
+.nf
+.RS
+printf 'goto end\\nnew-paragraph\\ninsert-text "Addendum"\\nsave\\n' \\
+  | gemwrite-cli report.odt \-\-script \-
+.RE
+.fi
+.PP
+Batch over several files in one process:
+.PP
+.nf
+.RS
+gemwrite-cli \-\-script \- <<'END'
+open a.odt
+find draft
+insert-text final
+save
+open b.odt
+find draft
+insert-text final
+save
+END
+.RE
+.fi
+.PP
+Convert plain text to ODT:
+.PP
+.nf
+.RS
+gemwrite-cli notes.txt save-as notes.odt
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Every command succeeded.
+.TP
+.B 1
+A command failed or the file could not be loaded; the message on standard
+error says which.
+.TP
+.B 2
+Bad usage.
+.SH SEE ALSO
+.BR gemwrite ,
+GemWM's README

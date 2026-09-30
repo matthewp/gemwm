@@ -126,7 +126,8 @@ same name, and every other menu stays as it is.
 The defaults are the TOS 1.0 desktop menus, plus some working items under
 Desk: **Internet > Web Browser** opens GemWeb (or your default browser if
 GemWeb isn't installed), **Internet > GemMail** opens GemMail (see
-GemMail), **Tools > Terminal** opens `$TERMINAL` (foot
+GemMail), **Office > GemWrite** opens GemWrite (see GemWrite),
+**Tools > Terminal** opens `$TERMINAL` (foot
 if unset), and **Tools > Printing** opens the printing window (see
 Printing). The menu bar reads
 its config at startup; restart it with `pkill gemwm-menu; setsid gemwm-menu &`.
@@ -690,6 +691,76 @@ Connections are always encrypted, and the server's certificate checked
 self-signed one, `certificate = ~/server.pem` trusts that one. Sent and
 Trash are found by the flags servers give them, or by name, or `sent =`
 `trash =` and `archive =`.
+
+## GemWrite
+
+GemWrite (`gemwrite`, Desk > Office) is a word processor. Pages show as
+they'll print, in the document's own fonts, on GEM's grey; everything
+around them is GEM: the menus in the bar, a ruler, GEM's scroll bars, and
+an info line with the word count and the zoom. Documents are OpenDocument
+Text (`.odt`, as LibreOffice and Word read) or plain `.txt`. Its core, the
+document, layout, file formats and commands, is forked from Ream.
+
+- **File**: New (another window), Open..., Save, Save As..., Revert to
+  Saved, Export as Markdown... or PDF..., Print... (GemWM's print dialog,
+  or a PDF in Documents). Files are picked in GEM's item selector: edit
+  the directory line to go elsewhere or change its pattern, double-click
+  a folder to go in, the list's close box goes up.
+- **Edit**: Undo, Redo, the clipboard, Find... (^F) and Replace... (^H) in
+  a box that stays up while you work, every match boxed, Find Next (^G),
+  and Add Comment (^Alt+M).
+- **Style**: Bold, Italic, Underline, Font... (every family, the size and
+  a sample), Larger and Smaller (^] and ^[), and the paragraph styles:
+  Body Text, Title, Heading 1-3, Quote (a block quotation) and Note (a
+  tinted callout), ^Alt+0, T, 1-3, Q and N.
+- **Format**: alignment, line spacing (^1, ^5, ^2), Indent More and Less
+  (^M, ^Shift+M), Clear Tab Stops, and bulleted and numbered lists
+  (^Alt+8, ^Alt+7). In a list, Tab and Shift+Tab nest and unnest an item,
+  and Return on an empty one leaves the list.
+- **View**: the ruler, the comments, and zoom (^+, ^-, ^0 to fit).
+
+On the ruler, drag the bottom-left marker for the left indent, the
+top-left one for the first line and the right one for the right indent;
+click the scale to add a tab stop, drag one to move it or off the ruler to
+remove it. It measures in inches or centimetres, as your locale does.
+
+Select some text and a Comment button appears beside it (or right-click,
+or ^Alt+M); the comments are cards at the right, with Reply and Delete.
+Click a card to select its text, click its words to edit them. Comments
+are signed with your name (or `author`, below), and they're OpenDocument
+annotations, so LibreOffice and Word show them too. They're marked on the
+screen, not on paper.
+
+Spelling is checked as you type (a zigzag under words the dictionary
+doesn't know); right-click one for corrections, Add to Dictionary and
+Ignore Word. Dictionaries are enchant's, as GNOME's apps use: any hunspell
+dictionary works (`pacman -S hunspell-en_us`), and the language follows
+your locale unless `~/.config/gemwrite/settings.ini` says otherwise (no
+comments on the same line as a setting, here):
+
+    [general]
+    author = Jane Doe
+    spell-language = en_GB
+
+`author` signs your comments. Options has Check Spelling, Autosave
+(writes the file shortly after each change) and Sync with File: another
+program writing the file shows "Changed on disk" on the info line with
+Reload, and with Sync on it's read again by itself whenever nothing's
+unsaved.
+
+`gemwrite-cli` edits documents without a display, with the same commands,
+which makes it handy for scripts, and for an agent to edit or comment on
+what you have open (with Sync on, it appears as it's made):
+
+    gemwrite-cli --list                                # every command
+    gemwrite-cli notes.odt info                        # words, pages...
+    gemwrite-cli notes.odt find "First" bold save
+    gemwrite-cli --author Reviewer notes.odt find "Main" comment-add "Right word?" save
+    gemwrite-cli notes.odt export-pdf notes.pdf
+
+See `gemwrite-cli(1)`. GemWrite is built when GTK 4, libxml2, libarchive
+and enchant are there (`pacman -S libxml2 libarchive enchant`); `meson
+test` runs its core's tests.
 
 ## Windows
 

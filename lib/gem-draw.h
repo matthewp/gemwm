@@ -21,6 +21,15 @@ void gem_grey_out(cairo_t *cr, int x, int y, int w, int h);
 /* A picture given as rows of '#' (drawn in the current colour) and '.'. */
 void gem_bitmap(cairo_t *cr, const char *const rows[], int n_rows, int x, int y);
 
+/* The font GemWM's apps draw in: [font] in GemWM's config, which reaches
+ * them as GEMWM_FONT and GEMWM_FONT_SIZE. gem_set_font selects it, drawn
+ * without antialiasing, as gem_draw_pixelated does; gem_measure is the
+ * width of text in it, for laying out before anything's drawn. */
+const char *gem_font_family(void);
+int gem_font_size(void);
+void gem_set_font(cairo_t *cr);
+double gem_measure(const char *s);
+
 /* For a GtkDrawingArea's draw function: paint (called with a white 1x
  * canvas and the font set up) is pixel-doubled onto cr. */
 void gem_draw_pixelated(cairo_t *cr, int w, int h,
