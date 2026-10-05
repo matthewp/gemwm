@@ -679,7 +679,12 @@ provider. Then the newest messages of the folder you're looking at (the
 ones already downloaded to read offline) are categorized in the
 background, a few at a time: each row shows its categories, and they're
 listed under the folders with how many this folder has. Click one to see
-only those; click it again for all.
+only those; click it again for all. While it works, the right of the
+status line says how far it's got ("Categorizing: 8 of 20 done"), and a
+message still to be done has a dotted box where its categories will go;
+once done, a message with none is one no category fitted. If the AI
+can't be reached, the status line says why, and it tries again in five
+minutes.
 
 **Message > Categories...** puts the selected messages in categories
 yourself: what you choose is kept, never changed by AI, and your latest

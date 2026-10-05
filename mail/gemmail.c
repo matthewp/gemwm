@@ -114,6 +114,12 @@ static struct {
 
 	GArray *header_hits;
 	char *status;           /* the info line */
+	/* Work going on in the background, at the info line's right: how
+	 * much of the folder's been categorized, and of the bills read, since
+	 * each began (total 0: none going). */
+	char *categorise_mailbox;
+	int categorise_done, categorise_total;
+	int bills_done, bills_total;
 	int drag_offset;        /* dragging the scroll bar's slider */
 	bool dragging;
 
@@ -227,6 +233,20 @@ static void set_status(const char *format, ...) {
 	if (ui.info != NULL) {
 		gtk_widget_queue_draw(ui.info);
 	}
+}
+
+/* The background work, for the info line's right; NULL if there's none. */
+static char *progress(void) {
+	GString *s = g_string_new(NULL);
+	if (ui.categorise_total > 0) {
+		g_string_append_printf(s, "Categorizing: %d of %d done",
+			ui.categorise_done, ui.categorise_total);
+	}
+	if (ui.bills_total > 0) {
+		g_string_append_printf(s, "%sReading bills: %d of %d done",
+			s->len > 0 ? "   " : "", ui.bills_done, ui.bills_total);
+	}
+	return s->len > 0 ? g_string_free(s, FALSE) : (g_string_free(s, TRUE), NULL);
 }
 
 static struct folder *current_folder(void) {
@@ -366,10 +386,18 @@ static void categorised(const char *text, const char *error, void *data) {
 		/* Not again for a while: the next look would only fail the same. */
 		ui.categorise_after = g_get_monotonic_time() / G_USEC_PER_SEC +
 			CATEGORISE_WAIT;
+		ui.categorise_total = 0; /* the error says why it stopped */
 		set_status("Couldn't categorize: %s",
 			error != NULL ? error : "the answer couldn't be read");
 		categorising_free(job);
 		return;
+	}
+	if (g_strcmp0(job->mailbox, ui.categorise_mailbox) == 0) {
+		ui.categorise_done += job->uids->len;
+		if (ui.categorise_done >= ui.categorise_total) {
+			ui.categorise_total = 0; /* finished: the next look starts again */
+		}
+		gtk_widget_queue_draw(ui.info);
 	}
 	cache_begin(ui.cache);
 	for (guint i = 0; i < job->uids->len; i++) {
@@ -404,13 +432,51 @@ static void to_categorise_free(gpointer p) {
 	g_free(t);
 }
 
+/* Will be categorized, when its turn comes: one of the folder's newest,
+ * whose text is (or will be) fetched ahead, not yet categorized (or by
+ * other categories, or another model). */
+static bool to_categorise(const struct summary *s) {
+	if (!wanted(s) || s->size > AHEAD_SIZE) {
+		return false;
+	}
+	guint index;
+	return g_ptr_array_find(ui.all, s, &index) && index < AHEAD;
+}
+
+/* How far the folder's categorizing is, for the info line: what's done
+ * since it began, and what's left now. */
+static void categorise_progress(struct folder *f) {
+	int left = 0;
+	for (guint i = 0; f != NULL && ui.all != NULL && i < ui.all->len &&
+			i < AHEAD; i++) {
+		struct summary *s = ui.all->pdata[i];
+		left += wanted(s) && cache_has_body(ui.cache, f->mailbox, s->uid);
+	}
+	if (f == NULL || left == 0 || ui.categorise_total == 0 ||
+			g_strcmp0(f->mailbox, ui.categorise_mailbox) != 0) {
+		g_free(ui.categorise_mailbox);
+		ui.categorise_mailbox = f != NULL ? g_strdup(f->mailbox) : NULL;
+		ui.categorise_done = 0;
+	}
+	ui.categorise_total = left > 0 ? ui.categorise_done + left : 0;
+	gtk_widget_queue_draw(ui.info);
+}
+
 static gboolean categorise_now(gpointer data) {
 	categorise_id = 0;
 	struct folder *f = current_folder();
-	if (!categorising_on() || ui.categorising || f == NULL || ui.all == NULL ||
+	if (!categorising_on() || f == NULL || ui.all == NULL ||
 			g_get_monotonic_time() / G_USEC_PER_SEC < ui.categorise_after) {
+		if (ui.categorise_total > 0 && !ui.categorising) {
+			ui.categorise_total = 0;
+			gtk_widget_queue_draw(ui.info);
+		}
 		return G_SOURCE_REMOVE;
 	}
+	if (ui.categorising) {
+		return G_SOURCE_REMOVE;
+	}
+	categorise_progress(f);
 	GPtrArray *batch = g_ptr_array_new_with_free_func(to_categorise_free);
 	for (guint i = 0; i < ui.all->len && i < AHEAD &&
 			batch->len < CATEGORISE_BATCH; i++) {
@@ -1115,6 +1181,20 @@ static void paint_list(cairo_t *cr, int w, int h, void *data) {
 				gem_text(cr, names[t], tags_x + 4, y, ROW_H);
 			}
 			g_strfreev(names);
+		} else if (k == NULL && categorising_on() && to_categorise(s)) {
+			/* Not categorized yet, but it will be: a dotted box where its
+			 * categories will go. (None at all, once it's done: nothing
+			 * fitted.) */
+			int tw = 28;
+			tags_x -= tw + 4;
+			for (int d = 0; d < tw; d += 2) {
+				gem_fill(cr, tags_x + d, y + 2, 1, 1);
+				gem_fill(cr, tags_x + d, y + ROW_H - 3, 1, 1);
+			}
+			for (int d = 0; d < ROW_H - 4; d += 2) {
+				gem_fill(cr, tags_x, y + 2 + d, 1, 1);
+				gem_fill(cr, tags_x + tw - 1, y + 2 + d, 1, 1);
+			}
 		}
 		clipped(cr, s->subject[0] ? s->subject : "(no subject)", subject_x, y,
 			tags_x - subject_x - PAD / 2, ROW_H);
@@ -1778,6 +1858,8 @@ static void bills_read(const char *text, const char *error, void *data) {
 	if (answer == NULL) {
 		ui.bills_after = g_get_monotonic_time() / G_USEC_PER_SEC +
 			CATEGORISE_WAIT;
+		ui.bills_total = 0;
+		gtk_widget_queue_draw(ui.info);
 		set_status("Couldn't read bills: %s",
 			error != NULL ? error : "the answer couldn't be read");
 	} else {
@@ -1791,6 +1873,8 @@ static void bills_read(const char *text, const char *error, void *data) {
 		}
 		cache_commit(ui.cache);
 		g_hash_table_destroy(answer);
+		ui.bills_done += job->batch->len; /* the next look, at once, says
+		                                   * what's left, or that it's done */
 	}
 	g_ptr_array_unref(job->batch);
 	g_free(job->version);
@@ -1803,11 +1887,20 @@ static void bills_read(const char *text, const char *error, void *data) {
 static gboolean read_bills_now(gpointer data) {
 	if (!categorising_on() || ui.reading_bills || ui.cache == NULL ||
 			g_get_monotonic_time() / G_USEC_PER_SEC < ui.bills_after) {
+		if (!ui.reading_bills && ui.bills_total > 0) {
+			ui.bills_total = 0;
+			gtk_widget_queue_draw(ui.info);
+		}
 		return G_SOURCE_REMOVE;
 	}
 	char *version = bills_version();
 	GPtrArray *todo = cache_bills_unread(ui.cache, version, LIMIT);
 	ui.bills_left = todo->len;
+	if (todo->len == 0 && ui.categorise_total == 0) {
+		ui.bills_done = 0; /* done; while categorizing, more may come */
+	}
+	ui.bills_total = todo->len > 0 ? ui.bills_done + (int)todo->len : 0;
+	gtk_widget_queue_draw(ui.info);
 	if (ui.in_view == VIEW_BILLS) {
 		refresh_view();
 	}
@@ -3231,8 +3324,16 @@ static void add_shortcuts(GtkWidget *window, const struct key *keys, int n) {
 static void paint_info(cairo_t *cr, int w, int h, void *data) {
 	gem_black(cr);
 	gem_fill(cr, 0, 0, w, 1);
+	char *working = progress();
+	int right = w - PAD;
+	if (working != NULL) {
+		right -= (int)gem_text_width(cr, working);
+		gem_text(cr, working, right, 1, h - 1);
+		right -= 2 * PAD;
+		g_free(working);
+	}
 	if (ui.status != NULL) {
-		clipped(cr, ui.status, PAD, 1, w - 2 * PAD, h - 1);
+		clipped(cr, ui.status, PAD, 1, right - PAD, h - 1);
 	}
 }
 
