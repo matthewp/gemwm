@@ -26,6 +26,8 @@
 #include "gem-draw.h"
 #include "gem-scrollbar.h"
 #include "imap.h"
+#include "logos.h"
+#include "magazine.h"
 #include "message.h"
 #include "passwords.h"
 
@@ -55,7 +57,7 @@ enum action {
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
-	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL,
+	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
 
@@ -122,6 +124,11 @@ static struct {
 	bool categorising;
 	gint64 categorise_after; /* after an error, not before this */
 	char *session;          /* the password manager's, once unlocked */
+
+	/* The Newsletters view (magazine.h), made when first shown; in_view
+	 * while it's shown, or a message opened from it is. */
+	struct magazine *magazine;
+	bool in_view;
 } ui = { .folder = -1, .selected = -1, .anchor = -1, .pending_pick = -1,
 	.drop_folder = -1 };
 
@@ -133,6 +140,8 @@ static GtkWidget *pixel_area(int w, int h, GtkDrawingAreaDrawFunc draw,
 	GCallback pressed);
 static void move_to(struct folder *dest);
 static void open_message(int index);
+static void show_view(void);
+static bool viewing(void);
 static void show_list(void);
 static void compose(struct draft *d);
 
@@ -361,6 +370,9 @@ static void categorised(const char *text, const char *error, void *data) {
 	}
 	cache_commit(ui.cache);
 	g_hash_table_destroy(answer);
+	if (viewing()) {
+		magazine_load(ui.magazine, "Newsletter"); /* new ones on the shelf */
+	}
 	struct folder *f = current_folder();
 	if (f != NULL && strcmp(f->mailbox, job->mailbox) == 0) {
 		load_categorised();
@@ -508,6 +520,7 @@ static int folders_offset(void) {
 }
 
 static int categories_top(void);
+static int views_top(void);
 
 static int folders_height(void) {
 	int folders = ui.folder_list != NULL ? (int)ui.folder_list->len : 0;
@@ -552,7 +565,8 @@ static void paint_folders(cairo_t *cr, int w, int h, void *data) {
 	for (guint i = 0; i < ui.folder_list->len; i++) {
 		struct folder *f = ui.folder_list->pdata[i];
 		int y = PAD / 2 + i * ROW_H;
-		bool on = (int)i == ui.folder || (int)i == ui.drop_folder;
+		bool on = ((int)i == ui.folder && !ui.in_view) ||
+			(int)i == ui.drop_folder;
 		gem_black(cr);
 		if (on) {
 			gem_fill(cr, 0, y, w - 1, ROW_H);
@@ -574,10 +588,34 @@ static void paint_folders(cairo_t *cr, int w, int h, void *data) {
 	paint_categories(cr, w);
 }
 
-/* The categories go under the folders: a rule, then a row each. */
-static int categories_top(void) {
+/* Under the folders, the views: a rule, then Newsletters. Then the
+ * categories: a rule, then a row each. */
+static int views_top(void) {
 	int folders = ui.folder_list != NULL ? (int)ui.folder_list->len : 0;
 	return PAD / 2 + folders * ROW_H + ROW_H;
+}
+
+static int categories_top(void) {
+	return views_top() + ROW_H + ROW_H;
+}
+
+/* The Newsletters view, 13x9: a folded paper. */
+static const char *const paper_icon[] = {
+	"###########..",
+	"#.........##.",
+	"#.###.###.#.#",
+	"#.....###.#.#",
+	"#.###.....#.#",
+	"#.........#.#",
+	"#.#######.#.#",
+	"#.........#.#",
+	"#############",
+};
+
+static void dotted_rule(cairo_t *cr, int w, int y) {
+	for (int x = PAD; x < w - PAD; x += 2) {
+		gem_fill(cr, x, y, 1, 1);
+	}
 }
 
 /* A category, 13x9: a tag with its hole. */
@@ -605,11 +643,18 @@ static void paint_categories(cairo_t *cr, int w) {
 	if (!categorising_on() || ui.folder_list == NULL) {
 		return;
 	}
+	int y = views_top();
+	gem_black(cr);
+	dotted_rule(cr, w, y - ROW_H / 2);
+	if (ui.in_view) {
+		gem_fill(cr, 0, y, w - 1, ROW_H);
+		gem_white(cr);
+	}
+	gem_bitmap(cr, paper_icon, G_N_ELEMENTS(paper_icon), PAD, y + 5);
+	clipped(cr, "Newsletters", PAD + 18, y, w - 1 - PAD - (PAD + 18), ROW_H);
 	int top = categories_top();
 	gem_black(cr);
-	for (int x = PAD; x < w - PAD; x += 2) {
-		gem_fill(cr, x, top - ROW_H / 2, 1, 1);
-	}
+	dotted_rule(cr, w, top - ROW_H / 2);
 	for (guint i = 0; i < ui.categories->list->len; i++) {
 		struct category *k = ui.categories->list->pdata[i];
 		int y = top + i * ROW_H;
@@ -669,10 +714,10 @@ static void choose_category(int index) {
 		return;
 	}
 	const char *name = ((struct category *)ui.categories->list->pdata[index])->name;
-	bool off = g_strcmp0(ui.filter, name) == 0;
+	bool off = g_strcmp0(ui.filter, name) == 0 && !ui.in_view;
 	g_free(ui.filter);
 	ui.filter = off ? NULL : g_strdup(name);
-	if (ui.open != NULL) {
+	if (ui.open != NULL || ui.in_view) {
 		show_list();
 	}
 	refilter();
@@ -682,9 +727,13 @@ static void choose_category(int index) {
 static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 		gpointer data) {
 	y += folders_offset();
-	int top = categories_top();
-	if (ui.folder_list != NULL && y >= top) {
+	int top = categories_top(), views = views_top();
+	if (!categorising_on() || ui.folder_list == NULL || y < views - ROW_H) {
+		choose_folder(((int)y - PAD / 2) / ROW_H);
+	} else if (y >= top) {
 		choose_category(((int)y - top) / ROW_H);
+	} else if (y >= views && y < views + ROW_H) {
+		show_view();
 	} else {
 		choose_folder(((int)y - PAD / 2) / ROW_H);
 	}
@@ -1597,10 +1646,91 @@ static void header_pressed(GtkGestureClick *g, int n, double x, double y,
 static void show_list(void) {
 	g_clear_pointer(&ui.open, message_free);
 	g_clear_pointer(&ui.open_mailbox, g_free);
+	ui.in_view = false;
 	gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "list");
 	gtk_widget_grab_focus(ui.list);
 	status_counts();
+	gtk_widget_queue_draw(ui.folders);
 	app_menu_update(ui.menu);
+}
+
+/* ---- The Newsletters view ------------------------------------------------ */
+
+static void view_open(const char *mailbox, guint32 uid, void *data);
+
+static void logo_ready(void *data) {
+	if (ui.magazine != NULL) {
+		magazine_redraw(ui.magazine);
+	}
+}
+
+/* The view, from what's been categorized in every folder so far. Shown
+ * again, it's read again: what's been read or newly found since. */
+static void show_view(void) {
+	if (ui.cache == NULL || !categorising_on()) {
+		return;
+	}
+	if (ui.magazine == NULL) {
+		logos_init(logo_ready, NULL);
+		ui.magazine = magazine_new(ui.cache, view_open, NULL);
+		gtk_stack_add_named(GTK_STACK(ui.stack),
+			magazine_widget(ui.magazine), "view");
+	}
+	g_clear_pointer(&ui.open, message_free);
+	g_clear_pointer(&ui.open_mailbox, g_free);
+	ui.in_view = true;
+	magazine_load(ui.magazine, "Newsletter");
+	gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "view");
+	gtk_window_set_title(GTK_WINDOW(ui.window), "Newsletters");
+	magazine_focus(ui.magazine);
+	gtk_widget_queue_draw(ui.folders);
+	app_menu_update(ui.menu);
+}
+
+static bool viewing(void) {
+	return ui.in_view && ui.open == NULL;
+}
+
+static struct summary *summary_for(guint32 uid);
+static void fetched(GBytes *raw, const char *error, void *data);
+
+/* An issue chosen: its folder's chosen (the list behind it, so Reply,
+ * Archive and the rest work as ever), then it's opened there. Back comes
+ * back to the view. */
+static void view_open(const char *mailbox, guint32 uid, void *data) {
+	int index = -1;
+	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
+		if (strcmp(((struct folder *)ui.folder_list->pdata[i])->mailbox,
+				mailbox) == 0) {
+			index = i;
+		}
+	}
+	if (index < 0) {
+		set_status("Its folder's gone");
+		return;
+	}
+	if (index != ui.folder || ui.messages == NULL) {
+		choose_folder(index);
+	} else if (ui.filter != NULL) {
+		g_clear_pointer(&ui.filter, g_free);
+		refilter();
+	}
+	ui.in_view = true;
+	for (int i = 0; i < message_count(); i++) {
+		if (((struct summary *)ui.messages->pdata[i])->uid == uid) {
+			open_message(i);
+			return;
+		}
+	}
+	/* Older than the list goes back: fetched directly. */
+	GBytes *cached = cache_body(ui.cache, mailbox, uid);
+	if (cached != NULL) {
+		fetched(cached, NULL, GUINT_TO_POINTER(uid));
+		g_bytes_unref(cached);
+		return;
+	}
+	set_status("Opening...");
+	mail_fetch(ui.mail, mailbox, uid, true, fetched, GUINT_TO_POINTER(uid));
 }
 
 static struct summary *summary_for(guint32 uid) {
@@ -1926,7 +2056,9 @@ static void send_away(struct folder *f, GPtrArray *t, const char *to,
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.scroll);
 	gtk_widget_queue_draw(ui.folders);
-	if (ui.open != NULL) {
+	if (ui.open != NULL && ui.in_view) {
+		show_view();
+	} else if (ui.open != NULL) {
 		if (next >= 0) {
 			open_message(next);
 		} else {
@@ -2438,7 +2570,18 @@ static void run_action(enum action action, int index) {
 	}
 	switch (action) {
 	case ACT_BACK:
-		show_list();
+		if (ui.in_view) {
+			show_view();
+		} else {
+			show_list();
+		}
+		break;
+	case ACT_NEWSLETTERS:
+		if (viewing()) {
+			show_list();
+		} else {
+			show_view();
+		}
 		break;
 	case ACT_REPLY:
 	case ACT_REPLY_ALL:
@@ -2483,6 +2626,9 @@ static void run_action(enum action action, int index) {
 		categories_dialog();
 		break;
 	case ACT_VIEW_ALL:
+		if (viewing()) {
+			show_list();
+		}
 		if (ui.filter != NULL) {
 			g_clear_pointer(&ui.filter, g_free);
 			if (ui.open != NULL) {
@@ -2555,6 +2701,9 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 	if (ui.password != NULL) {
 		return FALSE;
 	}
+	if (viewing()) {
+		return FALSE; /* the view has its own */
+	}
 	bool listing = ui.open == NULL;
 	switch (keyval) {
 	case GDK_KEY_Up:
@@ -2591,7 +2740,7 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 	case GDK_KEY_Escape:
 	case GDK_KEY_BackSpace:
 		if (!listing) {
-			show_list();
+			run_action(ACT_BACK, 0);
 			return TRUE;
 		}
 		if (keyval == GDK_KEY_Escape && g_hash_table_size(ui.picked) > 1) {
@@ -2823,7 +2972,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "Message");
 	app_menu_add_item(m, ACT_OPEN, "Open", "Return",
 		ui.open == NULL && s != NULL ? 0 : APP_MENU_DISABLED);
-	app_menu_add_item(m, ACT_BACK, "Back to List", "Esc", open);
+	app_menu_add_item(m, ACT_BACK, ui.in_view ? "Back to Newsletters" :
+		"Back to List", "Esc", open);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_REPLY, "Reply", "^R", open);
 	app_menu_add_item(m, ACT_REPLY_ALL, "Reply All", "^Shift+R", open);
@@ -2857,13 +3007,17 @@ static void build_menus(struct app_menu *m, void *data) {
 	/* View: all the folder's messages, or one category's. */
 	if (categorising_on()) {
 		app_menu_add_menu(m, "View");
+		app_menu_add_item(m, ACT_NEWSLETTERS, "Newsletters", NULL,
+			viewing() ? APP_MENU_CHECKED : 0);
+		app_menu_add_separator(m);
 		app_menu_add_item(m, ACT_VIEW_ALL, "All Messages", NULL,
-			ui.filter == NULL ? APP_MENU_CHECKED : 0);
+			ui.filter == NULL && !viewing() ? APP_MENU_CHECKED : 0);
 		app_menu_add_separator(m);
 		for (guint i = 0; i < ui.categories->list->len; i++) {
 			const char *name = ((struct category *)ui.categories->list->pdata[i])->name;
 			app_menu_add_item(m, ACT_VIEW_CATEGORY + i, name, NULL,
-				g_strcmp0(ui.filter, name) == 0 ? APP_MENU_CHECKED : 0);
+				g_strcmp0(ui.filter, name) == 0 && !viewing() ?
+				APP_MENU_CHECKED : 0);
 		}
 	}
 	/* Merged into GemWM's Options; only with Augur there to ask. */

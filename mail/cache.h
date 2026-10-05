@@ -75,6 +75,18 @@ struct example {
 };
 GPtrArray *cache_category_examples(struct cache *c, guint limit);
 
+/* Every message, in any folder, put in a category (by AI or you), newest
+ * first: for views, which span folders. */
+struct filed {
+	char *mailbox;
+	struct summary s;          /* its from and subject owned here */
+};
+GPtrArray *cache_in_category(struct cache *c, const char *name);
+void filed_free(gpointer p);
+/* The address a cached message is from (lower case), read from its
+ * headers; NULL if it isn't here. */
+char *cache_from_address(struct cache *c, const char *mailbox, guint32 uid);
+
 /* A message's text, if it's been fetched before (NULL if not); keeping it. */
 GBytes *cache_body(struct cache *c, const char *mailbox, guint32 uid);
 void cache_set_body(struct cache *c, const char *mailbox, guint32 uid,

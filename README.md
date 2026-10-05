@@ -688,6 +688,17 @@ first turn it on): the descriptions are what the model goes by, so make
 them say what belongs there. Change them and mail is categorized again.
 `model =` or `tier =` under `[Categories]` there picks what Augur uses.
 
+**View > Newsletters** (or Newsletters, under the folders) shows your
+Newsletter mail as a magazine rack, from every folder that's been
+categorized so far: an icon for each publication, newest first, with how
+many issues you haven't read. Open one for its issues, and an issue to read
+it, in its own folder, so Reply, Archive and the rest work as ever; Back
+(Esc) goes back to the rack. The icons are the publications' own logos:
+the one a domain publishes for its mail (BIMI), else its website's icon,
+else its initials. Only the sending domain is looked up, never anything
+from the message, and logos are kept in `~/.cache/gemmail/logos` (SVG
+ones need librsvg).
+
 An HTML message runs no scripts and loads nothing from the web (no
 tracking pixels) until you press **Show Images**, for that message, or
 **Always for** its sender, which shows that address's images from then on

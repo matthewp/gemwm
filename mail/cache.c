@@ -2,6 +2,8 @@
  * GemMail's cache: see cache.h.
  */
 #include <glib/gstdio.h>
+#include <gmime/gmime.h>
+#include <string.h>
 #include <sqlite3.h>
 #include "cache.h"
 
@@ -410,6 +412,102 @@ GPtrArray *cache_category_examples(struct cache *c, guint limit) {
 	}
 	sqlite3_finalize(s);
 	return examples;
+}
+
+void filed_free(gpointer p) {
+	struct filed *f = p;
+	g_free(f->mailbox);
+	g_free(f->s.from);
+	g_free(f->s.subject);
+	g_free(f);
+}
+
+GPtrArray *cache_in_category(struct cache *c, const char *name) {
+	GPtrArray *out = g_ptr_array_new_with_free_func(filed_free);
+	/* names is newline-separated: match it whole, at either end or between. */
+	sqlite3_stmt *s = prepare(c, "SELECT m.mailbox, m.uid, m.sender, m.subject,"
+		" m.date, m.seen, m.size FROM messages m JOIN categories k"
+		" ON k.mailbox = m.mailbox AND k.uid = m.uid"
+		" WHERE instr(char(10) || k.names || char(10), char(10) || ?1 || char(10))"
+		" > 0 ORDER BY m.date DESC");
+	if (s == NULL) {
+		return out;
+	}
+	bind_text(s, 1, name);
+	while (sqlite3_step(s) == SQLITE_ROW) {
+		struct filed *f = g_new0(struct filed, 1);
+		f->mailbox = g_strdup((const char *)sqlite3_column_text(s, 0));
+		f->s.uid = sqlite3_column_int64(s, 1);
+		f->s.from = g_strdup((const char *)sqlite3_column_text(s, 2));
+		f->s.subject = g_strdup((const char *)sqlite3_column_text(s, 3));
+		f->s.date = sqlite3_column_int64(s, 4);
+		f->s.seen = sqlite3_column_int(s, 5);
+		f->s.size = sqlite3_column_int(s, 6);
+		g_ptr_array_add(out, f);
+	}
+	sqlite3_finalize(s);
+	return out;
+}
+
+/* The From header of a message file, unfolded; NULL if there's none. */
+static char *from_header(const char *text, gsize len) {
+	const char *end = text + len;
+	for (const char *line = text; line < end;) {
+		const char *nl = memchr(line, '\n', end - line);
+		const char *stop = nl != NULL ? nl : end;
+		if (stop == line || (stop == line + 1 && *line == '\r')) {
+			return NULL; /* the headers end */
+		}
+		if (g_ascii_strncasecmp(line, "From:", 5) == 0) {
+			GString *v = g_string_new_len(line + 5, stop - line - 5);
+			/* Continued on lines that start with space. */
+			while (nl != NULL && nl + 1 < end && (nl[1] == ' ' || nl[1] == '\t')) {
+				const char *next = memchr(nl + 1, '\n', end - nl - 1);
+				const char *nstop = next != NULL ? next : end;
+				g_string_append_len(v, nl + 1, nstop - nl - 1);
+				nl = next;
+			}
+			return g_string_free(v, FALSE);
+		}
+		line = nl != NULL ? nl + 1 : end;
+	}
+	return NULL;
+}
+
+char *cache_from_address(struct cache *c, const char *mailbox, guint32 uid) {
+	char *path = body_path(c, mailbox, uid);
+	if (path == NULL) {
+		return NULL;
+	}
+	/* Only the headers are wanted: the start of the file. */
+	char buf[16384];
+	FILE *f = g_fopen(path, "rb");
+	g_free(path);
+	if (f == NULL) {
+		return NULL;
+	}
+	size_t n = fread(buf, 1, sizeof buf, f);
+	fclose(f);
+	char *from = from_header(buf, n);
+	if (from == NULL) {
+		return NULL;
+	}
+	char *address = NULL;
+	InternetAddressList *list = internet_address_list_parse(NULL, from);
+	for (int i = 0; list != NULL && i < internet_address_list_length(list) &&
+			address == NULL; i++) {
+		InternetAddress *a = internet_address_list_get_address(list, i);
+		if (INTERNET_ADDRESS_IS_MAILBOX(a)) {
+			const char *addr = internet_address_mailbox_get_addr(
+				INTERNET_ADDRESS_MAILBOX(a));
+			address = addr != NULL ? g_ascii_strdown(addr, -1) : NULL;
+		}
+	}
+	if (list != NULL) {
+		g_object_unref(list);
+	}
+	g_free(from);
+	return address;
 }
 
 /* ---- Bodies ------------------------------------------------------------- */
