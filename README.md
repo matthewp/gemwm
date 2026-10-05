@@ -656,6 +656,8 @@ Archive (A) moves a message to the folder the server flags as the archive
 (`\Archive`, or Gmail's All Mail), else one called Archive, which is made
 the first time it's needed; Delete moves it to Trash (and out of Trash,
 deletes it for good). Either way, reading, the next message opens.
+**File > Empty Trash...** deletes everything in Trash for good, on the
+server too, once you've said so.
 In the list, Shift-click (or Shift+Up/Down) selects a run of messages,
 Ctrl-click adds or removes one, and Ctrl+A selects them all; Archive,
 Delete and Mark as Read (^U: read, or unread if they all are) then act on

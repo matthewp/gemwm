@@ -80,6 +80,9 @@ void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
  * isn't there); with to NULL, or the same folder, deletes them for good. */
 void mail_move(struct mail *m, const char *mailbox, const guint32 *uids,
 	guint n, const char *to, bool create, mail_done_fn done, void *data);
+/* Deletes everything in a folder for good (emptying the Trash). */
+void mail_empty(struct mail *m, const char *mailbox, mail_done_fn done,
+	void *data);
 /* Sends message (from and to the addresses given) by SMTP, then keeps a
  * copy in sent, if set. */
 void mail_send(struct mail *m, GBytes *message, const char *from,

@@ -23,6 +23,7 @@
 #include "augur.h"
 #include "cache.h"
 #include "categories.h"
+#include "gem-alert.h"
 #include "gem-draw.h"
 #include "gem-scrollbar.h"
 #include "imap.h"
@@ -63,7 +64,7 @@ enum action {
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
-	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS,
+	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
 
@@ -81,6 +82,7 @@ struct key {
 static struct {
 	GtkApplication *app;
 	GtkWidget *window, *folders, *stack, *list, *scroll, *header, *view, *info;
+	GtkOverlay *host;         /* over the window's content: alerts go here */
 	GtkWidget *folders_bar;   /* the folder pane's scroll bar, when needed */
 	GtkAdjustment *folders_adj; /* how far down the pane is scrolled, pixels */
 	struct app_menu *menu;
@@ -2966,6 +2968,58 @@ static void move_dialog(void) {
 	gtk_widget_grab_focus(mover.area);
 }
 
+/* ---- Emptying the Trash ------------------------------------------------- */
+
+static void trash_emptied(const char *error, void *data) {
+	char *mailbox = data;
+	if (error != NULL) {
+		set_status("%s", error);
+	} else {
+		struct folder *f = current_folder();
+		if (f != NULL && strcmp(f->mailbox, mailbox) == 0) {
+			/* Looking at it: it's empty now. */
+			if (ui.open != NULL) {
+				show_list();
+			}
+			clear_messages();
+			ui.selected = ui.anchor = -1;
+			g_hash_table_remove_all(ui.picked);
+			ui.top = 0;
+			gtk_widget_queue_draw(ui.list);
+			gtk_widget_queue_draw(ui.scroll);
+			load_messages();
+		}
+		refresh_view(); /* what was in it is off the shelf and the ledger */
+		mail_list_folders(ui.mail, got_folders, g_strdup("Trash emptied."));
+	}
+	g_free(mailbox);
+}
+
+static void empty_trash_answered(int button, void *data) {
+	struct folder *trash = folder_with_role(ROLE_TRASH);
+	if (button != 1 || trash == NULL || ui.mail == NULL) {
+		return;
+	}
+	set_status("Emptying %s...", trash->name);
+	mail_empty(ui.mail, trash->mailbox, trash_emptied, g_strdup(trash->mailbox));
+}
+
+/* Asks first: there's no getting them back. */
+static void empty_trash(void) {
+	struct folder *trash = folder_with_role(ROLE_TRASH);
+	if (trash == NULL || ui.mail == NULL || gem_alert_up(ui.host)) {
+		return;
+	}
+	char *text = trash->messages == 1 ?
+		g_strdup_printf("Delete the message in %s\nfor good?", trash->name) :
+		g_strdup_printf("Delete the %u messages in %s\nfor good?",
+			trash->messages, trash->name);
+	static const char *const buttons[] = { "Cancel", "Empty", NULL };
+	gem_alert(ui.host, GEM_ALERT_STOP, text, buttons, 0, 0,
+		empty_trash_answered, NULL);
+	g_free(text);
+}
+
 static void run_action(enum action action, int index) {
 	if (action >= ACT_VIEW_CATEGORY) {
 		/* Shown alone; chosen again (checked), all again. */
@@ -3079,6 +3133,9 @@ static void run_action(enum action action, int index) {
 		if (ui.account != NULL) {
 			compose(draft_new());
 		}
+		break;
+	case ACT_EMPTY_TRASH:
+		empty_trash();
 		break;
 	case ACT_GET_MAIL:
 		get_mail();
@@ -3375,6 +3432,10 @@ static void build_menus(struct app_menu *m, void *data) {
 		account ? 0 : APP_MENU_DISABLED);
 	app_menu_add_item(m, ACT_GET_MAIL, "Get Mail", "F5",
 		account ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
+	struct folder *trash = folder_with_role(ROLE_TRASH);
+	app_menu_add_item(m, ACT_EMPTY_TRASH, "Empty Trash...", NULL,
+		trash != NULL && trash->messages > 0 ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_QUIT, "Close", "^Q", 0);
 	app_menu_add_menu(m, "Message");
@@ -4112,6 +4173,7 @@ static void activate(GtkApplication *app, gpointer data) {
 	ui.info = pixel_area(0, INFO_H, draw_info, NULL);
 	GtkWidget *overlay = gtk_overlay_new();
 	gtk_overlay_set_child(GTK_OVERLAY(overlay), main);
+	ui.host = GTK_OVERLAY(overlay);
 	ui.ghost = pixel_area(0, 0, draw_ghost, NULL);
 	gtk_widget_set_can_target(ui.ghost, FALSE);
 	gtk_widget_set_visible(ui.ghost, FALSE);

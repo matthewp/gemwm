@@ -1206,6 +1206,44 @@ void mail_move(struct mail *m, const char *mailbox, const guint32 *uids,
 	queue(m, j);
 }
 
+/* Everything in the folder, deleted for good. Selected afresh, so the
+ * count's the server's now. */
+static int run_empty(struct mail *m, struct job *j) {
+	g_clear_pointer(&m->selected, g_free);
+	int r = select_mailbox(m, j->mailbox);
+	if (r != MAILIMAP_NO_ERROR) {
+		j->error = imap_error(m, "Couldn't open the folder", r);
+		return r;
+	}
+	struct mailimap_selection_info *sel = m->imap->imap_selection_info;
+	if (sel != NULL && sel->sel_exists > 0) {
+		struct mailimap_set *set = mailimap_set_new_interval(1, 0); /* 1:* */
+		r = store_flag(m, set, mailimap_flag_new_deleted(), true);
+		mailimap_set_free(set);
+		if (r == MAILIMAP_NO_ERROR) {
+			r = mailimap_expunge(m->imap);
+		}
+	}
+	if (r == MAILIMAP_NO_ERROR) {
+		cache_forget_folder(m->cache, j->mailbox);
+	} else {
+		j->error = imap_error(m, "Couldn't empty the folder", r);
+	}
+	return r;
+}
+
+static void do_empty(struct mail *m, struct job *j) {
+	run_with(m, j, run_empty);
+}
+
+void mail_empty(struct mail *m, const char *mailbox, mail_done_fn done,
+		void *data) {
+	struct job *j = job_new(do_empty, (GSourceFunc)finish_done,
+		G_CALLBACK(done), data);
+	j->mailbox = g_strdup(mailbox);
+	queue(m, j);
+}
+
 static void do_send(struct mail *m, struct job *j) {
 	if (j->mailbox == NULL) {
 		run_send(m, j); /* no copy: no IMAP needed */
