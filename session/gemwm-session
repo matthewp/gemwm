@@ -30,6 +30,8 @@ AUGUR_DISABLED=$(awk '
 export AUGUR_DISABLED
 
 # Tell D-Bus and systemd services (portals, notifications, Augur) where we
-# are.
-exec gemwm -s "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP AUGUR_DISABLED" \
+# are. XDG_SESSION_TYPE is how pinentry knows it can ask for a passphrase
+# in a window: without it, a pass or gpg run by a program with no terminal
+# (GemMail's password command, Augur's key command) fails rather than ask.
+exec gemwm -s "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE AUGUR_DISABLED" \
 	> "$log_dir/gemwm.log" 2>&1

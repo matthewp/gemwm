@@ -220,6 +220,18 @@ if gtk4.found()
 		install: true,
 	)
 
+	# pinentry-gem: GnuPG's passphrase prompt as a GEM alert, on Wayland, so
+	# pass and gpg run by programs with no terminal can ask (see README).
+	executable(
+		'pinentry-gem',
+		['pinentry/pinentry-gem.c', 'lib/gem-draw.c', 'lib/gem-ui.c'],
+		dependencies: [gtk4],
+		include_directories: 'lib',
+		install: true,
+	)
+	install_data('pinentry/org.gemwm.Pinentry.desktop',
+		install_dir: get_option('datadir') / 'applications')
+
 	# gemwm-crossword: crossword puzzles, after MPOS's. Also needs libsoup
 	# (for downloading them), which WebKitGTK uses too.
 	soup = dependency('libsoup-3.0', required: false)

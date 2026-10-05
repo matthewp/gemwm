@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Passphrase
+Comment=GnuPG's passphrase prompt
+Exec=pinentry-gem
+NoDisplay=true

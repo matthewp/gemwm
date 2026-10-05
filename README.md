@@ -783,6 +783,25 @@ See `gemwrite-cli(1)`. GemWrite is built when GTK 4, libxml2, libarchive
 and enchant are there (`pacman -S libxml2 libarchive enchant`); `meson
 test` runs its core's tests.
 
+## Passphrases
+
+`pass` and `gpg` ask for your key's passphrase through a pinentry, and
+GnuPG's own want X or a terminal. A program run with neither (GemMail's
+password command, Augur's key command) then can't ask, and fails until
+you've unlocked the key somewhere else. `pinentry-gem` asks in a GEM alert
+box instead, on Wayland. Point GnuPG at it in `~/.gnupg/gpg-agent.conf`:
+
+    pinentry-program /usr/local/bin/pinentry-gem
+
+then `gpgconf --kill gpg-agent` (it starts again when next needed). The
+first program to need the key gets the box; after that, the agent's cache
+(`default-cache-ttl`, in the same file) answers. With no Wayland display,
+over SSH say, it hands over to `pinentry-curses`.
+
+`gemwm-session` also tells programs started in the background that the
+session is graphical (`XDG_SESSION_TYPE`), which GnuPG's pinentries that
+can do Wayland look for.
+
 ## AI
 
 GemWM's programs get AI from [Augur](https://github.com/matthewp/augur), a
