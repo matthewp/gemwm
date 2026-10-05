@@ -197,6 +197,13 @@ void focus_view(struct view *view) {
 	struct server *server = view->server;
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *surface = view->xdg_toplevel->base->surface;
+	/* Focus going anywhere but the cycle's own step (a new window, a
+	 * click) ends the cycle first, there, so letting go of Super later
+	 * doesn't raise the cycle's pick over this. */
+	if (server->cycle_views != NULL &&
+			view != server->cycle_views[server->cycle_index]) {
+		view_cycle_end(server);
+	}
 	struct view *prev = server->focused_view;
 	if (prev == view && seat->keyboard_state.focused_surface == surface) {
 		return;
