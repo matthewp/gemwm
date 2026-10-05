@@ -48,6 +48,7 @@
 enum action {
 	ACT_NONE, ACT_BACK, ACT_REPLY, ACT_REPLY_ALL, ACT_FORWARD, ACT_DELETE,
 	ACT_UNREAD, ACT_SHOW_IMAGES, ACT_ALWAYS_IMAGES, ACT_STOP_IMAGES,
+	ACT_SHOW_ATTACHED,
 	ACT_ATTACHMENT, ACT_NEW, ACT_GET_MAIL,
 	ACT_ARCHIVE, ACT_SELECT_ALL, ACT_MOVE, ACT_MOVE_POPUP, ACT_MOVE_OK,
 	ACT_MOVE_CANCEL,
@@ -103,6 +104,7 @@ static struct {
 	guint32 open_uid;
 	char *open_mailbox;
 	bool remote_images;
+	bool show_attached;      /* its attached pictures, under the text */
 	int header_h;
 
 	GArray *header_hits;
@@ -1291,6 +1293,89 @@ static const char *policy(bool remote) {
 		"default-src 'none'; img-src cid: data:; style-src 'unsafe-inline'";
 }
 
+/* An attachment WebKit can show as a picture: by its type, or its name
+ * when the type says nothing. Not SVG: it can carry scripts and links. */
+static bool is_picture(const struct attachment *a) {
+	static const char *const types[] = { "image/png", "image/jpeg",
+		"image/jpg", "image/gif", "image/webp", "image/bmp", "image/avif" };
+	static const char *const ends[] = { ".png", ".jpg", ".jpeg", ".gif",
+		".webp", ".bmp", ".avif" };
+	for (size_t i = 0; i < G_N_ELEMENTS(types); i++) {
+		if (a->type != NULL && g_ascii_strcasecmp(a->type, types[i]) == 0) {
+			return true;
+		}
+	}
+	if (a->type != NULL && g_ascii_strncasecmp(a->type, "image/", 6) == 0) {
+		return false; /* SVG, TIFF, HEIC...: saved, not shown */
+	}
+	char *name = g_ascii_strdown(a->filename != NULL ? a->filename : "", -1);
+	bool picture = false;
+	for (size_t i = 0; i < G_N_ELEMENTS(ends) && !picture; i++) {
+		picture = g_str_has_suffix(name, ends[i]);
+	}
+	g_free(name);
+	return picture;
+}
+
+/* Its type, for a data: URI: as the attachment says, or by its name. */
+static const char *picture_type(const struct attachment *a) {
+	if (a->type != NULL && g_ascii_strncasecmp(a->type, "image/", 6) == 0) {
+		return a->type;
+	}
+	static const struct { const char *end, *type; } by_name[] = {
+		{ ".png", "image/png" }, { ".jpg", "image/jpeg" },
+		{ ".jpeg", "image/jpeg" }, { ".gif", "image/gif" },
+		{ ".webp", "image/webp" }, { ".bmp", "image/bmp" },
+		{ ".avif", "image/avif" },
+	};
+	char *name = g_ascii_strdown(a->filename != NULL ? a->filename : "", -1);
+	const char *type = "application/octet-stream";
+	for (size_t i = 0; i < G_N_ELEMENTS(by_name); i++) {
+		if (g_str_has_suffix(name, by_name[i].end)) {
+			type = by_name[i].type;
+		}
+	}
+	g_free(name);
+	return type;
+}
+
+static bool has_pictures(const struct message *m) {
+	for (guint i = 0; m != NULL && i < m->attachments->len; i++) {
+		if (is_picture(m->attachments->pdata[i])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* The attached pictures, under the message, each with its name: in the
+ * page itself (data:), which WebKit shows whatever their size. */
+static char *pictures_html(const struct message *m) {
+	/* Not a plain message's pre-wrapped text: the pictures as pictures. */
+	GString *s = g_string_new("<div style=\"margin: 16px 12px; padding-top: 8px;"
+		" border-top: 1px solid #000; font: 14px monospace; color: #000;"
+		" white-space: normal; overflow-wrap: normal;\">");
+	for (guint i = 0; i < m->attachments->len; i++) {
+		struct attachment *a = m->attachments->pdata[i];
+		if (!is_picture(a)) {
+			continue;
+		}
+		char *name = g_markup_escape_text(a->filename, -1);
+		gsize len;
+		const guchar *bytes = g_bytes_get_data(a->data, &len);
+		char *data = g_base64_encode(bytes, len);
+		g_string_append_printf(s, "<figure style=\"margin: 12px 0;\">"
+			"<img src=\"data:%s;base64,%s\" alt=\"%s\" style=\"max-width: 100%%;"
+			" height: auto; border: 1px solid #000;\">"
+			"<figcaption>%s</figcaption></figure>", picture_type(a), data, name,
+			name);
+		g_free(data);
+		g_free(name);
+	}
+	g_string_append(s, "</div>");
+	return g_string_free(s, FALSE);
+}
+
 /* GEM's scroll bars, and GEM's selection. */
 static const char page_css[] =
 	"::selection { background: #000; color: #fff; }"
@@ -1393,6 +1478,20 @@ static void show_body(void) {
 	char *body = m->html != NULL ? g_strdup(m->html) :
 		text_page(m->text != NULL ? m->text : "");
 	/* First, so it heads the page, before anything it covers. */
+	if (ui.show_attached) {
+		/* In the body, before it ends if it says so. */
+		char *pictures = pictures_html(m);
+		char *lower = g_ascii_strdown(body, -1);
+		char *end = g_strrstr(lower, "</body>");
+		char *with = end != NULL ?
+			g_strdup_printf("%.*s%s%s", (int)(end - lower), body, pictures,
+				body + (end - lower)) :
+			g_strconcat(body, pictures, NULL);
+		g_free(lower);
+		g_free(pictures);
+		g_free(body);
+		body = with;
+	}
 	char *page = g_strdup_printf("<meta charset=\"utf-8\">"
 		"<meta http-equiv=\"Content-Security-Policy\" content=\"%s\">"
 		"<style>%s</style>%s", policy(ui.remote_images), page_css, body);
@@ -1415,6 +1514,10 @@ static void paint_header(cairo_t *cr, int w, int h, void *data) {
 	x += button(cr, hits, x, y, "Forward", ACT_FORWARD, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Archive", ACT_ARCHIVE, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Delete", ACT_DELETE, 0, false) + PAD;
+	if (has_pictures(m) && !ui.show_attached) {
+		x += button(cr, hits, x, y, "Show Attached Images", ACT_SHOW_ATTACHED, 0,
+			false) + PAD;
+	}
 	if (m->html != NULL && has_remote(m->html)) {
 		if (!ui.remote_images) {
 			x += button(cr, hits, x, y, "Show Images", ACT_SHOW_IMAGES, 0, false) +
@@ -1532,6 +1635,7 @@ static void fetched(GBytes *raw, const char *error, void *data) {
 	ui.open_mailbox = g_strdup(current_folder()->mailbox);
 	/* Trusted senders' images show, unless the server says the message
 	 * may not really be theirs. */
+	ui.show_attached = false;
 	ui.remote_images = sender_trusted() &&
 		m->sender_check != SENDER_UNVERIFIED;
 	struct summary *s = summary_for(uid);
@@ -2388,6 +2492,12 @@ static void run_action(enum action action, int index) {
 			gtk_widget_queue_draw(ui.folders);
 		}
 		break;
+	case ACT_SHOW_ATTACHED:
+		ui.show_attached = true;
+		gtk_widget_queue_draw(ui.header);
+		show_body();
+		app_menu_update(ui.menu);
+		break;
 	case ACT_SHOW_IMAGES:
 		ui.remote_images = true;
 		gtk_widget_queue_draw(ui.header);
@@ -2733,6 +2843,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_separator(m);
 	bool remote = ui.open != NULL && ui.open->sender != NULL &&
 		has_remote(ui.open->html);
+	app_menu_add_item(m, ACT_SHOW_ATTACHED, "Show Attached Images", NULL,
+		has_pictures(ui.open) && !ui.show_attached ? 0 : APP_MENU_DISABLED);
 	app_menu_add_item(m, ACT_SHOW_IMAGES, "Show Images", NULL,
 		remote && !ui.remote_images ? 0 : APP_MENU_DISABLED);
 	if (sender_trusted()) {

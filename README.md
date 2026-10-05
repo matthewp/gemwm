@@ -648,7 +648,8 @@ left, with their unread counts; the main pane lists a folder's newest
 messages (a diamond marks unread ones), and opening one (double-click or
 Return) shows it in that same pane, with Back, Reply, Reply All, Forward,
 Archive and Delete above it, and its attachments as buttons that save them
-in Downloads. Escape goes back to the list.
+in Downloads. A message with pictures attached (PNG, JPEG, GIF, WebP...)
+has **Show Attached Images**, which shows them under its text. Escape goes back to the list.
 
 Archive (A) moves a message to the folder the server flags as the archive
 (`\Archive`, or Gmail's All Mail), else one called Archive, which is made
