@@ -1,6 +1,6 @@
 # GemWM
 
-![GemWM: the GEM menu bar, a terminal and the Bluetooth window on the green desktop](docs/screenshot.png)
+![GemWM: the GEM menu bar and windows, with Claude Code working on GemWM in a terminal, on the desktop pattern](docs/screenshot.png)
 
 A Wayland compositor (wlroots 0.19, C) that looks like Atari TOS/GEM:
 the green colour-ST desktop, a GEM menu bar, and black and white GEM
