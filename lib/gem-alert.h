@@ -29,6 +29,10 @@ void gem_alert(GtkOverlay *host, enum gem_alert_icon icon, const char *text,
 	void *data);
 /* Whether host has an alert (or another held box, see gem_hold) up. */
 bool gem_alert_up(GtkOverlay *host);
+/* An alert's icon, GEM_ALERT_ICON square, with its top-left at x, y: for
+ * things that look like alerts (notifications). */
+#define GEM_ALERT_ICON 32
+void gem_alert_paint_icon(cairo_t *cr, enum gem_alert_icon icon, int x, int y);
 
 /* For other boxes that hold a window the same way (the item selector):
  * box goes over host, centred, and everything else waits until

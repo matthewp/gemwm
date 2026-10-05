@@ -132,6 +132,7 @@ static const char default_config[] =
 	"[Desk > Tools]\n"
 	"Terminal = ${TERMINAL:-gemwm-terminal}\n"
 	"Printing = gemwm-printing\n"
+	"Notifications = gemwm-notify --history\n"
 	"\n"
 	"[File]\n"
 	"Open\n"
@@ -178,6 +179,7 @@ static const char default_config[] =
 	"Wi-Fi = exec gemwm-wifi --menu-app\n"
 	"Bluetooth = exec gemwm-bluetooth --menu-app\n"
 	"Volume = exec gemwm-volume --menu-app\n"
+	"Notifications = exec gemwm-notify --menu-app\n"
 	"Battery = exec gemwm-battery\n"
 	"Clock = exec gemwm-clock\n";
 

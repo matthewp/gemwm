@@ -99,7 +99,7 @@ static const char *const question[] = {
 	"......#####.....",
 };
 
-static void paint_icon(cairo_t *cr, enum gem_alert_icon icon, int x, int y) {
+void gem_alert_paint_icon(cairo_t *cr, enum gem_alert_icon icon, int x, int y) {
 	gem_black(cr);
 	switch (icon) {
 	case GEM_ALERT_NONE:
@@ -139,7 +139,7 @@ static void paint(cairo_t *cr, int w, int h, void *data) {
 	g_array_set_size(a->hits, 0);
 	gem_dialog_frame(cr, w, h);
 	int top = GEM_BORDER + 2 * GEM_PAD;
-	paint_icon(cr, a->icon, GEM_BORDER + 2 * GEM_PAD, top);
+	gem_alert_paint_icon(cr, a->icon, GEM_BORDER + 2 * GEM_PAD, top);
 	for (int i = 0; a->lines[i] != NULL; i++) {
 		gem_text(cr, a->lines[i], text_x(a), top + i * GEM_ROW_H, GEM_ROW_H);
 	}

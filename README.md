@@ -326,6 +326,30 @@ each with a GEM slider and Mute. The volume keys run `gemwm-volume up`,
 at once. It uses PulseAudio, or PipeWire's PulseAudio server, and is built
 when GTK 4 and `libpulse` are there.
 
+## Notifications
+
+`gemwm-notify` shows notifications as GEM would have: GEM had none, but
+it had form_alert, so each is a small alert box that doesn't wait for
+you, under the menu bar at the right. It has a close box, the app's name
+and the time, the note icon (stop, for critical ones), and its actions
+as buttons; click the body for the app's default action. Up to three show
+at once, newest at the top; each goes after five seconds (or as long as
+the app asks), but waits while the pointer's over it, and critical ones
+stay until you close them.
+
+A bell in the menu bar, with a count, shows only while there are
+notifications you haven't seen: one you closed or clicked is seen, one
+that just timed out isn't. Click it, or choose **Desk > Tools >
+Notifications**, for the history (the last 200, kept in
+`~/.local/state/gemwm/notifications`), which marks them all seen;
+**File > Clear All** empties it. **Options > Do Not Disturb** there keeps
+everything but critical notifications from popping up: they go quietly
+into the history, and the bell shows they came.
+
+D-Bus starts it the first time a program sends a notification, so no
+other notification daemon should be installed: with mako, say,
+`sudo pacman -R mako`, and log in again.
+
 ## Animation
 
 In tiling and scrolling modes, changes to the layout are animated: a new

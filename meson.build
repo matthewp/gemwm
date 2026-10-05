@@ -240,10 +240,34 @@ if gtk4.found()
 	install_data('pinentry/org.gemwm.Pinentry.desktop',
 		install_dir: get_option('datadir') / 'applications')
 
+	json_glib = dependency('json-glib-1.0', required: false)
+
+	# gemwm-notify: notifications as small GEM alerts under the menu bar,
+	# their history and Do Not Disturb (see README). Needs gtk4-layer-shell
+	# for the pop-ups; D-Bus starts it when a program first sends one.
+	layer_shell = dependency('gtk4-layer-shell-0', required: false)
+	if layer_shell.found() and json_glib.found()
+		executable(
+			'gemwm-notify',
+			['notify/gemwm-notify.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+				'lib/gem-draw.c', 'lib/gem-scrollbar.c', 'lib/gem-ui.c',
+				client_protocols],
+			dependencies: [layer_shell, gtk4, dependency('gtk4-wayland'),
+				json_glib, wayland_client],
+			include_directories: 'lib',
+			install: true,
+		)
+		configure_file(
+			input: 'notify/org.gemwm.Notify.service.in',
+			output: 'org.gemwm.Notify.service',
+			configuration: { 'bindir': get_option('prefix') / get_option('bindir') },
+			install_dir: get_option('datadir') / 'dbus-1' / 'services',
+		)
+	endif
+
 	# gemwm-greeter: the login screen, for greetd (gemwm -G gemwm-greeter;
 	# see README). Who logged in last is kept in /var/cache/gemwm-greeter,
 	# which systemd-tmpfiles makes for the greeter user.
-	json_glib = dependency('json-glib-1.0', required: false)
 	if json_glib.found()
 		executable(
 			'gemwm-greeter',
