@@ -240,6 +240,25 @@ if gtk4.found()
 	install_data('pinentry/org.gemwm.Pinentry.desktop',
 		install_dir: get_option('datadir') / 'applications')
 
+	# gemwm-greeter: the login screen, for greetd (gemwm -G gemwm-greeter;
+	# see README). Who logged in last is kept in /var/cache/gemwm-greeter,
+	# which systemd-tmpfiles makes for the greeter user.
+	json_glib = dependency('json-glib-1.0', required: false)
+	if json_glib.found()
+		executable(
+			'gemwm-greeter',
+			['greeter/gemwm-greeter.c', 'lib/gem-alert.c', 'lib/gem-draw.c',
+				'lib/gem-popup.c', 'lib/gem-ui.c'],
+			dependencies: [gtk4, json_glib],
+			include_directories: 'lib',
+			override_options: ['c_std=gnu11'],
+			install: true,
+		)
+		install_data('greeter/gemwm-greeter.tmpfiles',
+			rename: 'gemwm-greeter.conf',
+			install_dir: get_option('prefix') / 'lib' / 'tmpfiles.d')
+	endif
+
 	# gemwm-crossword: crossword puzzles, after MPOS's. Also needs libsoup
 	# (for downloading them), which WebKitGTK uses too.
 	soup = dependency('libsoup-3.0', required: false)

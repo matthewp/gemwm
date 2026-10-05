@@ -1,0 +1,3 @@
+# gemwm-greeter remembers who logged in last, and with which session, here
+# (it runs as greetd's greeter user).
+d /var/cache/gemwm-greeter 0755 greeter greeter -

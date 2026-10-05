@@ -181,6 +181,20 @@ static const char default_config[] =
 	"Battery = exec gemwm-battery\n"
 	"Clock = exec gemwm-clock\n";
 
+/* Before anyone's logged in (GemWM's greeter, gemwm -G): Desk, to
+ * restart or shut down, and the clock and battery; nothing that runs
+ * programs, and no user's file. */
+static const char greeter_config[] =
+	"[Desk]\n"
+	"Desktop Info...\n"
+	"-\n"
+	"Restart... = [Restart the computer?] systemctl reboot\n"
+	"Shut Down... = [Shut down the computer?] systemctl poweroff\n"
+	"\n"
+	"[" APPS_SECTION "]\n"
+	"Battery = exec gemwm-battery\n"
+	"Clock = exec gemwm-clock\n";
+
 struct menu;
 
 struct item {
@@ -284,6 +298,7 @@ static struct {
 	const char *font;
 	int font_size;
 	int quiet_title; /* title just clicked shut: no hover-open until left */
+	bool greeter;    /* GEMWM_GREETER: before login (greeter_config) */
 
 	/* Workspaces, from the control socket. ws_count 0: no buttons. */
 	/* A GEM alert box asking before a command runs. */
@@ -493,7 +508,8 @@ static void parse_config(FILE *f, bool replace) {
 }
 
 static void load_config(void) {
-	FILE *f = fmemopen((void *)default_config, strlen(default_config), "r");
+	const char *text = st.greeter ? greeter_config : default_config;
+	FILE *f = fmemopen((void *)text, strlen(text), "r");
 	parse_config(f, false);
 	fclose(f);
 
@@ -506,7 +522,7 @@ static void load_config(void) {
 		snprintf(path, sizeof(path), "%s/.config/gemwm/menu",
 			home ? home : "");
 	}
-	if ((f = fopen(path, "r")) != NULL) {
+	if (!st.greeter && (f = fopen(path, "r")) != NULL) {
 		parse_config(f, true);
 		fclose(f);
 	}
@@ -1009,7 +1025,7 @@ static struct menu *desktop_menu(const char *title) {
 static void rebuild_bar(void) {
 	close_menu(); /* its menu may be gone */
 	st.n_bar_menus = 0;
-	if (st.focus_id == 0) {
+	if (st.focus_id == 0 || st.greeter) { /* the greeter's window has none */
 		for (int i = 0; i < st.n_menus; i++) {
 			st.bar_menus[st.n_bar_menus++] = &st.menus[i];
 		}
@@ -1095,7 +1111,7 @@ static void ipc_read(void) {
 		*nl = '\0';
 		int active, count;
 		if (sscanf(start, "{\"event\":\"workspaces\",\"active\":%d,\"count\":%d",
-				&active, &count) == 2) {
+				&active, &count) == 2 && !st.greeter) { /* none to switch to */
 			changed |= active != st.ws_active || count != st.ws_count;
 			/* The window menu lists the workspaces. */
 			menus_changed |= st.focus_id != 0 && count != st.ws_count;
@@ -2378,6 +2394,7 @@ int main(void) {
 	st.font_size = getenv("GEMWM_FONT_SIZE") ? atoi(getenv("GEMWM_FONT_SIZE")) : 0;
 	st.font_size = st.font_size > 0 ? st.font_size : 14;
 	st.quiet_title = -1;
+	st.greeter = getenv("GEMWM_GREETER") != NULL;
 	load_config();
 
 	st.display = wl_display_connect(NULL);

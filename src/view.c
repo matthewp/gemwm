@@ -22,9 +22,26 @@ void view_frame_style(struct view *view, struct frame_style *style) {
 }
 
 /* Whether we draw a frame round it: not if the client does its own, nor
- * while it's fullscreen. */
+ * while it's fullscreen, nor the greeter's (gemwm -G). */
 static bool framed(struct view *view) {
-	return view->ssd && !view->fullscreen;
+	return view->ssd && !view->fullscreen && !view->server->greeter;
+}
+
+/* The greeter's windows (gemwm -G) fill the space under the menu bar, as
+ * the desktop does; again whenever that changes. */
+void greeter_fit(struct server *server) {
+	struct view *view;
+	wl_list_for_each(view, &server->views, link) {
+		struct wlr_box area;
+		if (!view->xdg_toplevel->base->initialized ||
+				(!output_usable_area_at(server, view->x + 1, view->y + 1, &area) &&
+				!output_usable_area_at(server, server->cursor->x,
+					server->cursor->y, &area))) {
+			continue;
+		}
+		view_move(view, area.x, area.y);
+		wlr_xdg_toplevel_set_size(view->xdg_toplevel, area.width, area.height);
+	}
 }
 
 void view_extents(struct view *view, int *w, int *h) {
@@ -678,6 +695,9 @@ static void view_map(struct wl_listener *listener, void *data) {
 		x = clamp(x, area.x, area.x + area.width - b.width);
 		y = clamp(y, area.y, area.y + area.height - b.height);
 		view_move(view, x, y);
+	} else if (server->greeter) {
+		view_move(view, area.x, area.y);
+		wlr_xdg_toplevel_set_size(view->xdg_toplevel, area.width, area.height);
 	} else {
 		int step = server->cascade++ % 8;
 		view_move(view, area.x + 32 + step * GEM_GADGET,

@@ -151,6 +151,7 @@ struct server {
 	struct wl_list outputs;
 	struct wl_listener new_output;
 	float output_scale;
+	bool greeter; /* gemwm -G: the login screen (see main.c) */
 };
 
 struct output {
@@ -302,6 +303,7 @@ void process_interactive_motion(struct server *server);
 void end_interactive(struct server *server);
 void view_cycle(struct server *server, int direction, bool held);
 void view_cycle_end(struct server *server);
+void greeter_fit(struct server *server);
 void highlight_update(struct server *server);
 
 /* scrollbar.c */

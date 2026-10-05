@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/pidfd.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -65,6 +66,36 @@ void spawn(const char *cmd) {
 	} else if (pid > 0) {
 		waitpid(pid, NULL, 0);
 	}
+}
+
+/* The greeter (gemwm -G): run as our own child, not double-forked, so we
+ * know when it's done: then so are we, and greetd starts the session it
+ * chose. */
+static int greeter_exited(int fd, uint32_t mask, void *data) {
+	struct server *server = data;
+	waitpid(-1, NULL, WNOHANG);
+	wlr_log(WLR_INFO, "The greeter has finished");
+	wl_display_terminate(server->wl_display);
+	return 0;
+}
+
+static void spawn_greeter(struct server *server, const char *cmd) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
+		_exit(127);
+	}
+	int fd = pid > 0 ? pidfd_open(pid, 0) : -1;
+	if (fd < 0) {
+		wlr_log(WLR_ERROR, "Couldn't start the greeter: %s", cmd);
+		wl_display_terminate(server->wl_display);
+		return;
+	}
+	wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display), fd,
+		WL_EVENT_READABLE, greeter_exited, server);
 }
 
 /* Starts the menu bar: the gemwm-menu next to our own binary (so it works
@@ -475,13 +506,17 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
 static void usage(const char *argv0) {
 	printf("Usage: %s [-s startup command] [-S output scale, default auto] [-M]\n"
+		"       %s -G greeter   (the login screen, for greetd)\n"
 		"\n"
 		"  -M          don't start the gemwm-menu menu bar\n"
+		"  -G greeter  run the greeter, frameless under the menu bar, with no\n"
+		"              key bindings and /etc/gemwm/greeter.conf; quit when it\n"
+		"              does\n"
 		"\n"
 		"       %s msg <command>   control a running GemWM (no command: help)\n"
 		"\n"
 		"Key bindings are set in ~/.config/gemwm/config (see README).\n",
-		argv0, argv0);
+		argv0, argv0, argv0);
 }
 
 int main(int argc, char *argv[]) {
@@ -495,10 +530,17 @@ int main(int argc, char *argv[]) {
 	server.output_scale = 0; /* auto */
 
 	int c;
-	while ((c = getopt(argc, argv, "s:S:Mh")) != -1) {
+	while ((c = getopt(argc, argv, "s:S:G:Mh")) != -1) {
 		switch (c) {
 		case 's':
 			startup_cmd = optarg;
+			break;
+		case 'G':
+			server.greeter = true;
+			startup_cmd = optarg;
+			/* For the menu bar, which then shows only what's safe
+			 * before anyone's logged in. */
+			setenv("GEMWM_GREETER", "1", true);
 			break;
 		case 'M':
 			start_menu = false;
@@ -634,7 +676,9 @@ int main(int argc, char *argv[]) {
 	if (start_menu) {
 		spawn_menu();
 	}
-	if (startup_cmd) {
+	if (startup_cmd && server.greeter) {
+		spawn_greeter(&server, startup_cmd);
+	} else if (startup_cmd) {
 		spawn(startup_cmd);
 	}
 	wlr_log(WLR_INFO, "Running on WAYLAND_DISPLAY=%s", socket);

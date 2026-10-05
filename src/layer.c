@@ -39,6 +39,9 @@ void layers_arrange(struct output *output) {
 	}
 	output->usable_area = usable;
 	tile_arrange(server); /* the room for tiles may have changed */
+	if (server->greeter) {
+		greeter_fit(server);
+	}
 }
 
 bool output_usable_area_at(struct server *server, double lx, double ly,

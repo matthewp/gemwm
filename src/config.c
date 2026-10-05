@@ -380,7 +380,13 @@ void config_load(struct server *server) {
 	char path[4096];
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	const char *home = getenv("HOME");
-	if (xdg != NULL && xdg[0] != '\0') {
+	if (server->greeter) {
+		/* No one's logged in: the system's, for the desktop's look
+		 * (GEMWM_GREETER_CONFIG: another, to try one out). */
+		const char *conf = getenv("GEMWM_GREETER_CONFIG");
+		snprintf(path, sizeof(path), "%s",
+			conf != NULL ? conf : "/etc/gemwm/greeter.conf");
+	} else if (xdg != NULL && xdg[0] != '\0') {
 		snprintf(path, sizeof(path), "%s/gemwm/config", xdg);
 	} else {
 		snprintf(path, sizeof(path), "%s/.config/gemwm/config",
@@ -389,6 +395,13 @@ void config_load(struct server *server) {
 	if ((f = fopen(path, "r")) != NULL) {
 		parse(server, f, path);
 		fclose(f);
+	}
+	if (server->greeter) {
+		/* Nothing to run from a key before login: no terminals. */
+		for (int i = 0; i < server->n_bindings; i++) {
+			free(server->bindings[i].action);
+		}
+		server->n_bindings = 0;
 	}
 	server->mode_configured = true;
 	highlight_update(server);
