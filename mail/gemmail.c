@@ -24,6 +24,7 @@
 #include "cache.h"
 #include "categories.h"
 #include "gem-draw.h"
+#include "gem-scrollbar.h"
 #include "imap.h"
 #include "message.h"
 #include "passwords.h"
@@ -53,7 +54,8 @@ enum action {
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
-	ACT_CATEGORIES_CANCEL,
+	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL,
+	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
 
 struct hit {
@@ -70,6 +72,8 @@ struct key {
 static struct {
 	GtkApplication *app;
 	GtkWidget *window, *folders, *stack, *list, *scroll, *header, *view, *info;
+	GtkWidget *folders_bar;   /* the folder pane's scroll bar, when needed */
+	GtkAdjustment *folders_adj; /* how far down the pane is scrolled, pixels */
 	struct app_menu *menu;
 	struct account *account;
 	char *account_error;
@@ -495,9 +499,49 @@ static const char *const folder_icon[] = {
 	"#############",
 };
 
+/* How far the folder pane's scrolled, and how tall what's in it is. */
+static int folders_offset(void) {
+	return ui.folders_adj != NULL ? (int)gtk_adjustment_get_value(ui.folders_adj) :
+		0;
+}
+
+static int categories_top(void);
+
+static int folders_height(void) {
+	int folders = ui.folder_list != NULL ? (int)ui.folder_list->len : 0;
+	if (categorising_on() && ui.folder_list != NULL) {
+		return categories_top() + ui.categories->list->len * ROW_H + PAD / 2;
+	}
+	return PAD / 2 + folders * ROW_H + PAD / 2;
+}
+
+/* The scroll bar fitted to what's there: shown only when it doesn't all
+ * fit. Out of the drawing, which mustn't change the layout. */
+static gboolean fit_folders_bar(gpointer data) {
+	int h = gtk_widget_get_height(ui.folders), total = folders_height();
+	bool needed = total > h;
+	double value = needed ? CLAMP(gtk_adjustment_get_value(ui.folders_adj), 0,
+		total - h) : 0;
+	gtk_adjustment_configure(ui.folders_adj, value, 0, needed ? total : h,
+		ROW_H, MAX(h - ROW_H, ROW_H), h);
+	gtk_widget_set_visible(ui.folders_bar, needed);
+	return G_SOURCE_REMOVE;
+}
+
 static void paint_folders(cairo_t *cr, int w, int h, void *data) {
 	gem_black(cr);
-	gem_fill(cr, w - 1, 0, 1, h);
+	/* The pane's edge; the scroll bar draws its own when it's there. */
+	if (!gtk_widget_get_visible(ui.folders_bar)) {
+		gem_fill(cr, w - 1, 0, 1, h);
+	}
+	int total = folders_height();
+	bool needed = total > h;
+	if (needed != gtk_widget_get_visible(ui.folders_bar) ||
+			(int)gtk_adjustment_get_upper(ui.folders_adj) != (needed ? total : h) ||
+			(int)gtk_adjustment_get_page_size(ui.folders_adj) != h) {
+		g_idle_add(fit_folders_bar, NULL);
+	}
+	cairo_translate(cr, 0, -folders_offset());
 	if (ui.folder_list == NULL) {
 		gem_text(cr, ui.account == NULL ? "No account" : "Connecting...",
 			PAD, PAD, ROW_H);
@@ -591,6 +635,13 @@ static void draw_folders(GtkDrawingArea *area, cairo_t *cr, int w, int h,
 	gem_draw_pixelated(cr, w, h, paint_folders, NULL);
 }
 
+static gboolean folders_scrolled(GtkEventControllerScroll *c, double dx,
+		double dy, gpointer data) {
+	gtk_adjustment_set_value(ui.folders_adj,
+		gtk_adjustment_get_value(ui.folders_adj) + dy * 3 * ROW_H);
+	return TRUE;
+}
+
 static void choose_folder(int index) {
 	if (ui.folder_list == NULL || index < 0 || index >= (int)ui.folder_list->len ||
 			!((struct folder *)ui.folder_list->pdata[index])->selectable) {
@@ -628,6 +679,7 @@ static void choose_category(int index) {
 
 static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 		gpointer data) {
+	y += folders_offset();
 	int top = categories_top();
 	if (ui.folder_list != NULL && y >= top) {
 		choose_category(((int)y - top) / ROW_H);
@@ -705,7 +757,7 @@ static void show_messages(struct folder *f, GPtrArray *messages) {
 	GPtrArray *all = g_ptr_array_new();
 	GPtrArray *view = g_ptr_array_new();
 	ui.selected = ui.anchor = -1;
-	guint unseen = 0;
+	guint unseen = 0, total = messages->len;
 	for (guint i = 0; i < messages->len; i++) {
 		struct summary *s = g_memdup2(messages->pdata[i], sizeof(struct summary));
 		s->from = g_strdup(s->from);
@@ -728,10 +780,10 @@ static void show_messages(struct folder *f, GPtrArray *messages) {
 		}
 	}
 	g_hash_table_destroy(was);
-	clear_messages();
+	clear_messages(); /* messages too, if it was all: not to be used after */
 	ui.all = all;
 	ui.messages = view;
-	f->messages = MAX(f->messages, messages->len);
+	f->messages = MAX(f->messages, total);
 	f->unseen = MAX(f->unseen, unseen);
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.scroll);
@@ -1034,6 +1086,7 @@ static void list_released(GtkGestureClick *g, int n, double x, double y,
 /* ---- Dragging messages to a folder --------------------------------------- */
 
 static int folder_at(double y) {
+	y += folders_offset();
 	int i = ((int)y - PAD / 2) / ROW_H;
 	return ui.folder_list != NULL && y >= PAD / 2 &&
 		i < (int)ui.folder_list->len ? i : -1;
@@ -2273,6 +2326,12 @@ static void move_dialog(void) {
 }
 
 static void run_action(enum action action, int index) {
+	if (action >= ACT_VIEW_CATEGORY) {
+		/* Shown alone; chosen again (checked), all again. */
+		choose_category(action - ACT_VIEW_CATEGORY);
+		app_menu_update(ui.menu);
+		return;
+	}
 	switch (action) {
 	case ACT_BACK:
 		show_list();
@@ -2318,6 +2377,16 @@ static void run_action(enum action action, int index) {
 	}
 	case ACT_CATEGORIES:
 		categories_dialog();
+		break;
+	case ACT_VIEW_ALL:
+		if (ui.filter != NULL) {
+			g_clear_pointer(&ui.filter, g_free);
+			if (ui.open != NULL) {
+				show_list();
+			}
+			refilter();
+			gtk_widget_queue_draw(ui.folders);
+		}
 		break;
 	case ACT_SHOW_IMAGES:
 		ui.remote_images = true;
@@ -2672,6 +2741,18 @@ static void build_menus(struct app_menu *m, void *data) {
 	} else {
 		app_menu_add_item(m, ACT_ALWAYS_IMAGES, "Always Show Sender's Images",
 			NULL, remote ? 0 : APP_MENU_DISABLED);
+	}
+	/* View: all the folder's messages, or one category's. */
+	if (categorising_on()) {
+		app_menu_add_menu(m, "View");
+		app_menu_add_item(m, ACT_VIEW_ALL, "All Messages", NULL,
+			ui.filter == NULL ? APP_MENU_CHECKED : 0);
+		app_menu_add_separator(m);
+		for (guint i = 0; i < ui.categories->list->len; i++) {
+			const char *name = ((struct category *)ui.categories->list->pdata[i])->name;
+			app_menu_add_item(m, ACT_VIEW_CATEGORY + i, name, NULL,
+				g_strcmp0(ui.filter, name) == 0 ? APP_MENU_CHECKED : 0);
+		}
 	}
 	/* Merged into GemWM's Options; only with Augur there to ask. */
 	if (augur_enabled()) {
@@ -3288,7 +3369,18 @@ static void activate(GtkApplication *app, gpointer data) {
 	gtk_widget_set_vexpand(main, TRUE);
 	ui.folders = pixel_area(FOLDERS_W, 0, draw_folders,
 		G_CALLBACK(folders_pressed));
+	GtkEventController *folders_wheel = gtk_event_controller_scroll_new(
+		GTK_EVENT_CONTROLLER_SCROLL_VERTICAL |
+		GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
+	g_signal_connect(folders_wheel, "scroll", G_CALLBACK(folders_scrolled), NULL);
+	gtk_widget_add_controller(ui.folders, folders_wheel);
 	gtk_box_append(GTK_BOX(main), ui.folders);
+	ui.folders_adj = gtk_adjustment_new(0, 0, 0, ROW_H, ROW_H, 0);
+	g_signal_connect_swapped(ui.folders_adj, "value-changed",
+		G_CALLBACK(gtk_widget_queue_draw), ui.folders);
+	ui.folders_bar = gem_scrollbar_new(GTK_ORIENTATION_VERTICAL, ui.folders_adj);
+	gtk_widget_set_visible(ui.folders_bar, FALSE);
+	gtk_box_append(GTK_BOX(main), ui.folders_bar);
 
 	ui.stack = gtk_stack_new();
 	gtk_widget_set_hexpand(ui.stack, TRUE);
