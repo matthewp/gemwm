@@ -27,6 +27,8 @@
 #include "gem-scrollbar.h"
 #include "imap.h"
 #include "logos.h"
+#include "bills.h"
+#include "ledger.h"
 #include "magazine.h"
 #include "message.h"
 #include "passwords.h"
@@ -46,6 +48,7 @@
 #define CATEGORISE_TICK 20   /* seconds between looks for mail to categorise */
 #define CATEGORISE_WAIT 300  /* seconds to leave it after an error */
 #define EXAMPLES 12          /* your own choices, sent as examples */
+#define BILLS_BATCH 4        /* bills read in a request: they're long */
 
 enum action {
 	ACT_NONE, ACT_BACK, ACT_REPLY, ACT_REPLY_ALL, ACT_FORWARD, ACT_DELETE,
@@ -57,7 +60,7 @@ enum action {
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
-	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS,
+	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
 
@@ -125,10 +128,17 @@ static struct {
 	gint64 categorise_after; /* after an error, not before this */
 	char *session;          /* the password manager's, once unlocked */
 
-	/* The Newsletters view (magazine.h), made when first shown; in_view
-	 * while it's shown, or a message opened from it is. */
+	/* The views: Newsletters (magazine.h) and Bills (ledger.h), each made
+	 * when first shown; in_view the one shown, or that a message open was
+	 * opened from. */
 	struct magazine *magazine;
-	bool in_view;
+	struct ledger *ledger;
+	enum view_kind { VIEW_NONE, VIEW_NEWSLETTERS, VIEW_BILLS } in_view;
+	/* Reading bills (bills.h): a request out, how many are left, and
+	 * after an error, not before. */
+	bool reading_bills;
+	int bills_left;
+	gint64 bills_after;
 } ui = { .folder = -1, .selected = -1, .anchor = -1, .pending_pick = -1,
 	.drop_folder = -1 };
 
@@ -140,7 +150,9 @@ static GtkWidget *pixel_area(int w, int h, GtkDrawingAreaDrawFunc draw,
 	GCallback pressed);
 static void move_to(struct folder *dest);
 static void open_message(int index);
-static void show_view(void);
+static void show_view(enum view_kind kind);
+static void refresh_view(void);
+static void read_bills_soon(void);
 static bool viewing(void);
 static void show_list(void);
 static void compose(struct draft *d);
@@ -370,9 +382,8 @@ static void categorised(const char *text, const char *error, void *data) {
 	}
 	cache_commit(ui.cache);
 	g_hash_table_destroy(answer);
-	if (viewing()) {
-		magazine_load(ui.magazine, "Newsletter"); /* new ones on the shelf */
-	}
+	refresh_view(); /* new ones on the shelf, or in the ledger */
+	read_bills_soon();
 	struct folder *f = current_folder();
 	if (f != NULL && strcmp(f->mailbox, job->mailbox) == 0) {
 		load_categorised();
@@ -486,6 +497,7 @@ static void reload_categories(void) {
 static gboolean categorise_tick(gpointer data) {
 	reload_categories();
 	categorise_soon();
+	read_bills_soon();
 	return G_SOURCE_CONTINUE;
 }
 
@@ -596,7 +608,7 @@ static int views_top(void) {
 }
 
 static int categories_top(void) {
-	return views_top() + ROW_H + ROW_H;
+	return views_top() + 2 * ROW_H + ROW_H;
 }
 
 /* The Newsletters view, 13x9: a folded paper. */
@@ -610,6 +622,19 @@ static const char *const paper_icon[] = {
 	"#.#######.#.#",
 	"#.........#.#",
 	"#############",
+};
+
+/* The Bills view, 13x9: a ruled ledger, open. */
+static const char *const ledger_icon[] = {
+	"######.######",
+	"#....#.#....#",
+	"#.##.#.#.##.#",
+	"#....#.#....#",
+	"#.##.#.#.##.#",
+	"#....#.#....#",
+	"#.##.#.#.##.#",
+	"#....#.#....#",
+	"######.######",
 };
 
 static void dotted_rule(cairo_t *cr, int w, int y) {
@@ -646,12 +671,23 @@ static void paint_categories(cairo_t *cr, int w) {
 	int y = views_top();
 	gem_black(cr);
 	dotted_rule(cr, w, y - ROW_H / 2);
-	if (ui.in_view) {
-		gem_fill(cr, 0, y, w - 1, ROW_H);
-		gem_white(cr);
+	static const struct {
+		enum view_kind kind;
+		const char *name;
+		const char *const *icon;
+	} views[] = {
+		{ VIEW_NEWSLETTERS, "Newsletters", paper_icon },
+		{ VIEW_BILLS, "Bills", ledger_icon },
+	};
+	for (guint i = 0; i < G_N_ELEMENTS(views); i++, y += ROW_H) {
+		gem_black(cr);
+		if (ui.in_view == views[i].kind) {
+			gem_fill(cr, 0, y, w - 1, ROW_H);
+			gem_white(cr);
+		}
+		gem_bitmap(cr, views[i].icon, 9, PAD, y + 5);
+		clipped(cr, views[i].name, PAD + 18, y, w - 1 - PAD - (PAD + 18), ROW_H);
 	}
-	gem_bitmap(cr, paper_icon, G_N_ELEMENTS(paper_icon), PAD, y + 5);
-	clipped(cr, "Newsletters", PAD + 18, y, w - 1 - PAD - (PAD + 18), ROW_H);
 	int top = categories_top();
 	gem_black(cr);
 	dotted_rule(cr, w, top - ROW_H / 2);
@@ -733,7 +769,9 @@ static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 	} else if (y >= top) {
 		choose_category(((int)y - top) / ROW_H);
 	} else if (y >= views && y < views + ROW_H) {
-		show_view();
+		show_view(VIEW_NEWSLETTERS);
+	} else if (y >= views + ROW_H && y < views + 2 * ROW_H) {
+		show_view(VIEW_BILLS);
 	} else {
 		choose_folder(((int)y - PAD / 2) / ROW_H);
 	}
@@ -1646,7 +1684,7 @@ static void header_pressed(GtkGestureClick *g, int n, double x, double y,
 static void show_list(void) {
 	g_clear_pointer(&ui.open, message_free);
 	g_clear_pointer(&ui.open_mailbox, g_free);
-	ui.in_view = false;
+	ui.in_view = VIEW_NONE;
 	gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "list");
 	gtk_widget_grab_focus(ui.list);
 	status_counts();
@@ -1654,7 +1692,7 @@ static void show_list(void) {
 	app_menu_update(ui.menu);
 }
 
-/* ---- The Newsletters view ------------------------------------------------ */
+/* ---- The views ------------------------------------------------------------ */
 
 static void view_open(const char *mailbox, guint32 uid, void *data);
 
@@ -1664,31 +1702,158 @@ static void logo_ready(void *data) {
 	}
 }
 
-/* The view, from what's been categorized in every folder so far. Shown
+static const char *view_name(enum view_kind kind) {
+	return kind == VIEW_BILLS ? "Bills" : "Newsletters";
+}
+
+/* A view, from what's been categorized in every folder so far. Shown
  * again, it's read again: what's been read or newly found since. */
-static void show_view(void) {
-	if (ui.cache == NULL || !categorising_on()) {
+static void show_view(enum view_kind kind) {
+	if (ui.cache == NULL || !categorising_on() || kind == VIEW_NONE) {
 		return;
-	}
-	if (ui.magazine == NULL) {
-		logos_init(logo_ready, NULL);
-		ui.magazine = magazine_new(ui.cache, view_open, NULL);
-		gtk_stack_add_named(GTK_STACK(ui.stack),
-			magazine_widget(ui.magazine), "view");
 	}
 	g_clear_pointer(&ui.open, message_free);
 	g_clear_pointer(&ui.open_mailbox, g_free);
-	ui.in_view = true;
-	magazine_load(ui.magazine, "Newsletter");
-	gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "view");
-	gtk_window_set_title(GTK_WINDOW(ui.window), "Newsletters");
-	magazine_focus(ui.magazine);
+	ui.in_view = kind;
+	if (kind == VIEW_NEWSLETTERS) {
+		if (ui.magazine == NULL) {
+			logos_init(logo_ready, NULL);
+			ui.magazine = magazine_new(ui.cache, view_open, NULL);
+			gtk_stack_add_named(GTK_STACK(ui.stack),
+				magazine_widget(ui.magazine), "newsletters");
+		}
+		magazine_load(ui.magazine, "Newsletter");
+		gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "newsletters");
+		magazine_focus(ui.magazine);
+	} else {
+		if (ui.ledger == NULL) {
+			ui.ledger = ledger_new(ui.cache, view_open, NULL);
+			gtk_stack_add_named(GTK_STACK(ui.stack), ledger_widget(ui.ledger),
+				"bills");
+		}
+		ledger_load(ui.ledger, ui.bills_left);
+		gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "bills");
+		ledger_focus(ui.ledger);
+		read_bills_soon();
+	}
+	gtk_window_set_title(GTK_WINDOW(ui.window), view_name(kind));
 	gtk_widget_queue_draw(ui.folders);
 	app_menu_update(ui.menu);
 }
 
 static bool viewing(void) {
-	return ui.in_view && ui.open == NULL;
+	return ui.in_view != VIEW_NONE && ui.open == NULL;
+}
+
+/* The view shown, read again: what's newly categorized, or read. */
+static void refresh_view(void) {
+	if (!viewing()) {
+		return;
+	}
+	if (ui.in_view == VIEW_NEWSLETTERS) {
+		magazine_load(ui.magazine, "Newsletter");
+	} else {
+		ledger_load(ui.ledger, ui.bills_left);
+	}
+}
+
+/* ---- Reading bills ---------------------------------------------------------- */
+
+struct reading {
+	GPtrArray *batch;       /* struct to_read */
+	char *version;
+};
+
+/* What's read with: the questions, and the model. */
+static char *bills_version(void) {
+	return g_strdup_printf("%s %s %s", BILLS_VERSION,
+		ui.categories->model != NULL ? ui.categories->model : "",
+		ui.categories->tier != NULL ? ui.categories->tier : "");
+}
+
+static void bills_read(const char *text, const char *error, void *data) {
+	struct reading *job = data;
+	ui.reading_bills = false;
+	GHashTable *answer = text != NULL ? bills_parse_answer(text) : NULL;
+	if (answer == NULL) {
+		ui.bills_after = g_get_monotonic_time() / G_USEC_PER_SEC +
+			CATEGORISE_WAIT;
+		set_status("Couldn't read bills: %s",
+			error != NULL ? error : "the answer couldn't be read");
+	} else {
+		cache_begin(ui.cache);
+		for (guint i = 0; i < job->batch->len; i++) {
+			struct to_read *t = job->batch->pdata[i];
+			struct bill *b = g_hash_table_lookup(answer, GINT_TO_POINTER(i));
+			if (b != NULL) {
+				cache_set_bill(ui.cache, t->mailbox, t->uid, b, job->version);
+			}
+		}
+		cache_commit(ui.cache);
+		g_hash_table_destroy(answer);
+	}
+	g_ptr_array_unref(job->batch);
+	g_free(job->version);
+	g_free(job);
+	read_bills_soon();
+}
+
+/* The next few bills not yet read, from any folder; until there are
+ * none. */
+static gboolean read_bills_now(gpointer data) {
+	if (!categorising_on() || ui.reading_bills || ui.cache == NULL ||
+			g_get_monotonic_time() / G_USEC_PER_SEC < ui.bills_after) {
+		return G_SOURCE_REMOVE;
+	}
+	char *version = bills_version();
+	GPtrArray *todo = cache_bills_unread(ui.cache, version, LIMIT);
+	ui.bills_left = todo->len;
+	if (ui.in_view == VIEW_BILLS) {
+		refresh_view();
+	}
+	GPtrArray *batch = g_ptr_array_new_with_free_func(to_read_free);
+	for (guint i = 0; i < todo->len && batch->len < BILLS_BATCH; i++) {
+		struct filed *f = todo->pdata[i];
+		GBytes *raw = cache_body(ui.cache, f->mailbox, f->s.uid);
+		struct message *m = raw != NULL ? message_parse(raw) : NULL;
+		if (raw != NULL) {
+			g_bytes_unref(raw);
+		}
+		char *body = m != NULL ? message_body_text(m) : NULL;
+		struct to_read *t = g_new0(struct to_read, 1);
+		t->mailbox = g_strdup(f->mailbox);
+		t->uid = f->s.uid;
+		t->from = g_strdup(m != NULL && m->from != NULL ? m->from : f->s.from);
+		t->subject = g_strdup(f->s.subject);
+		t->date = f->s.date;
+		t->text = bills_excerpt(body);
+		g_free(body);
+		message_free(m);
+		g_ptr_array_add(batch, t);
+	}
+	g_ptr_array_unref(todo);
+	if (batch->len == 0) {
+		g_ptr_array_unref(batch);
+		g_free(version);
+		return G_SOURCE_REMOVE;
+	}
+	struct reading *job = g_new0(struct reading, 1);
+	job->batch = batch;
+	job->version = version;
+	char *system = bills_system_prompt();
+	char *user = bills_user_prompt(batch);
+	ui.reading_bills = true;
+	augur_ask(system, user, bills_schema(), ui.categories->model,
+		ui.categories->tier, bills_read, job);
+	g_free(system);
+	g_free(user);
+	return G_SOURCE_REMOVE;
+}
+
+static void read_bills_soon(void) {
+	if (!ui.reading_bills) {
+		g_idle_add(read_bills_now, NULL);
+	}
 }
 
 static struct summary *summary_for(guint32 uid);
@@ -1698,6 +1863,7 @@ static void fetched(GBytes *raw, const char *error, void *data);
  * Archive and the rest work as ever), then it's opened there. Back comes
  * back to the view. */
 static void view_open(const char *mailbox, guint32 uid, void *data) {
+	enum view_kind kind = ui.in_view;
 	int index = -1;
 	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
 		if (strcmp(((struct folder *)ui.folder_list->pdata[i])->mailbox,
@@ -1715,7 +1881,7 @@ static void view_open(const char *mailbox, guint32 uid, void *data) {
 		g_clear_pointer(&ui.filter, g_free);
 		refilter();
 	}
-	ui.in_view = true;
+	ui.in_view = kind;
 	for (int i = 0; i < message_count(); i++) {
 		if (((struct summary *)ui.messages->pdata[i])->uid == uid) {
 			open_message(i);
@@ -2056,8 +2222,8 @@ static void send_away(struct folder *f, GPtrArray *t, const char *to,
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.scroll);
 	gtk_widget_queue_draw(ui.folders);
-	if (ui.open != NULL && ui.in_view) {
-		show_view();
+	if (ui.open != NULL && ui.in_view != VIEW_NONE) {
+		show_view(ui.in_view);
 	} else if (ui.open != NULL) {
 		if (next >= 0) {
 			open_message(next);
@@ -2570,19 +2736,22 @@ static void run_action(enum action action, int index) {
 	}
 	switch (action) {
 	case ACT_BACK:
-		if (ui.in_view) {
-			show_view();
+		if (ui.in_view != VIEW_NONE) {
+			show_view(ui.in_view);
 		} else {
 			show_list();
 		}
 		break;
 	case ACT_NEWSLETTERS:
-		if (viewing()) {
+	case ACT_BILLS: {
+		enum view_kind kind = action == ACT_BILLS ? VIEW_BILLS : VIEW_NEWSLETTERS;
+		if (viewing() && ui.in_view == kind) {
 			show_list();
 		} else {
-			show_view();
+			show_view(kind);
 		}
 		break;
+	}
 	case ACT_REPLY:
 	case ACT_REPLY_ALL:
 		if (ui.open != NULL) {
@@ -2972,8 +3141,11 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "Message");
 	app_menu_add_item(m, ACT_OPEN, "Open", "Return",
 		ui.open == NULL && s != NULL ? 0 : APP_MENU_DISABLED);
-	app_menu_add_item(m, ACT_BACK, ui.in_view ? "Back to Newsletters" :
-		"Back to List", "Esc", open);
+	char *back = ui.in_view != VIEW_NONE ?
+		g_strdup_printf("Back to %s", view_name(ui.in_view)) :
+		g_strdup("Back to List");
+	app_menu_add_item(m, ACT_BACK, back, "Esc", open);
+	g_free(back);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_REPLY, "Reply", "^R", open);
 	app_menu_add_item(m, ACT_REPLY_ALL, "Reply All", "^Shift+R", open);
@@ -3008,7 +3180,9 @@ static void build_menus(struct app_menu *m, void *data) {
 	if (categorising_on()) {
 		app_menu_add_menu(m, "View");
 		app_menu_add_item(m, ACT_NEWSLETTERS, "Newsletters", NULL,
-			viewing() ? APP_MENU_CHECKED : 0);
+			viewing() && ui.in_view == VIEW_NEWSLETTERS ? APP_MENU_CHECKED : 0);
+		app_menu_add_item(m, ACT_BILLS, "Bills", NULL,
+			viewing() && ui.in_view == VIEW_BILLS ? APP_MENU_CHECKED : 0);
 		app_menu_add_separator(m);
 		app_menu_add_item(m, ACT_VIEW_ALL, "All Messages", NULL,
 			ui.filter == NULL && !viewing() ? APP_MENU_CHECKED : 0);

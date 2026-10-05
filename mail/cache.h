@@ -87,6 +87,31 @@ void filed_free(gpointer p);
  * headers; NULL if it isn't here. */
 char *cache_from_address(struct cache *c, const char *mailbox, guint32 uid);
 
+/* ---- Bills (see bills.h) ---- */
+
+/* A row of the Bills ledger: a message in Bill, from any folder, and what
+ * was read from it (read false: not yet, and the rest's empty). Messages
+ * read and found not to be bills aren't there. */
+struct ledger_entry {
+	char *mailbox;
+	struct summary s;          /* its from and subject owned here */
+	bool read;
+	char *payee, *currency, *due, *period;
+	gint64 amount;             /* cents, or -1 */
+	bool autopay, paid;
+};
+GPtrArray *cache_ledger(struct cache *c);
+void ledger_entry_free(gpointer p);
+/* Bills not yet read (or read by another version), already downloaded,
+ * newest first, at most limit (struct filed). */
+GPtrArray *cache_bills_unread(struct cache *c, const char *version,
+	guint limit);
+struct bill;
+void cache_set_bill(struct cache *c, const char *mailbox, guint32 uid,
+	const struct bill *b, const char *version);
+void cache_set_bill_paid(struct cache *c, const char *mailbox, guint32 uid,
+	bool paid);
+
 /* A message's text, if it's been fetched before (NULL if not); keeping it. */
 GBytes *cache_body(struct cache *c, const char *mailbox, guint32 uid);
 void cache_set_body(struct cache *c, const char *mailbox, guint32 uid,

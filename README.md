@@ -699,6 +699,16 @@ else its initials. Only the sending domain is looked up, never anything
 from the message, and logos are kept in `~/.cache/gemmail/logos` (SVG
 ones need librsvg).
 
+**View > Bills** shows your Bill mail as a ledger, a month at a time,
+newest first: each bill's due date, payee, what it's for and the amount,
+read from the bill by AI in the background (a few at a time, from mail
+already downloaded), and each month's total and what's still unpaid.
+Reminders of the same bill (same payee, due date and amount) are one row;
+mail that only confirms a payment is left out. Tick a bill's box (or
+press Space) when you've paid it; one that says it's paid automatically
+shows **Auto**, and one past due and unpaid, **Overdue**. Return or a
+double-click opens the bill, in its own folder.
+
 An HTML message runs no scripts and loads nothing from the web (no
 tracking pixels) until you press **Show Images**, for that message, or
 **Always for** its sender, which shows that address's images from then on

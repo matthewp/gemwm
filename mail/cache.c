@@ -5,6 +5,7 @@
 #include <gmime/gmime.h>
 #include <string.h>
 #include <sqlite3.h>
+#include "bills.h"
 #include "cache.h"
 
 struct cache {
@@ -71,6 +72,11 @@ struct cache *cache_open(void) {
 		exec(c, "CREATE TABLE IF NOT EXISTS categories ("
 			" mailbox TEXT, uid INTEGER, names TEXT, version TEXT,"
 			" manual INTEGER, changed INTEGER, PRIMARY KEY (mailbox, uid))");
+		exec(c, "CREATE TABLE IF NOT EXISTS bills ("
+			" mailbox TEXT, uid INTEGER, is_bill INTEGER, payee TEXT,"
+			" amount INTEGER, currency TEXT, due TEXT, period TEXT,"
+			" autopay INTEGER, paid INTEGER DEFAULT 0, version TEXT,"
+			" PRIMARY KEY (mailbox, uid))");
 	}
 	g_free(path);
 	return c;
@@ -186,6 +192,9 @@ void cache_forget_folder(struct cache *c, const char *mailbox) {
 	bind_text(s, 1, mailbox);
 	run(s);
 	s = prepare(c, "DELETE FROM categories WHERE mailbox = ?1");
+	bind_text(s, 1, mailbox);
+	run(s);
+	s = prepare(c, "DELETE FROM bills WHERE mailbox = ?1");
 	bind_text(s, 1, mailbox);
 	run(s);
 	s = prepare(c, "DELETE FROM state WHERE mailbox = ?1");
@@ -327,7 +336,7 @@ void cache_remove(struct cache *c, const char *mailbox, guint32 uid) {
 		g_unlink(path);
 		g_free(path);
 	}
-	const char *tables[] = { "messages", "categories" };
+	const char *tables[] = { "messages", "categories", "bills" };
 	for (size_t i = 0; i < G_N_ELEMENTS(tables); i++) {
 		char *sql = g_strdup_printf("DELETE FROM %s"
 			" WHERE mailbox = ?1 AND uid = ?2", tables[i]);
@@ -447,6 +456,134 @@ GPtrArray *cache_in_category(struct cache *c, const char *name) {
 	}
 	sqlite3_finalize(s);
 	return out;
+}
+
+void ledger_entry_free(gpointer p) {
+	struct ledger_entry *e = p;
+	g_free(e->mailbox);
+	g_free(e->s.from);
+	g_free(e->s.subject);
+	g_free(e->payee);
+	g_free(e->currency);
+	g_free(e->due);
+	g_free(e->period);
+	g_free(e);
+}
+
+static char *column_text(sqlite3_stmt *s, int i) {
+	return g_strdup((const char *)sqlite3_column_text(s, i));
+}
+
+GPtrArray *cache_ledger(struct cache *c) {
+	GPtrArray *out = g_ptr_array_new_with_free_func(ledger_entry_free);
+	sqlite3_stmt *s = prepare(c, "SELECT m.mailbox, m.uid, m.sender, m.subject,"
+		" m.date, m.seen, b.payee, b.amount, b.currency, b.due, b.period,"
+		" b.autopay, b.paid, b.is_bill IS NOT NULL"
+		" FROM messages m JOIN categories k"
+		" ON k.mailbox = m.mailbox AND k.uid = m.uid"
+		" LEFT JOIN bills b ON b.mailbox = m.mailbox AND b.uid = m.uid"
+		" WHERE instr(char(10) || k.names || char(10), char(10) || 'Bill' ||"
+		" char(10)) > 0 AND (b.is_bill IS NULL OR b.is_bill = 1)"
+		" ORDER BY m.date DESC");
+	if (s == NULL) {
+		return out;
+	}
+	while (sqlite3_step(s) == SQLITE_ROW) {
+		struct ledger_entry *e = g_new0(struct ledger_entry, 1);
+		e->mailbox = column_text(s, 0);
+		e->s.uid = sqlite3_column_int64(s, 1);
+		e->s.from = column_text(s, 2);
+		e->s.subject = column_text(s, 3);
+		e->s.date = sqlite3_column_int64(s, 4);
+		e->s.seen = sqlite3_column_int(s, 5);
+		e->payee = column_text(s, 6);
+		e->amount = sqlite3_column_type(s, 7) == SQLITE_NULL ? -1 :
+			sqlite3_column_int64(s, 7);
+		e->currency = column_text(s, 8);
+		e->due = column_text(s, 9);
+		e->period = column_text(s, 10);
+		e->autopay = sqlite3_column_int(s, 11);
+		e->paid = sqlite3_column_int(s, 12);
+		e->read = sqlite3_column_int(s, 13);
+		g_ptr_array_add(out, e);
+	}
+	sqlite3_finalize(s);
+	return out;
+}
+
+GPtrArray *cache_bills_unread(struct cache *c, const char *version,
+		guint limit) {
+	GPtrArray *out = g_ptr_array_new_with_free_func(filed_free);
+	sqlite3_stmt *s = prepare(c, "SELECT m.mailbox, m.uid, m.sender, m.subject,"
+		" m.date FROM messages m JOIN categories k"
+		" ON k.mailbox = m.mailbox AND k.uid = m.uid"
+		" LEFT JOIN bills b ON b.mailbox = m.mailbox AND b.uid = m.uid"
+		" WHERE instr(char(10) || k.names || char(10), char(10) || 'Bill' ||"
+		" char(10)) > 0 AND (b.version IS NULL OR b.version != ?1)"
+		" ORDER BY m.date DESC");
+	if (s == NULL) {
+		return out;
+	}
+	bind_text(s, 1, version);
+	while (sqlite3_step(s) == SQLITE_ROW && out->len < limit) {
+		char *mailbox = column_text(s, 0);
+		guint32 uid = sqlite3_column_int64(s, 1);
+		if (!cache_has_body(c, mailbox, uid)) {
+			g_free(mailbox); /* not fetched yet: when it is */
+			continue;
+		}
+		struct filed *f = g_new0(struct filed, 1);
+		f->mailbox = mailbox;
+		f->s.uid = uid;
+		f->s.from = column_text(s, 2);
+		f->s.subject = column_text(s, 3);
+		f->s.date = sqlite3_column_int64(s, 4);
+		g_ptr_array_add(out, f);
+	}
+	sqlite3_finalize(s);
+	return out;
+}
+
+void cache_set_bill(struct cache *c, const char *mailbox, guint32 uid,
+		const struct bill *b, const char *version) {
+	/* What's read again replaces what was; whether it's paid stays. */
+	sqlite3_stmt *s = prepare(c, "INSERT INTO bills (mailbox, uid, is_bill,"
+		" payee, amount, currency, due, period, autopay, version)"
+		" VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+		" ON CONFLICT (mailbox, uid) DO UPDATE SET is_bill = ?3, payee = ?4,"
+		" amount = ?5, currency = ?6, due = ?7, period = ?8, autopay = ?9,"
+		" version = ?10");
+	if (s == NULL) {
+		return;
+	}
+	bind_text(s, 1, mailbox);
+	sqlite3_bind_int64(s, 2, uid);
+	sqlite3_bind_int(s, 3, b->is_bill);
+	bind_text(s, 4, b->payee);
+	if (b->amount >= 0) {
+		sqlite3_bind_int64(s, 5, b->amount);
+	} else {
+		sqlite3_bind_null(s, 5);
+	}
+	bind_text(s, 6, b->currency);
+	bind_text(s, 7, b->due);
+	bind_text(s, 8, b->period);
+	sqlite3_bind_int(s, 9, b->autopay);
+	bind_text(s, 10, version);
+	run(s);
+}
+
+void cache_set_bill_paid(struct cache *c, const char *mailbox, guint32 uid,
+		bool paid) {
+	sqlite3_stmt *s = prepare(c, "UPDATE bills SET paid = ?3"
+		" WHERE mailbox = ?1 AND uid = ?2");
+	if (s == NULL) {
+		return;
+	}
+	bind_text(s, 1, mailbox);
+	sqlite3_bind_int64(s, 2, uid);
+	sqlite3_bind_int(s, 3, paid);
+	run(s);
 }
 
 /* The From header of a message file, unfolded; NULL if there's none. */
