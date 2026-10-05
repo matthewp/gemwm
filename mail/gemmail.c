@@ -48,6 +48,9 @@
 #define CATEGORISE_TICK 20   /* seconds between looks for mail to categorise */
 #define CATEGORISE_WAIT 300  /* seconds to leave it after an error */
 #define EXAMPLES 12          /* your own choices, sent as examples */
+#define CLASSIFY_BATCH 8     /* messages classified at once, a request each */
+#define CLASSIFY_YES 0.8     /* a classifier's probability that puts a
+                              * message in a category */
 #define BILLS_BATCH 4        /* bills read in a request: they're long */
 
 enum action {
@@ -339,12 +342,39 @@ static bool shown(const struct summary *s) {
 	return ui.filter == NULL || in_category(s->uid, ui.filter);
 }
 
-/* Never categorised, or by other categories or another model; and not by
- * you. */
+/* What categories are worked out with now: a classifier through Augur's
+ * Classify (calibrated, a message at a time), or a chat model, batches of
+ * messages and a schema. Found out by asking Classify at the start of each
+ * run (see categorise_now). */
+static enum { CLASSIFIER_UNKNOWN, CLASSIFIER_YES, CLASSIFIER_NO } classifier;
+static gint64 classifier_known; /* when it was found out (monotonic s) */
+
+/* The version categories are worked out with: the categories and model's,
+ * and which way, so changing ways categorizes again. */
+static char *categorise_version(bool classify) {
+	return classify ? g_strdup_printf("%s classify", ui.categories->version) :
+		g_strdup(ui.categories->version);
+}
+
+/* Never categorised, or by other categories or another model or way; and
+ * not by you. */
 static bool wanted(const struct summary *s) {
 	struct categorised *k = categorised_of(s->uid);
-	return k == NULL || (!k->manual &&
-		g_strcmp0(k->version, ui.categories->version) != 0);
+	if (k == NULL) {
+		return true;
+	}
+	if (k->manual) {
+		return false;
+	}
+	/* Not knowing yet which way it is, either way's is current. */
+	char *chat = categorise_version(false), *classify = categorise_version(true);
+	bool stale = classifier == CLASSIFIER_YES ?
+		g_strcmp0(k->version, classify) != 0 :
+		classifier == CLASSIFIER_NO ? g_strcmp0(k->version, chat) != 0 :
+		g_strcmp0(k->version, chat) != 0 && g_strcmp0(k->version, classify) != 0;
+	g_free(chat);
+	g_free(classify);
+	return stale;
 }
 
 static void categorise_soon(void);
@@ -352,6 +382,13 @@ static void categorise_soon(void);
 struct categorising {
 	char *mailbox, *version;
 	GArray *uids;
+	/* Classifying: an answer each, by UID (names, newline-separated), and
+	 * how many are still to come; whether all were calibrated; and the
+	 * first error. */
+	GHashTable *answers;
+	int pending;
+	bool calibrated, unknown_method;
+	char *error;
 };
 
 /* Only the names that are categories, each once. */
@@ -375,13 +412,17 @@ static void categorising_free(struct categorising *job) {
 	g_free(job->mailbox);
 	g_free(job->version);
 	g_array_free(job->uids, TRUE);
+	if (job->answers != NULL) {
+		g_hash_table_destroy(job->answers);
+	}
+	g_free(job->error);
 	g_free(job);
 }
 
-static void categorised(const char *text, const char *error, void *data) {
-	struct categorising *job = data;
+/* A batch answered (answer: UID -> names), or not (NULL, and why). */
+static void batch_done(struct categorising *job, GHashTable *answer,
+		const char *error) {
 	ui.categorising = false;
-	GHashTable *answer = text != NULL ? categories_parse_answer(text) : NULL;
 	if (answer == NULL) {
 		/* Not again for a while: the next look would only fail the same. */
 		ui.categorise_after = g_get_monotonic_time() / G_USEC_PER_SEC +
@@ -402,6 +443,9 @@ static void categorised(const char *text, const char *error, void *data) {
 	cache_begin(ui.cache);
 	for (guint i = 0; i < job->uids->len; i++) {
 		guint32 uid = g_array_index(job->uids, guint32, i);
+		if (!g_hash_table_contains(answer, GUINT_TO_POINTER(uid))) {
+			continue; /* unanswered: a later look */
+		}
 		char *names = known_names(g_hash_table_lookup(answer,
 			GUINT_TO_POINTER(uid)));
 		cache_set_categorised(ui.cache, job->mailbox, uid, names, job->version,
@@ -409,7 +453,6 @@ static void categorised(const char *text, const char *error, void *data) {
 		g_free(names);
 	}
 	cache_commit(ui.cache);
-	g_hash_table_destroy(answer);
 	refresh_view(); /* new ones on the shelf, or in the ledger */
 	read_bills_soon();
 	struct folder *f = current_folder();
@@ -423,6 +466,66 @@ static void categorised(const char *text, const char *error, void *data) {
 	}
 	categorising_free(job);
 	categorise_soon();
+}
+
+/* The chat model's answer to a batch. */
+static void categorised(const char *text, const char *error, void *data) {
+	struct categorising *job = data;
+	GHashTable *answer = text != NULL ? categories_parse_answer(text) : NULL;
+	batch_done(job, answer, error);
+	if (answer != NULL) {
+		g_hash_table_destroy(answer);
+	}
+}
+
+struct classifying {
+	struct categorising *job;
+	guint32 uid;
+};
+
+/* The classifier's answer for one of a batch's messages; the batch is
+ * done when they all are. */
+static void classified(GVariant *answers, bool calibrated, const char *error,
+		bool unknown_method, void *data) {
+	struct classifying *c = data;
+	struct categorising *job = c->job;
+	if (answers != NULL) {
+		g_hash_table_insert(job->answers, GUINT_TO_POINTER(c->uid),
+			categories_from_answers(ui.categories, answers, CLASSIFY_YES));
+		job->calibrated &= calibrated;
+	} else if (job->error == NULL) {
+		job->error = g_strdup(error);
+		job->unknown_method |= unknown_method;
+	}
+	g_free(c);
+	if (--job->pending > 0) {
+		return;
+	}
+	if (job->unknown_method || (g_hash_table_size(job->answers) > 0 &&
+			!job->calibrated)) {
+		/* This Augur has no Classify, or no classifier: a chat model's
+		 * better with batches, with your choices as examples. What it did
+		 * answer stands (its 0 or 1 are as good), under the chat model's
+		 * version. */
+		classifier = CLASSIFIER_NO;
+		classifier_known = g_get_monotonic_time() / G_USEC_PER_SEC;
+		g_free(job->version);
+		job->version = categorise_version(false);
+		if (g_hash_table_size(job->answers) == 0) {
+			ui.categorising = false;
+			categorising_free(job);
+			categorise_soon();
+			return;
+		}
+	} else if (g_hash_table_size(job->answers) > 0) {
+		classifier = CLASSIFIER_YES;
+		classifier_known = g_get_monotonic_time() / G_USEC_PER_SEC;
+	}
+	if (g_hash_table_size(job->answers) == 0) {
+		batch_done(job, NULL, job->error);
+		return;
+	}
+	batch_done(job, job->answers, NULL);
 }
 
 static void to_categorise_free(gpointer p) {
@@ -476,12 +579,26 @@ static gboolean categorise_now(gpointer data) {
 	if (ui.categorising) {
 		return G_SOURCE_REMOVE;
 	}
+	/* A new run asks the classifier first, with one message: whether
+	 * there's one may have changed (Augur's config) since the last; not
+	 * if that was only just found out. */
+	bool starting = ui.categorise_total == 0 &&
+		g_get_monotonic_time() / G_USEC_PER_SEC - classifier_known > 60;
+	bool classify = classifier == CLASSIFIER_YES || starting;
+	guint size = classifier == CLASSIFIER_YES ? CLASSIFY_BATCH :
+		classify ? 1 : CATEGORISE_BATCH;
 	categorise_progress(f);
 	GPtrArray *batch = g_ptr_array_new_with_free_func(to_categorise_free);
+	/* Nothing to do, and which way's not known yet (both ways' are
+	 * current until it is): the newest asked anyway, once, to find out,
+	 * so that a change of way categorizes again. */
+	bool probe = false;
+again:
 	for (guint i = 0; i < ui.all->len && i < AHEAD &&
-			batch->len < CATEGORISE_BATCH; i++) {
+			batch->len < size; i++) {
 		struct summary *s = ui.all->pdata[i];
-		if (!wanted(s)) {
+		struct categorised *k = categorised_of(s->uid);
+		if (probe ? k != NULL && k->manual : !wanted(s)) {
 			continue;
 		}
 		GBytes *raw = cache_body(ui.cache, f->mailbox, s->uid);
@@ -501,7 +618,36 @@ static gboolean categorise_now(gpointer data) {
 		message_free(m);
 		g_ptr_array_add(batch, t);
 	}
+	if (batch->len == 0 && !probe && classifier == CLASSIFIER_UNKNOWN) {
+		probe = true;
+		size = 1;
+		goto again;
+	}
 	if (batch->len == 0) {
+		g_ptr_array_unref(batch);
+		return G_SOURCE_REMOVE;
+	}
+	if (classify) {
+		struct categorising *job = g_new0(struct categorising, 1);
+		job->mailbox = g_strdup(f->mailbox);
+		job->version = categorise_version(true);
+		job->uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+		job->answers = g_hash_table_new_full(NULL, NULL, NULL, g_free);
+		job->calibrated = true;
+		job->pending = batch->len;
+		ui.categorising = true;
+		/* A request each; Augur queues them, a few at a time. */
+		for (guint i = 0; i < batch->len; i++) {
+			struct to_categorise *t = batch->pdata[i];
+			g_array_append_val(job->uids, t->uid);
+			struct classifying *c = g_new0(struct classifying, 1);
+			c->job = job;
+			c->uid = t->uid;
+			char *input = categories_input(t);
+			augur_classify(input, categories_questions(ui.categories), false,
+				classified, c);
+			g_free(input);
+		}
 		g_ptr_array_unref(batch);
 		return G_SOURCE_REMOVE;
 	}

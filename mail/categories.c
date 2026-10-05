@@ -25,9 +25,15 @@ static const char header[] =
 	"#\n"
 	"# Each [Name] below is a category, and its description is what the model\n"
 	"# goes by: say what belongs there. Add, change or take away any of them;\n"
-	"# mail is categorised again when they change. To choose what answers,\n"
-	"# set model = (a model) or tier = (one of Augur's tiers) under\n"
-	"# [Categories]; else it's Augur's choice for GemMail.\n";
+	"# mail is categorised again when they change.\n"
+	"#\n"
+	"# Where Augur has a classifier (classifier = in a profile, such as\n"
+	"# typesafe/jev-1.13), it answers, a message at a time, and a message goes\n"
+	"# in a category it's at least 80% sure of; choose which profile's with\n"
+	"# classify-profile = under [app org.gemwm.GemMail] in Augur's config.\n"
+	"# Without one, a chat model answers: to choose it, set model = (a model)\n"
+	"# or tier = (one of Augur's tiers) under [Categories]; else it's\n"
+	"# Augur's choice for GemMail.\n";
 
 char *categories_path(void) {
 	return g_build_filename(g_get_user_config_dir(), "gemmail", "categories",
@@ -328,4 +334,54 @@ GHashTable *categories_parse_answer(const char *json) {
 	}
 	g_object_unref(parser);
 	return t;
+}
+
+/* ---- With a classifier (Augur's Classify) ------------------------------ */
+
+GVariant *categories_questions(struct categories *c) {
+	GVariantBuilder qs;
+	g_variant_builder_init(&qs, G_VARIANT_TYPE("a{sv}"));
+	for (guint i = 0; i < c->list->len; i++) {
+		struct category *k = c->list->pdata[i];
+		/* By number: a category's name needn't be a question's. */
+		char *name = g_strdup_printf("c%u", i);
+		char *question = g_strdup_printf(
+			"Does this email belong in the category %s?", k->name);
+		GVariantBuilder q;
+		g_variant_builder_init(&q, G_VARIANT_TYPE("a{sv}"));
+		g_variant_builder_add(&q, "{sv}", "type", g_variant_new_string("yes-no"));
+		g_variant_builder_add(&q, "{sv}", "instructions",
+			g_variant_new_string(question));
+		g_variant_builder_add(&q, "{sv}", "yes",
+			g_variant_new_string(k->description));
+		g_variant_builder_add(&qs, "{sv}", name, g_variant_builder_end(&q));
+		g_free(question);
+		g_free(name);
+	}
+	return g_variant_builder_end(&qs);
+}
+
+char *categories_input(const struct to_categorise *m) {
+	return g_strdup_printf("From: %s\nSubject: %s\n\n%s", m->from ? m->from : "",
+		m->subject ? m->subject : "", m->text ? m->text : "");
+}
+
+char *categories_from_answers(struct categories *c, GVariant *answers,
+		double threshold) {
+	GString *out = g_string_new(NULL);
+	for (guint i = 0; i < c->list->len; i++) {
+		char *name = g_strdup_printf("c%u", i);
+		GVariant *a = g_variant_lookup_value(answers, name, G_VARIANT_TYPE_VARDICT);
+		double p = 0;
+		if (a != NULL) {
+			g_variant_lookup(a, "probability", "d", &p);
+			g_variant_unref(a);
+		}
+		if (p >= threshold) {
+			g_string_append_printf(out, "%s%s", out->len ? "\n" : "",
+				((struct category *)c->list->pdata[i])->name);
+		}
+		g_free(name);
+	}
+	return g_string_free(out, FALSE);
 }

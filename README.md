@@ -692,7 +692,18 @@ choices go to the model as examples. The categories, and what each is
 for, are in `~/.config/gemmail/categories` (written with defaults when you
 first turn it on): the descriptions are what the model goes by, so make
 them say what belongs there. Change them and mail is categorized again.
-`model =` or `tier =` under `[Categories]` there picks what Augur uses.
+
+Where Augur has a classifier (Typesafe's Jev: `classifier =` in a
+profile), it does the categorizing: each category a yes-or-no question
+about each message, answered with how likely it is, a message going in
+the categories it's at least 80% sure of. It's quick (about half a
+second a message) and cheap (a few thousandths of a cent). Which
+profile's classifier is Augur's business (`classify-profile =` under
+`[app org.gemwm.GemMail]` in its config). Without one, a chat model
+categorizes, a batch at a time, with your choices as examples;
+`model =` or `tier =` under `[Categories]` in the categories file picks
+it. GemMail finds out which it has when it starts categorizing, and
+switching between them categorizes again.
 
 **View > Newsletters** (or Newsletters, under the folders) shows your
 Newsletter mail as a magazine rack, from every folder that's been

@@ -170,3 +170,58 @@ void augur_ask(const char *system, const char *user, const char *schema,
 		g_variant_new("(a{sv})", &req), G_VARIANT_TYPE("(sa{sv})"),
 		G_DBUS_CALL_FLAGS_NONE, ASK_TIMEOUT, NULL, answered, a);
 }
+
+/* ---- Classifying ----------------------------------------------------------- */
+
+struct classifying {
+	augur_classify_fn done;
+	void *data;
+};
+
+static void classified(GObject *src, GAsyncResult *res, gpointer data) {
+	struct classifying *c = data;
+	GError *error = NULL;
+	GVariant *r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(src), res,
+		&error);
+	if (r == NULL) {
+		/* An Augur from before Classify. */
+		bool unknown = g_error_matches(error, G_DBUS_ERROR,
+			G_DBUS_ERROR_UNKNOWN_METHOD);
+		g_dbus_error_strip_remote_error(error);
+		c->done(NULL, false, error->message, unknown, c->data);
+		g_error_free(error);
+	} else {
+		GVariant *answers, *info;
+		g_variant_get(r, "(@a{sv}@a{sv})", &answers, &info);
+		gboolean calibrated = FALSE;
+		g_variant_lookup(info, "calibrated", "b", &calibrated);
+		c->done(answers, calibrated, NULL, false, c->data);
+		g_variant_unref(answers);
+		g_variant_unref(info);
+		g_variant_unref(r);
+	}
+	g_free(c);
+}
+
+void augur_classify(const char *input, GVariant *questions, bool interactive,
+		augur_classify_fn done, void *data) {
+	if (augur.bus == NULL) {
+		g_variant_unref(g_variant_ref_sink(questions));
+		done(NULL, false, "no session bus", false, data);
+		return;
+	}
+	GVariantBuilder req;
+	g_variant_builder_init(&req, G_VARIANT_TYPE("a{sv}"));
+	g_variant_builder_add(&req, "{sv}", "app-id",
+		g_variant_new_string(augur.app_id != NULL ? augur.app_id : g_get_prgname()));
+	g_variant_builder_add(&req, "{sv}", "input", g_variant_new_string(input));
+	g_variant_builder_add(&req, "{sv}", "questions", questions);
+	g_variant_builder_add(&req, "{sv}", "interactive",
+		g_variant_new_boolean(interactive));
+	struct classifying *c = g_new0(struct classifying, 1);
+	c->done = done;
+	c->data = data;
+	g_dbus_connection_call(augur.bus, BUS_NAME, OBJECT_PATH, IFACE, "Classify",
+		g_variant_new("(a{sv})", &req), G_VARIANT_TYPE("(a{sv}a{sv})"),
+		G_DBUS_CALL_FLAGS_NONE, ASK_TIMEOUT, NULL, classified, c);
+}

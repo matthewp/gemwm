@@ -29,4 +29,15 @@ typedef void (*augur_answer_fn)(const char *text, const char *error,
 void augur_ask(const char *system, const char *user, const char *schema,
 	const char *model, const char *tier, augur_answer_fn done, void *data);
 
+/* Questions about input, answered (Augur's Classify): questions is an
+ * a{sv} of them by name, as Classify takes them (a floating reference is
+ * taken). answers is an a{sv} by question name, and calibrated says a
+ * classifier gave them (real probabilities; from a chat model, a yes-no's
+ * is only 0 or 1). Or error, and unknown_method when this Augur has no
+ * Classify. interactive: someone's waiting for it. */
+typedef void (*augur_classify_fn)(GVariant *answers, bool calibrated,
+	const char *error, bool unknown_method, void *data);
+void augur_classify(const char *input, GVariant *questions, bool interactive,
+	augur_classify_fn done, void *data);
+
 #endif

@@ -49,6 +49,15 @@ char *categories_schema(struct categories *c);
  * can't be read. */
 GHashTable *categories_parse_answer(const char *json);
 
+/* With a classifier (Augur's Classify, lib/augur.h): a yes-no question
+ * for each category, by number, its description what counts as yes; a
+ * message as the questions' input; and the answers, the categories
+ * whose probability is at least threshold (newline-separated). */
+GVariant *categories_questions(struct categories *c);
+char *categories_input(const struct to_categorise *m);
+char *categories_from_answers(struct categories *c, GVariant *answers,
+	double threshold);
+
 /* A message's text, cut to what's sent. */
 char *categories_excerpt(const char *text);
 
