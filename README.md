@@ -580,11 +580,18 @@ Web Browser always opens GemWeb.
 | Alt+Left / Alt+Right        | back / forward            |
 | Ctrl+R, F5                  | reload                    |
 | Ctrl+Shift+R, Shift+F5      | reload from the site      |
-| Ctrl+plus / minus / 0       | zoom                      |
+| Ctrl+plus / minus / 0       | zoom in / out / reset     |
 | Ctrl+P                      | print                     |
 | Ctrl+F                      | find in the page          |
 | Ctrl+G, F3 (with Shift)     | next (previous) match     |
 | Ctrl+Alt+R                  | Reader View               |
+
+Pages open at the default zoom, **View > Default Zoom** (100% unless you
+pick another; on a high-density screen, where GemWM doubles everything to
+keep its pixels crisp, 80 or 90% is closer to other desktops), kept as
+`default` under `[zoom]` in the settings file. Zoom a site in or out and
+it's remembered: its pages open that way from then on (the sites are in
+`~/.local/state/gemweb/zoom`), and Ctrl+0 puts it back to the default.
 
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
 tab to close it. Text that isn't an address is searched. Downloads go to

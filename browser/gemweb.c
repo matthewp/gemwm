@@ -22,6 +22,7 @@
 #include <gtk/gtk.h>
 #include <libsoup/soup.h>
 #include <stdbool.h>
+#include <math.h>
 #include <string.h>
 #include <unistd.h>
 #include <webkit/webkit.h>
@@ -198,6 +199,7 @@ static void sync_info(struct browser *b);
 static gboolean on_script_dialog(WebKitWebView *view, WebKitScriptDialog *d,
 	struct tab *t);
 static char *site_of(const char *uri);
+static void zoom_apply(struct tab *t);
 static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
 	WebKitHitTestResult *hit, struct tab *t);
 static bool app_owns(struct browser *b, const char *uri);
@@ -899,6 +901,8 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 		g_clear_pointer(&t->failed, g_free);
 	} else if (event == WEBKIT_LOAD_COMMITTED) {
 		record_visit(t);
+		zoom_apply(t); /* the site's own, or the default */
+		app_menu_update(t->browser->menu);
 	}
 }
 
@@ -1725,6 +1729,7 @@ enum action {
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
 	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD,
+	ACT_DEFAULT_ZOOM = 2000, /* View > Default Zoom: this, plus a step */
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -2894,6 +2899,125 @@ static void ads_apply(struct tab *t) {
 	t->ads = want;
 }
 
+/* ---- Zoom --------------------------------------------------------------- */
+
+/* Pages open at the default zoom ([zoom] default = a percentage, set from
+ * View > Default Zoom), or at the zoom you last gave their site, which is
+ * kept in ~/.local/state/gemweb/zoom. Zooming steps as other browsers
+ * do. */
+static const int zoom_steps[] = {
+	30, 50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300,
+};
+static const int default_zooms[] = { 67, 80, 90, 100, 110, 125 };
+
+static int default_zoom(void) {
+	char *v = setting("zoom", "default", "GEMWEB_ZOOM");
+	int z = v != NULL ? atoi(v) : 0;
+	g_free(v);
+	return z >= 30 && z <= 300 ? z : 100;
+}
+
+static char *zoom_path(void) {
+	return g_build_filename(g_get_user_state_dir(), "gemweb", "zoom", NULL);
+}
+
+/* A site's own zoom, or 0. */
+static int site_zoom(const char *site) {
+	char *path = zoom_path();
+	GKeyFile *kf = g_key_file_new();
+	int z = g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) ?
+		g_key_file_get_integer(kf, "sites", site, NULL) : 0;
+	g_key_file_free(kf);
+	g_free(path);
+	return z >= 30 && z <= 300 ? z : 0;
+}
+
+/* Remembers a site's zoom; 0 (or the default) forgets it. */
+static void site_zoom_set(const char *site, int zoom) {
+	char *path = zoom_path();
+	GKeyFile *kf = g_key_file_new();
+	g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
+	if (zoom == 0 || zoom == default_zoom()) {
+		g_key_file_remove_key(kf, "sites", site, NULL);
+	} else {
+		g_key_file_set_integer(kf, "sites", site, zoom);
+	}
+	char *dir = g_path_get_dirname(path);
+	g_mkdir_with_parents(dir, 0700);
+	g_key_file_save_to_file(kf, path, NULL);
+	g_free(dir);
+	g_key_file_free(kf);
+	g_free(path);
+}
+
+static int current_zoom(struct tab *t) {
+	double z = webkit_web_view_get_zoom_level(t->view);
+	return isfinite(z) && z > 0 ? (int)(z * 100 + 0.5) : default_zoom();
+}
+
+static void zoom_when_mapped(GtkWidget *view, struct tab *t);
+
+/* What the tab's page should be at: its site's, else the default. Not
+ * until the view's on screen: WebKit scales zoom by the screen's font
+ * scale, and before that it hasn't one, and the zoom comes out NaN (a
+ * blank page). */
+static void zoom_apply(struct tab *t) {
+	if (!gtk_widget_get_mapped(GTK_WIDGET(t->view))) {
+		g_signal_handlers_disconnect_by_func(t->view, zoom_when_mapped, t);
+		g_signal_connect(t->view, "map", G_CALLBACK(zoom_when_mapped), t);
+		return;
+	}
+	char *site = site_of(webkit_web_view_get_uri(t->view));
+	int z = site != NULL ? site_zoom(site) : 0;
+	g_free(site);
+	webkit_web_view_set_zoom_level(t->view, (z != 0 ? z : default_zoom()) / 100.0);
+}
+
+static void zoom_when_mapped(GtkWidget *view, struct tab *t) {
+	g_signal_handlers_disconnect_by_func(view, zoom_when_mapped, t);
+	zoom_apply(t);
+	app_menu_update(t->browser->menu);
+}
+
+/* A step in or out (dir 1, -1), or back to the default (0); remembered
+ * for the page's site. */
+static void zoom_by(struct tab *t, int dir) {
+	int cur = current_zoom(t), z = default_zoom();
+	if (dir > 0) {
+		z = zoom_steps[G_N_ELEMENTS(zoom_steps) - 1];
+		for (guint i = 0; i < G_N_ELEMENTS(zoom_steps); i++) {
+			if (zoom_steps[i] > cur) {
+				z = zoom_steps[i];
+				break;
+			}
+		}
+	} else if (dir < 0) {
+		z = zoom_steps[0];
+		for (guint i = G_N_ELEMENTS(zoom_steps); i-- > 0;) {
+			if (zoom_steps[i] < cur) {
+				z = zoom_steps[i];
+				break;
+			}
+		}
+	}
+	webkit_web_view_set_zoom_level(t->view, z / 100.0);
+	char *site = site_of(webkit_web_view_get_uri(t->view));
+	if (site != NULL) {
+		site_zoom_set(site, dir == 0 ? 0 : z);
+		g_free(site);
+	}
+}
+
+static void zoom_apply_all(void) {
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		for (guint i = 0; b != NULL && i < b->tabs->len; i++) {
+			zoom_apply(g_ptr_array_index(b->tabs, i));
+		}
+	}
+}
+
 static void ads_apply_all(void) {
 	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
 			w = w->next) {
@@ -3610,15 +3734,16 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 		webkit_web_view_go_forward(t->view);
 		break;
 	case ACT_ZOOM_IN:
-		webkit_web_view_set_zoom_level(t->view,
-			webkit_web_view_get_zoom_level(t->view) * 1.1);
+		zoom_by(t, 1);
+		app_menu_update(b->menu);
 		break;
 	case ACT_ZOOM_OUT:
-		webkit_web_view_set_zoom_level(t->view,
-			webkit_web_view_get_zoom_level(t->view) / 1.1);
+		zoom_by(t, -1);
+		app_menu_update(b->menu);
 		break;
 	case ACT_ZOOM_RESET:
-		webkit_web_view_set_zoom_level(t->view, 1.0);
+		zoom_by(t, 0);
+		app_menu_update(b->menu);
 		break;
 	case ACT_HOME:
 		load_home(t);
@@ -3712,9 +3837,22 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_FIND_NEXT, "Find Again", "^G",
 		find_text(b)[0] != '\0' ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
+	int zoom = t != NULL ? current_zoom(t) : 100, def = default_zoom();
 	app_menu_add_item(m, ACT_ZOOM_IN, "Zoom In", "^+", 0);
 	app_menu_add_item(m, ACT_ZOOM_OUT, "Zoom Out", "^-", 0);
-	app_menu_add_item(m, ACT_ZOOM_RESET, "Actual Size", "^0", 0);
+	char *reset = zoom != def ?
+		g_strdup_printf("Reset Zoom (now %d%%)", zoom) : g_strdup("Reset Zoom");
+	app_menu_add_item(m, ACT_ZOOM_RESET, reset, "^0",
+		zoom != def ? 0 : APP_MENU_DISABLED);
+	g_free(reset);
+	app_menu_add_submenu(m, "Default Zoom", 0);
+	for (guint i = 0; i < G_N_ELEMENTS(default_zooms); i++) {
+		char *label = g_strdup_printf("%d%%", default_zooms[i]);
+		app_menu_add_item(m, ACT_DEFAULT_ZOOM + i, label, NULL,
+			default_zooms[i] == def ? APP_MENU_CHECKED : 0);
+		g_free(label);
+	}
+	app_menu_end_submenu(m);
 
 	app_menu_add_menu(m, "Go");
 	app_menu_add_item(m, ACT_BACK, "Back", "Alt+Left",
@@ -3743,6 +3881,15 @@ static void build_menus(struct app_menu *m, void *data) {
 static void menu_activate(uint32_t id, void *data) {
 	struct browser *b = data;
 	if (dialog_up(b) && id != ACT_QUIT) {
+		return;
+	}
+	if (id >= ACT_DEFAULT_ZOOM &&
+			id < ACT_DEFAULT_ZOOM + G_N_ELEMENTS(default_zooms)) {
+		char value[8];
+		g_snprintf(value, sizeof value, "%d", default_zooms[id - ACT_DEFAULT_ZOOM]);
+		setting_write("zoom", "default", value);
+		zoom_apply_all(); /* sites with their own keep it */
+		app_menu_update(b->menu);
 		return;
 	}
 	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
