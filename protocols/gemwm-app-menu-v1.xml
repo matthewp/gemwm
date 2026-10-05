@@ -13,10 +13,11 @@
 
     Menus are sent whole: requests between two commits describe every menu,
     in order, and commit replaces what was shown. When the user picks an
-    item, the activate event names it.
+    item, the activate event names it. Since version 2 a menu can have
+    submenus, which open to the side, as GEM's did from AES 3.30.
   </description>
 
-  <interface name="gemwm_app_menu_manager_v1" version="1">
+  <interface name="gemwm_app_menu_manager_v1" version="2">
     <request name="destroy" type="destructor"/>
 
     <request name="get_app_menu">
@@ -29,7 +30,7 @@
     </request>
   </interface>
 
-  <interface name="gemwm_app_menu_v1" version="1">
+  <interface name="gemwm_app_menu_v1" version="2">
     <enum name="flags" bitfield="true">
       <entry name="disabled" value="1" summary="shown grey, can't be picked"/>
       <entry name="checked" value="2" summary="shown with a check mark"/>
@@ -73,5 +74,21 @@
       <description summary="the user picked an item"/>
       <arg name="id" type="uint"/>
     </event>
+
+    <request name="submenu" since="2">
+      <description summary="start a submenu in the current menu">
+        An entry with this label, opening to the side; items, separators
+        and submenus after this go in it, until end_submenu. Submenus may
+        nest. One with no items is shown disabled.
+      </description>
+      <arg name="label" type="string"/>
+      <arg name="flags" type="uint" enum="flags"/>
+    </request>
+
+    <request name="end_submenu" since="2">
+      <description summary="end the current submenu">
+        What follows goes back in the menu (or submenu) the submenu is in.
+      </description>
+    </request>
   </interface>
 </protocol>

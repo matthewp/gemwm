@@ -6,6 +6,8 @@
  *   M<TAB>title
  *   I<TAB>id<TAB>flags<TAB>label<TAB>shortcut
  *   S                                            (a separator)
+ *   U<TAB>flags<TAB>label                        (a submenu begins)
+ *   E                                            (it ends)
  *
  * and send the focused window's with the control socket's "focus" event
  * (src/ipc.c). The bar asks for an item with "menu-activate".
@@ -87,6 +89,21 @@ static void handle_separator(struct wl_client *client,
 	append(wl_resource_get_user_data(resource), "S\n", false);
 }
 
+static void handle_submenu(struct wl_client *client,
+		struct wl_resource *resource, const char *label, uint32_t flags) {
+	struct app_menu *m = wl_resource_get_user_data(resource);
+	char head[32];
+	snprintf(head, sizeof(head), "U\t%u\t", flags);
+	append(m, head, false);
+	append(m, label, true);
+	append(m, "\n", false);
+}
+
+static void handle_end_submenu(struct wl_client *client,
+		struct wl_resource *resource) {
+	append(wl_resource_get_user_data(resource), "E\n", false);
+}
+
 static void handle_commit(struct wl_client *client,
 		struct wl_resource *resource) {
 	struct app_menu *m = wl_resource_get_user_data(resource);
@@ -111,6 +128,8 @@ static const struct gemwm_app_menu_v1_interface app_menu_impl = {
 	.menu = handle_menu,
 	.item = handle_item,
 	.separator = handle_separator,
+	.submenu = handle_submenu,
+	.end_submenu = handle_end_submenu,
 	.commit = handle_commit,
 };
 
@@ -183,7 +202,7 @@ static void manager_bind(struct wl_client *client, void *data,
 
 void app_menus_init(struct server *server) {
 	wl_global_create(server->wl_display, &gemwm_app_menu_manager_v1_interface,
-		1, server, manager_bind);
+		2, server, manager_bind);
 }
 
 /* A window is going away: its menus object stays until the client

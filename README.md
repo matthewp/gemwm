@@ -93,7 +93,7 @@ Window, Full Size (checked when it is), and Move to Workspace. GemWM's own
 applications add their menus after it: GemWeb's File, View and Go, and
 Bluetooth's File, with its On/Off merged into the top of Options. Any
 application can do the same with the `gemwm-app-menu-v1` Wayland protocol
-(`protocols/gemwm-app-menu-v1.xml`). With no window focused, the bar shows the desktop's menus: Desk, File, View and
+(`protocols/gemwm-app-menu-v1.xml`), submenus included (since version 2). With no window focused, the bar shows the desktop's menus: Desk, File, View and
 Options. Logout, Restart and Shutdown are at the bottom of Desk, so they're
 always there.
 
@@ -678,8 +678,9 @@ the sender, subject and the first part of each message's text to your AI
 provider. Then the newest messages of the folder you're looking at (the
 ones already downloaded to read offline) are categorized in the
 background, a few at a time: each row shows its categories, and they're
-listed under the folders with how many this folder has. Click one to see
-only those; click it again for all. While it works, the right of the
+listed under the folders with how many this folder has. Click one (or pick
+it in **View > Categories**) to see only those; click it again, or pick
+All Messages, for all. While it works, the right of the
 status line says how far it's got ("Categorizing: 8 of 20 done"), and a
 message still to be done has a dotted box where its categories will go;
 once done, a message with none is one no category fitted. If the AI
@@ -705,7 +706,7 @@ categorizes, a batch at a time, with your choices as examples;
 it. GemMail finds out which it has when it starts categorizing, and
 switching between them categorizes again.
 
-**View > Newsletters** (or Newsletters, under the folders) shows your
+**View > Views > Newsletters** (or Newsletters, under the folders) shows your
 Newsletter mail as a magazine rack, from every folder that's been
 categorized so far: an icon for each publication, newest first, with how
 many issues you haven't read. Open one for its issues, and an issue to read
@@ -716,7 +717,7 @@ else its initials. Only the sending domain is looked up, never anything
 from the message, and logos are kept in `~/.cache/gemmail/logos` (SVG
 ones need librsvg).
 
-**View > Bills** shows your Bill mail as a ledger, a month at a time,
+**View > Views > Bills** shows your Bill mail as a ledger, a month at a time,
 newest first: each bill's due date, payee, what it's for and the amount,
 read from the bill by AI in the background (a few at a time, from mail
 already downloaded), and each month's total and what's still unpaid.

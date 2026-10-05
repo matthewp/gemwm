@@ -19,7 +19,7 @@ static void registry_global(void *data, struct wl_registry *registry,
 		uint32_t name, const char *iface, uint32_t version) {
 	if (strcmp(iface, gemwm_app_menu_manager_v1_interface.name) == 0) {
 		manager = wl_registry_bind(registry, name,
-			&gemwm_app_menu_manager_v1_interface, 1);
+			&gemwm_app_menu_manager_v1_interface, MIN(version, 2));
 	}
 }
 
@@ -83,8 +83,22 @@ void app_menu_add_separator(struct app_menu *m) {
 	g_string_append(m->building, "S\n");
 }
 
-/* Sends the menus described as lines, as the protocol's requests. */
+void app_menu_add_submenu(struct app_menu *m, const char *label,
+		uint32_t flags) {
+	g_string_append_printf(m->building, "U\t%u\t", flags);
+	append_clean(m->building, label);
+	g_string_append_c(m->building, '\n');
+}
+
+void app_menu_end_submenu(struct app_menu *m) {
+	g_string_append(m->building, "E\n");
+}
+
+/* Sends the menus described as lines, as the protocol's requests. A
+ * GemWM from before submenus (version 1) gets their items in the menu
+ * itself. */
 static void send(struct app_menu *m, const char *text) {
+	bool submenus = gemwm_app_menu_v1_get_version(m->object) >= 2;
 	char **lines = g_strsplit(text, "\n", -1);
 	for (char **line = lines; *line != NULL; line++) {
 		char **f = g_strsplit(*line, "\t", 5);
@@ -92,6 +106,15 @@ static void send(struct app_menu *m, const char *text) {
 			gemwm_app_menu_v1_menu(m->object, f[1]);
 		} else if (g_strcmp0(f[0], "S") == 0) {
 			gemwm_app_menu_v1_separator(m->object);
+		} else if (g_strcmp0(f[0], "U") == 0 && g_strv_length(f) == 3) {
+			if (submenus) {
+				gemwm_app_menu_v1_submenu(m->object, f[2],
+					(uint32_t)g_ascii_strtoull(f[1], NULL, 10));
+			}
+		} else if (g_strcmp0(f[0], "E") == 0) {
+			if (submenus) {
+				gemwm_app_menu_v1_end_submenu(m->object);
+			}
 		} else if (g_strcmp0(f[0], "I") == 0 && g_strv_length(f) == 5) {
 			gemwm_app_menu_v1_item(m->object,
 				(uint32_t)g_ascii_strtoull(f[1], NULL, 10), f[3], f[4],

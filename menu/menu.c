@@ -916,6 +916,9 @@ static void build_app_menus(void) {
 	}
 	char *text = strdup(st.focus_menus), *save = NULL;
 	struct menu *m = NULL;
+	/* Submenus open within m: the menus they're in, innermost last. */
+	struct menu *outer[MAX_DEPTH];
+	int depth = 0, too_deep = 0; /* submenus beyond MAX_DEPTH: inline */
 	for (char *line = strtok_r(text, "\n", &save); line != NULL;
 			line = strtok_r(NULL, "\n", &save)) {
 		char *f[5] = { 0 };
@@ -931,10 +934,27 @@ static void build_app_menus(void) {
 			p = tab + 1;
 		}
 		if (strcmp(f[0], "M") == 0 && n >= 2) {
+			depth = too_deep = 0;
 			m = st.n_app_menus < MAX_MENUS - 3 ? /* room for Desk and co. */
 				&st.app_menus[st.n_app_menus++] : NULL;
 			if (m != NULL) {
 				m->title = strdup(f[1]);
+			}
+		} else if (strcmp(f[0], "U") == 0 && n >= 3 && m != NULL) {
+			struct item *item = depth < MAX_DEPTH - 1 ?
+				add_ipc_item(m, f[2], NULL) : NULL;
+			if (item != NULL) {
+				make_submenu(item);
+				outer[depth++] = m;
+				m = item->submenu;
+			} else {
+				too_deep++;
+			}
+		} else if (strcmp(f[0], "E") == 0) {
+			if (too_deep > 0) {
+				too_deep--;
+			} else if (depth > 0) {
+				m = outer[--depth];
 			}
 		} else if (strcmp(f[0], "S") == 0 && m != NULL) {
 			struct item *item = add_item(m);

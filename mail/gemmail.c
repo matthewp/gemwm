@@ -3415,14 +3415,17 @@ static void build_menus(struct app_menu *m, void *data) {
 		app_menu_add_item(m, ACT_ALWAYS_IMAGES, "Always Show Sender's Images",
 			NULL, remote ? 0 : APP_MENU_DISABLED);
 	}
-	/* View: all the folder's messages, or one category's. */
+	/* View: the views, from every folder; and the folder's messages, all
+	 * or one category's. */
 	if (categorising_on()) {
 		app_menu_add_menu(m, "View");
+		app_menu_add_submenu(m, "Views", 0);
 		app_menu_add_item(m, ACT_NEWSLETTERS, "Newsletters", NULL,
 			viewing() && ui.in_view == VIEW_NEWSLETTERS ? APP_MENU_CHECKED : 0);
 		app_menu_add_item(m, ACT_BILLS, "Bills", NULL,
 			viewing() && ui.in_view == VIEW_BILLS ? APP_MENU_CHECKED : 0);
-		app_menu_add_separator(m);
+		app_menu_end_submenu(m);
+		app_menu_add_submenu(m, "Categories", 0);
 		app_menu_add_item(m, ACT_VIEW_ALL, "All Messages", NULL,
 			ui.filter == NULL && !viewing() ? APP_MENU_CHECKED : 0);
 		app_menu_add_separator(m);
@@ -3432,6 +3435,7 @@ static void build_menus(struct app_menu *m, void *data) {
 				g_strcmp0(ui.filter, name) == 0 && !viewing() ?
 				APP_MENU_CHECKED : 0);
 		}
+		app_menu_end_submenu(m);
 	}
 	/* Merged into GemWM's Options; only with Augur there to ask. */
 	if (augur_enabled()) {

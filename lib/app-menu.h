@@ -32,5 +32,10 @@ void app_menu_add_menu(struct app_menu *menu, const char *title);
 void app_menu_add_item(struct app_menu *menu, uint32_t id, const char *label,
 	const char *shortcut, uint32_t flags);
 void app_menu_add_separator(struct app_menu *menu);
+/* A submenu, opening to the side: what's added after it goes in it, until
+ * app_menu_end_submenu. They may nest. */
+void app_menu_add_submenu(struct app_menu *menu, const char *label,
+	uint32_t flags);
+void app_menu_end_submenu(struct app_menu *menu);
 
 #endif
