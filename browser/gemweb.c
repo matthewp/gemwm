@@ -634,6 +634,10 @@ static void buttons_pressed(GtkGestureClick *gesture, int n_press,
 	case 2:
 		if (webkit_web_view_is_loading(t->view)) {
 			webkit_web_view_stop_loading(t->view);
+		} else if (gtk_event_controller_get_current_event_state(
+				GTK_EVENT_CONTROLLER(gesture)) & GDK_SHIFT_MASK) {
+			/* Shift: from the site, not the cache, as other browsers do. */
+			webkit_web_view_reload_bypass_cache(t->view);
 		} else {
 			webkit_web_view_reload(t->view);
 		}
@@ -1720,7 +1724,7 @@ enum action {
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
-	ACT_OPEN_IN_BROWSER,
+	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD,
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -3596,6 +3600,9 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	case ACT_RELOAD:
 		webkit_web_view_reload(t->view);
 		break;
+	case ACT_HARD_RELOAD:
+		webkit_web_view_reload_bypass_cache(t->view);
+		break;
 	case ACT_BACK:
 		webkit_web_view_go_back(t->view);
 		break;
@@ -3686,6 +3693,7 @@ static void build_menus(struct app_menu *m, void *data) {
 
 	app_menu_add_menu(m, "View");
 	app_menu_add_item(m, ACT_RELOAD, "Reload", "^R", 0);
+	app_menu_add_item(m, ACT_HARD_RELOAD, "Reload from Site", "^Shift+R", 0);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_READER, "Reader View", "^Alt+R",
 		t != NULL && t->reading ? APP_MENU_CHECKED :
@@ -3757,6 +3765,7 @@ static void add_shortcuts(GtkWidget *window) {
 		{ "<Control><Shift>Tab", ACT_PREV_TAB },
 		{ "<Control>Page_Up", ACT_PREV_TAB },
 		{ "<Control>r", ACT_RELOAD },
+		{ "<Control><Shift>r", ACT_HARD_RELOAD },
 		{ "<Control><Alt>r", ACT_READER },
 		{ "<Control>f", ACT_FIND },
 		{ "<Control>p", ACT_PRINT },
@@ -3765,6 +3774,8 @@ static void add_shortcuts(GtkWidget *window) {
 		{ "<Control><Shift>g", ACT_FIND_PREV },
 		{ "<Shift>F3", ACT_FIND_PREV },
 		{ "F5", ACT_RELOAD },
+		{ "<Shift>F5", ACT_HARD_RELOAD },
+		{ "<Control>F5", ACT_HARD_RELOAD },
 		{ "<Alt>Left", ACT_BACK },
 		{ "<Alt>Right", ACT_FORWARD },
 		{ "<Alt>Home", ACT_HOME },

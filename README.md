@@ -520,6 +520,7 @@ Web Browser always opens GemWeb.
 | Ctrl+Tab, Ctrl+Shift+Tab    | next / previous tab       |
 | Alt+Left / Alt+Right        | back / forward            |
 | Ctrl+R, F5                  | reload                    |
+| Ctrl+Shift+R, Shift+F5      | reload from the site      |
 | Ctrl+plus / minus / 0       | zoom                      |
 | Ctrl+P                      | print                     |
 | Ctrl+F                      | find in the page          |
