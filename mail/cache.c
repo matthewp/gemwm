@@ -66,6 +66,9 @@ struct cache *cache_open(void) {
 			" mailbox TEXT, uid INTEGER, sender TEXT, subject TEXT,"
 			" date INTEGER, seen INTEGER, answered INTEGER, flagged INTEGER,"
 			" size INTEGER, PRIMARY KEY (mailbox, uid))");
+		exec(c, "CREATE TABLE IF NOT EXISTS categories ("
+			" mailbox TEXT, uid INTEGER, names TEXT, version TEXT,"
+			" manual INTEGER, changed INTEGER, PRIMARY KEY (mailbox, uid))");
 	}
 	g_free(path);
 	return c;
@@ -178,6 +181,9 @@ static char *folder_dir(struct cache *c, const char *mailbox) {
 
 void cache_forget_folder(struct cache *c, const char *mailbox) {
 	sqlite3_stmt *s = prepare(c, "DELETE FROM messages WHERE mailbox = ?1");
+	bind_text(s, 1, mailbox);
+	run(s);
+	s = prepare(c, "DELETE FROM categories WHERE mailbox = ?1");
 	bind_text(s, 1, mailbox);
 	run(s);
 	s = prepare(c, "DELETE FROM state WHERE mailbox = ?1");
@@ -319,13 +325,18 @@ void cache_remove(struct cache *c, const char *mailbox, guint32 uid) {
 		g_unlink(path);
 		g_free(path);
 	}
-	sqlite3_stmt *s = prepare(c, "DELETE FROM messages"
-		" WHERE mailbox = ?1 AND uid = ?2");
-	if (s != NULL) {
-		bind_text(s, 1, mailbox);
-		sqlite3_bind_int64(s, 2, uid);
+	const char *tables[] = { "messages", "categories" };
+	for (size_t i = 0; i < G_N_ELEMENTS(tables); i++) {
+		char *sql = g_strdup_printf("DELETE FROM %s"
+			" WHERE mailbox = ?1 AND uid = ?2", tables[i]);
+		sqlite3_stmt *s = prepare(c, sql);
+		g_free(sql);
+		if (s != NULL) {
+			bind_text(s, 1, mailbox);
+			sqlite3_bind_int64(s, 2, uid);
+		}
+		run(s);
 	}
-	run(s);
 }
 
 void cache_trim(struct cache *c, const char *mailbox, guint keep) {
@@ -334,6 +345,71 @@ void cache_trim(struct cache *c, const char *mailbox, guint keep) {
 		cache_remove(c, mailbox, g_array_index(uids, guint32, i));
 	}
 	g_array_free(uids, TRUE);
+}
+
+/* ---- Categories ----------------------------------------------------------- */
+
+static void categorised_free(gpointer p) {
+	struct categorised *k = p;
+	g_free(k->names);
+	g_free(k->version);
+	g_free(k);
+}
+
+GHashTable *cache_categorised(struct cache *c, const char *mailbox) {
+	GHashTable *t = g_hash_table_new_full(NULL, NULL, NULL, categorised_free);
+	sqlite3_stmt *s = prepare(c, "SELECT uid, names, version, manual"
+		" FROM categories WHERE mailbox = ?1");
+	if (s == NULL) {
+		return t;
+	}
+	bind_text(s, 1, mailbox);
+	while (sqlite3_step(s) == SQLITE_ROW) {
+		struct categorised *k = g_new0(struct categorised, 1);
+		k->names = g_strdup((const char *)sqlite3_column_text(s, 1));
+		k->version = g_strdup((const char *)sqlite3_column_text(s, 2));
+		k->manual = sqlite3_column_int(s, 3);
+		g_hash_table_insert(t, GUINT_TO_POINTER(sqlite3_column_int64(s, 0)), k);
+	}
+	sqlite3_finalize(s);
+	return t;
+}
+
+void cache_set_categorised(struct cache *c, const char *mailbox, guint32 uid,
+		const char *names, const char *version, bool manual) {
+	sqlite3_stmt *s = prepare(c, "INSERT OR REPLACE INTO categories"
+		" VALUES (?1, ?2, ?3, ?4, ?5, ?6)");
+	if (s == NULL) {
+		return;
+	}
+	bind_text(s, 1, mailbox);
+	sqlite3_bind_int64(s, 2, uid);
+	bind_text(s, 3, names);
+	bind_text(s, 4, version);
+	sqlite3_bind_int(s, 5, manual);
+	sqlite3_bind_int64(s, 6, g_get_real_time() / G_USEC_PER_SEC);
+	run(s);
+}
+
+GPtrArray *cache_category_examples(struct cache *c, guint limit) {
+	GPtrArray *examples = g_ptr_array_new();
+	sqlite3_stmt *s = prepare(c, "SELECT m.sender, m.subject, k.names"
+		" FROM categories k JOIN messages m"
+		" ON m.mailbox = k.mailbox AND m.uid = k.uid"
+		" WHERE k.manual = 1 ORDER BY k.changed DESC LIMIT ?1");
+	if (s == NULL) {
+		return examples;
+	}
+	sqlite3_bind_int(s, 1, limit);
+	while (sqlite3_step(s) == SQLITE_ROW) {
+		struct example *e = g_new0(struct example, 1);
+		e->from = g_strdup((const char *)sqlite3_column_text(s, 0));
+		e->subject = g_strdup((const char *)sqlite3_column_text(s, 1));
+		e->names = g_strdup((const char *)sqlite3_column_text(s, 2));
+		g_ptr_array_add(examples, e);
+	}
+	sqlite3_finalize(s);
+	return examples;
 }
 
 /* ---- Bodies ------------------------------------------------------------- */

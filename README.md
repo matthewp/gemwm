@@ -669,6 +669,24 @@ only what's changed (new mail, what's gone, what's been read elsewhere:
 CONDSTORE, where the server has it). Without a connection, what's cached
 still reads. Deleting the folder only makes the next start slower.
 
+With AI (through Augur; see AI), GemMail can sort your mail into
+categories, like Bill, Newsletter or Shipping; a message can be in several.
+It's off until you choose **Options > Categorize with AI**, since it sends
+the sender, subject and the first part of each message's text to your AI
+provider. Then the newest messages of the folder you're looking at (the
+ones already downloaded to read offline) are categorized in the
+background, a few at a time: each row shows its categories, and they're
+listed under the folders with how many this folder has. Click one to see
+only those; click it again for all.
+
+**Message > Categories...** puts the selected messages in categories
+yourself: what you choose is kept, never changed by AI, and your latest
+choices go to the model as examples. The categories, and what each is
+for, are in `~/.config/gemmail/categories` (written with defaults when you
+first turn it on): the descriptions are what the model goes by, so make
+them say what belongs there. Change them and mail is categorized again.
+`model =` or `tier =` under `[Categories]` there picks what Augur uses.
+
 An HTML message runs no scripts and loads nothing from the web (no
 tracking pixels) until you press **Show Images**, for that message, or
 **Always for** its sender, which shows that address's images from then on

@@ -20,7 +20,9 @@
 #include <webkit/webkit.h>
 #include "account.h"
 #include "app-menu.h"
+#include "augur.h"
 #include "cache.h"
+#include "categories.h"
 #include "gem-draw.h"
 #include "imap.h"
 #include "message.h"
@@ -37,6 +39,10 @@
 #define AHEAD 100       /* the newest fetched ahead, to read offline */
 #define AHEAD_SIZE (2 * 1024 * 1024) /* but none bigger */
 #define REFRESH 180     /* seconds between checks for new mail */
+#define CATEGORISE_BATCH 8   /* messages to a request */
+#define CATEGORISE_TICK 20   /* seconds between looks for mail to categorise */
+#define CATEGORISE_WAIT 300  /* seconds to leave it after an error */
+#define EXAMPLES 12          /* your own choices, sent as examples */
 
 enum action {
 	ACT_NONE, ACT_BACK, ACT_REPLY, ACT_REPLY_ALL, ACT_FORWARD, ACT_DELETE,
@@ -46,6 +52,8 @@ enum action {
 	ACT_MOVE_CANCEL,
 	ACT_QUIT, ACT_OPEN,
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
+	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
+	ACT_CATEGORIES_CANCEL,
 };
 
 struct hit {
@@ -70,7 +78,9 @@ static struct {
 
 	GPtrArray *folder_list; /* struct folder */
 	int folder;             /* selected, or -1 */
-	GPtrArray *messages;    /* struct summary */
+	GPtrArray *all;         /* the folder's messages: struct summary */
+	GPtrArray *messages;    /* those shown: all, or those in the category
+	                         * the list is filtered by (not owned) */
 	int selected;           /* in messages, or -1: where the keys are */
 	int anchor;             /* where a Shift range starts */
 	GHashTable *picked;     /* the messages selected, by UID */
@@ -97,11 +107,22 @@ static struct {
 	bool dragging;
 
 	GtkWidget *password;    /* its dialog, while asking */
+
+	/* Categories, with AI (categories.h): what they are, the folder's (UID
+	 * -> struct categorised), the one the list shows, and the request. */
+	struct categories *categories;
+	GHashTable *categorised;
+	char *filter;
+	bool categorising;
+	gint64 categorise_after; /* after an error, not before this */
 	char *session;          /* the password manager's, once unlocked */
 } ui = { .folder = -1, .selected = -1, .anchor = -1, .pending_pick = -1,
 	.drop_folder = -1 };
 
 static void load_messages(void);
+static void paint_categories(cairo_t *cr, int w);
+static int message_count(void);
+static void categories_dialog(void);
 static GtkWidget *pixel_area(int w, int h, GtkDrawingAreaDrawFunc draw,
 	GCallback pressed);
 static void move_to(struct folder *dest);
@@ -204,7 +225,10 @@ static void status_counts(void) {
 		return;
 	}
 	const char *plural = f->messages == 1 ? "" : "s";
-	if (f->unseen > 0) {
+	if (ui.filter != NULL) {
+		guint n = ui.messages != NULL ? ui.messages->len : 0;
+		set_status("%s: %u in %s", f->name, n, ui.filter);
+	} else if (f->unseen > 0) {
 		set_status("%s: %u message%s, %u unread", f->name, f->messages, plural,
 			f->unseen);
 	} else {
@@ -213,6 +237,246 @@ static void status_counts(void) {
 	if (ui.open == NULL) {
 		gtk_window_set_title(GTK_WINDOW(ui.window), f->name);
 	}
+}
+
+/* ---- Categories ----------------------------------------------------------- */
+
+/* With AI, through Augur (lib/augur.h), once you've turned it on: the
+ * newest messages of the folder shown, whose text is already here (see
+ * fetch_ahead), a batch at a time. What each was put in is kept in the
+ * cache; what you put a message in yourself is never redone. */
+
+static void refilter(void);
+static guint categorise_id;
+
+static void clear_messages(void) {
+	if (ui.messages != NULL) {
+		g_ptr_array_free(ui.messages, TRUE); /* the pointers only: all owns them */
+		ui.messages = NULL;
+	}
+	g_clear_pointer(&ui.all, summaries_free);
+}
+
+/* Wanted, and Augur's there and on. */
+static bool categorising_on(void) {
+	return ui.categories != NULL && ui.categories->enabled && augur_enabled();
+}
+
+static void load_categorised(void) {
+	g_clear_pointer(&ui.categorised, g_hash_table_unref);
+	struct folder *f = current_folder();
+	if (f != NULL && ui.cache != NULL) {
+		ui.categorised = cache_categorised(ui.cache, f->mailbox);
+	}
+}
+
+static struct categorised *categorised_of(guint32 uid) {
+	return ui.categorised != NULL ?
+		g_hash_table_lookup(ui.categorised, GUINT_TO_POINTER(uid)) : NULL;
+}
+
+static bool in_category(guint32 uid, const char *name) {
+	struct categorised *k = categorised_of(uid);
+	if (k == NULL || k->names == NULL) {
+		return false;
+	}
+	char **names = g_strsplit(k->names, "\n", -1);
+	bool in = g_strv_contains((const char *const *)names, name);
+	g_strfreev(names);
+	return in;
+}
+
+/* A message the list shows: any, or those in the category it's filtered
+ * by. */
+static bool shown(const struct summary *s) {
+	return ui.filter == NULL || in_category(s->uid, ui.filter);
+}
+
+/* Never categorised, or by other categories or another model; and not by
+ * you. */
+static bool wanted(const struct summary *s) {
+	struct categorised *k = categorised_of(s->uid);
+	return k == NULL || (!k->manual &&
+		g_strcmp0(k->version, ui.categories->version) != 0);
+}
+
+static void categorise_soon(void);
+
+struct categorising {
+	char *mailbox, *version;
+	GArray *uids;
+};
+
+/* Only the names that are categories, each once. */
+static char *known_names(const char *names) {
+	GString *out = g_string_new(NULL);
+	char **list = g_strsplit(names != NULL ? names : "", "\n", -1);
+	GPtrArray *seen = g_ptr_array_new();
+	for (int i = 0; list[i] != NULL; i++) {
+		if (categories_has(ui.categories, list[i]) &&
+				!g_ptr_array_find_with_equal_func(seen, list[i], g_str_equal, NULL)) {
+			g_string_append_printf(out, "%s%s", out->len ? "\n" : "", list[i]);
+			g_ptr_array_add(seen, list[i]);
+		}
+	}
+	g_ptr_array_free(seen, TRUE);
+	g_strfreev(list);
+	return g_string_free(out, FALSE);
+}
+
+static void categorising_free(struct categorising *job) {
+	g_free(job->mailbox);
+	g_free(job->version);
+	g_array_free(job->uids, TRUE);
+	g_free(job);
+}
+
+static void categorised(const char *text, const char *error, void *data) {
+	struct categorising *job = data;
+	ui.categorising = false;
+	GHashTable *answer = text != NULL ? categories_parse_answer(text) : NULL;
+	if (answer == NULL) {
+		/* Not again for a while: the next look would only fail the same. */
+		ui.categorise_after = g_get_monotonic_time() / G_USEC_PER_SEC +
+			CATEGORISE_WAIT;
+		set_status("Couldn't categorize: %s",
+			error != NULL ? error : "the answer couldn't be read");
+		categorising_free(job);
+		return;
+	}
+	cache_begin(ui.cache);
+	for (guint i = 0; i < job->uids->len; i++) {
+		guint32 uid = g_array_index(job->uids, guint32, i);
+		char *names = known_names(g_hash_table_lookup(answer,
+			GUINT_TO_POINTER(uid)));
+		cache_set_categorised(ui.cache, job->mailbox, uid, names, job->version,
+			false);
+		g_free(names);
+	}
+	cache_commit(ui.cache);
+	g_hash_table_destroy(answer);
+	struct folder *f = current_folder();
+	if (f != NULL && strcmp(f->mailbox, job->mailbox) == 0) {
+		load_categorised();
+		if (ui.filter != NULL) {
+			refilter();
+		}
+		gtk_widget_queue_draw(ui.list);
+		gtk_widget_queue_draw(ui.folders);
+	}
+	categorising_free(job);
+	categorise_soon();
+}
+
+static void to_categorise_free(gpointer p) {
+	struct to_categorise *t = p;
+	g_free(t->from);
+	g_free(t->text);
+	g_free(t);
+}
+
+static gboolean categorise_now(gpointer data) {
+	categorise_id = 0;
+	struct folder *f = current_folder();
+	if (!categorising_on() || ui.categorising || f == NULL || ui.all == NULL ||
+			g_get_monotonic_time() / G_USEC_PER_SEC < ui.categorise_after) {
+		return G_SOURCE_REMOVE;
+	}
+	GPtrArray *batch = g_ptr_array_new_with_free_func(to_categorise_free);
+	for (guint i = 0; i < ui.all->len && i < AHEAD &&
+			batch->len < CATEGORISE_BATCH; i++) {
+		struct summary *s = ui.all->pdata[i];
+		if (!wanted(s)) {
+			continue;
+		}
+		GBytes *raw = cache_body(ui.cache, f->mailbox, s->uid);
+		if (raw == NULL) {
+			continue; /* not fetched yet: a later look */
+		}
+		struct message *m = message_parse(raw);
+		g_bytes_unref(raw);
+		char *body = m != NULL ? message_body_text(m) : NULL;
+		struct to_categorise *t = g_new0(struct to_categorise, 1);
+		t->uid = s->uid;
+		/* The address too, from the message: billing@... says a lot. */
+		t->from = g_strdup(m != NULL && m->from != NULL ? m->from : s->from);
+		t->subject = s->subject;
+		t->text = categories_excerpt(body);
+		g_free(body);
+		message_free(m);
+		g_ptr_array_add(batch, t);
+	}
+	if (batch->len == 0) {
+		g_ptr_array_unref(batch);
+		return G_SOURCE_REMOVE;
+	}
+	GPtrArray *examples = cache_category_examples(ui.cache, EXAMPLES);
+	char *system = categories_system_prompt(ui.categories, examples);
+	char *user = categories_user_prompt(batch);
+	char *schema = categories_schema(ui.categories);
+	struct categorising *job = g_new0(struct categorising, 1);
+	job->mailbox = g_strdup(f->mailbox);
+	job->version = g_strdup(ui.categories->version);
+	job->uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	for (guint i = 0; i < batch->len; i++) {
+		g_array_append_val(job->uids, ((struct to_categorise *)batch->pdata[i])->uid);
+	}
+	ui.categorising = true;
+	augur_ask(system, user, schema, ui.categories->model, ui.categories->tier,
+		categorised, job);
+	for (guint i = 0; i < examples->len; i++) {
+		struct example *e = examples->pdata[i];
+		g_free(e->from);
+		g_free(e->subject);
+		g_free(e->names);
+		g_free(e);
+	}
+	g_ptr_array_free(examples, TRUE);
+	g_free(system);
+	g_free(user);
+	g_free(schema);
+	g_ptr_array_unref(batch);
+	return G_SOURCE_REMOVE;
+}
+
+/* A look for mail to categorise, shortly (a burst of changes, one look). */
+static void categorise_soon(void) {
+	if (categorise_id == 0 && categorising_on() && !ui.categorising) {
+		categorise_id = g_timeout_add(500, categorise_now, NULL);
+	}
+}
+
+/* The categories file, read again: you may have changed it. */
+static void reload_categories(void) {
+	struct categories *c = categories_load();
+	bool changed = ui.categories == NULL || c->enabled != ui.categories->enabled ||
+		strcmp(c->version, ui.categories->version) != 0;
+	categories_free(ui.categories);
+	ui.categories = c;
+	if (ui.filter != NULL && (!categorising_on() ||
+			!categories_has(c, ui.filter))) {
+		g_clear_pointer(&ui.filter, g_free);
+		refilter();
+	}
+	if (changed) {
+		gtk_widget_queue_draw(ui.folders);
+		gtk_widget_queue_draw(ui.list);
+		app_menu_update(ui.menu);
+	}
+}
+
+static gboolean categorise_tick(gpointer data) {
+	reload_categories();
+	categorise_soon();
+	return G_SOURCE_CONTINUE;
+}
+
+static void augur_changed(bool enabled, void *data) {
+	reload_categories();
+	gtk_widget_queue_draw(ui.folders);
+	gtk_widget_queue_draw(ui.list);
+	app_menu_update(ui.menu);
+	categorise_soon();
 }
 
 /* ---- The folders --------------------------------------------------------- */
@@ -261,6 +525,65 @@ static void paint_folders(cairo_t *cr, int w, int h, void *data) {
 			gem_grey_out(cr, 0, y, w - 1, ROW_H);
 		}
 	}
+	paint_categories(cr, w);
+}
+
+/* The categories go under the folders: a rule, then a row each. */
+static int categories_top(void) {
+	int folders = ui.folder_list != NULL ? (int)ui.folder_list->len : 0;
+	return PAD / 2 + folders * ROW_H + ROW_H;
+}
+
+/* A category, 13x9: a tag with its hole. */
+static const char *const tag_icon[] = {
+	"#########....",
+	"#........#...",
+	"#.##......#..",
+	"#.##.......#.",
+	"#...........#",
+	"#..........#.",
+	"#.........#..",
+	"#........#...",
+	"#########....",
+};
+
+static int in_category_count(const char *name) {
+	int n = 0;
+	for (guint i = 0; ui.all != NULL && i < ui.all->len; i++) {
+		n += in_category(((struct summary *)ui.all->pdata[i])->uid, name);
+	}
+	return n;
+}
+
+static void paint_categories(cairo_t *cr, int w) {
+	if (!categorising_on() || ui.folder_list == NULL) {
+		return;
+	}
+	int top = categories_top();
+	gem_black(cr);
+	for (int x = PAD; x < w - PAD; x += 2) {
+		gem_fill(cr, x, top - ROW_H / 2, 1, 1);
+	}
+	for (guint i = 0; i < ui.categories->list->len; i++) {
+		struct category *k = ui.categories->list->pdata[i];
+		int y = top + i * ROW_H;
+		bool on = g_strcmp0(ui.filter, k->name) == 0;
+		gem_black(cr);
+		if (on) {
+			gem_fill(cr, 0, y, w - 1, ROW_H);
+			gem_white(cr);
+		}
+		gem_bitmap(cr, tag_icon, G_N_ELEMENTS(tag_icon), PAD, y + 5);
+		char count[16] = "";
+		int n = in_category_count(k->name);
+		if (n > 0) {
+			snprintf(count, sizeof(count), "%d", n);
+		}
+		int cw = (int)gem_text_width(cr, count);
+		clipped(cr, k->name, PAD + 18, y, w - 1 - PAD - cw - PAD - (PAD + 18),
+			ROW_H);
+		gem_text(cr, count, w - 1 - PAD - cw, y, ROW_H);
+	}
 }
 
 static void draw_folders(GtkDrawingArea *area, cairo_t *cr, int w, int h,
@@ -274,7 +597,9 @@ static void choose_folder(int index) {
 		return;
 	}
 	ui.folder = index;
-	g_clear_pointer(&ui.messages, summaries_free);
+	clear_messages();
+	g_clear_pointer(&ui.filter, g_free);
+	load_categorised();
 	ui.selected = -1;
 	g_hash_table_remove_all(ui.picked);
 	ui.top = 0;
@@ -283,9 +608,32 @@ static void choose_folder(int index) {
 	load_messages();
 }
 
+/* A category clicked: the list shows only its messages; clicked again,
+ * all of them. */
+static void choose_category(int index) {
+	if (!categorising_on() || index < 0 ||
+			index >= (int)ui.categories->list->len) {
+		return;
+	}
+	const char *name = ((struct category *)ui.categories->list->pdata[index])->name;
+	bool off = g_strcmp0(ui.filter, name) == 0;
+	g_free(ui.filter);
+	ui.filter = off ? NULL : g_strdup(name);
+	if (ui.open != NULL) {
+		show_list();
+	}
+	refilter();
+	gtk_widget_queue_draw(ui.folders);
+}
+
 static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 		gpointer data) {
-	choose_folder(((int)y - PAD / 2) / ROW_H);
+	int top = categories_top();
+	if (ui.folder_list != NULL && y >= top) {
+		choose_category(((int)y - top) / ROW_H);
+	} else {
+		choose_folder(((int)y - PAD / 2) / ROW_H);
+	}
 }
 
 /* ---- Loading ------------------------------------------------------------ */
@@ -353,33 +701,55 @@ static void show_messages(struct folder *f, GPtrArray *messages) {
 		((struct summary *)ui.messages->pdata[ui.anchor])->uid : 0;
 	GHashTable *was = ui.picked;
 	ui.picked = g_hash_table_new(NULL, NULL);
-	summaries_free(ui.messages);
-	ui.messages = g_ptr_array_new();
+	/* Copied first: messages may be the list being replaced (refilter). */
+	GPtrArray *all = g_ptr_array_new();
+	GPtrArray *view = g_ptr_array_new();
 	ui.selected = ui.anchor = -1;
 	guint unseen = 0;
 	for (guint i = 0; i < messages->len; i++) {
 		struct summary *s = g_memdup2(messages->pdata[i], sizeof(struct summary));
 		s->from = g_strdup(s->from);
 		s->subject = g_strdup(s->subject);
-		g_ptr_array_add(ui.messages, s);
+		g_ptr_array_add(all, s);
 		unseen += !s->seen;
+		if (!shown(s)) {
+			continue;
+		}
+		g_ptr_array_add(view, s);
+		int at = view->len - 1;
 		if (uid != 0 && s->uid == uid) {
-			ui.selected = i;
+			ui.selected = at;
 		}
 		if (anchor != 0 && s->uid == anchor) {
-			ui.anchor = i;
+			ui.anchor = at;
 		}
 		if (g_hash_table_contains(was, GUINT_TO_POINTER(s->uid))) {
 			g_hash_table_add(ui.picked, GUINT_TO_POINTER(s->uid));
 		}
 	}
 	g_hash_table_destroy(was);
+	clear_messages();
+	ui.all = all;
+	ui.messages = view;
 	f->messages = MAX(f->messages, messages->len);
 	f->unseen = MAX(f->unseen, unseen);
 	gtk_widget_queue_draw(ui.list);
 	gtk_widget_queue_draw(ui.scroll);
 	gtk_widget_queue_draw(ui.folders);
 	app_menu_update(ui.menu);
+	categorise_soon();
+}
+
+/* The list again, for the category it's filtered by now. */
+static void refilter(void) {
+	struct folder *f = current_folder();
+	if (f != NULL && ui.all != NULL) {
+		show_messages(f, ui.all);
+		if (ui.top > MAX(0, message_count() - 1)) {
+			ui.top = 0;
+		}
+		status_counts();
+	}
 }
 
 static void got_messages(GPtrArray *messages, const char *error, void *data) {
@@ -589,8 +959,24 @@ static void paint_list(cairo_t *cr, int w, int h, void *data) {
 			diamond(cr, 10, y + ROW_H / 2);
 		}
 		clipped(cr, s->from, from_x, y, from_w, ROW_H);
+		/* Its categories, boxed, at the end of the subject's space. */
+		int tags_x = subject_x + subject_w;
+		struct categorised *k = categorising_on() ? categorised_of(s->uid) : NULL;
+		if (k != NULL && k->names != NULL && k->names[0] != '\0') {
+			char **names = g_strsplit(k->names, "\n", -1);
+			for (int t = g_strv_length(names) - 1; t >= 0; t--) {
+				int tw = (int)gem_text_width(cr, names[t]) + 8;
+				if (tags_x - tw - PAD < subject_x + subject_w / 3) {
+					break; /* the subject comes first */
+				}
+				tags_x -= tw + 4;
+				gem_frame(cr, tags_x, y + 2, tw, ROW_H - 4, 1);
+				gem_text(cr, names[t], tags_x + 4, y, ROW_H);
+			}
+			g_strfreev(names);
+		}
 		clipped(cr, s->subject[0] ? s->subject : "(no subject)", subject_x, y,
-			subject_w, ROW_H);
+			tags_x - subject_x - PAD / 2, ROW_H);
 		char *date = short_date(s->date);
 		gem_text(cr, date, w - PAD - gem_text_width(cr, date), y, ROW_H);
 		g_free(date);
@@ -1370,10 +1756,11 @@ static void send_away(struct folder *f, GPtrArray *t, const char *to,
 		if (f->messages > 0) {
 			f->messages--;
 		}
+		g_ptr_array_remove(ui.all, s);
+		g_ptr_array_remove_index(ui.messages, index);
 		g_free(s->from);
 		g_free(s->subject);
 		g_free(s);
-		g_ptr_array_remove_index(ui.messages, index);
 	}
 	g_ptr_array_free(t, TRUE);
 	/* The next: the one after (older), or before if it was the last. */
@@ -1909,6 +2296,29 @@ static void run_action(enum action action, int index) {
 	case ACT_UNREAD:
 		toggle_seen();
 		break;
+	case ACT_CATEGORIZE: {
+		bool on = !(ui.categories != NULL && ui.categories->enabled);
+		char *why = categories_set_enabled(on);
+		if (why != NULL) {
+			set_status("Couldn't save the categories: %s", why);
+			g_free(why);
+			break;
+		}
+		reload_categories();
+		ui.categorise_after = 0;
+		if (on) {
+			char *path = categories_path();
+			set_status("Categorizing with AI. The categories are in %s", path);
+			g_free(path);
+			categorise_soon();
+		} else {
+			set_status("Not categorizing");
+		}
+		break;
+	}
+	case ACT_CATEGORIES:
+		categories_dialog();
+		break;
 	case ACT_SHOW_IMAGES:
 		ui.remote_images = true;
 		gtk_widget_queue_draw(ui.header);
@@ -2030,6 +2440,188 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 	return FALSE;
 }
 
+/* ---- Putting messages in categories yourself ------------------------------- */
+
+/* Message > Categories...: a box to tick for each. What's ticked for the
+ * messages is what they're in from then on, kept as yours (never redone),
+ * and your latest choices go to the model as examples. */
+static struct {
+	GtkWidget *window, *area;
+	GArray *hits;            /* struct hit */
+	bool *ticked;
+	char *mailbox;
+	GArray *uids;
+	char *title;
+} chooser;
+
+static void paint_chooser(cairo_t *cr, int w, int h, void *data) {
+	g_array_set_size(chooser.hits, 0);
+	gem_black(cr);
+	gem_frame(cr, 0, 0, w, h, 1);
+	gem_frame(cr, 3, 3, w - 6, h - 6, 2);
+	int x = 3 + 2 * PAD, y = 3 + 2 * PAD;
+	gem_text(cr, chooser.title, x, y, ROW_H);
+	y += ROW_H + PAD;
+	for (guint i = 0; i < ui.categories->list->len; i++, y += ROW_H) {
+		struct category *k = ui.categories->list->pdata[i];
+		int box = 13, by = y + (ROW_H - box) / 2;
+		gem_frame(cr, x, by, box, box, 1);
+		if (chooser.ticked[i]) {
+			for (int j = 2; j < box - 2; j++) {
+				gem_fill(cr, x + j, by + j, 1, 1);
+				gem_fill(cr, x + box - 1 - j, by + j, 1, 1);
+			}
+		}
+		gem_text(cr, k->name, x + box + PAD, y, ROW_H);
+		add_hit(chooser.hits, x, y, w - 2 * x, ROW_H, ACT_CATEGORY_TOGGLE, i);
+	}
+	int by = h - 3 - 2 * PAD - BUTTON_H;
+	int bw = MAX(gem_text_width(cr, "Cancel"), gem_text_width(cr, "OK")) +
+		2 * PAD;
+	int bx = w - 3 - 2 * PAD - 2 * bw - PAD;
+	for (int i = 0; i < 2; i++) {
+		const char *label = i == 0 ? "Cancel" : "OK";
+		int bxi = bx + i * (bw + PAD);
+		gem_frame(cr, bxi, by, bw, BUTTON_H, i == 1 ? 2 : 1);
+		gem_text(cr, label, bxi + (bw - gem_text_width(cr, label)) / 2, by,
+			BUTTON_H);
+		add_hit(chooser.hits, bxi, by, bw, BUTTON_H,
+			i == 0 ? ACT_CATEGORIES_CANCEL : ACT_CATEGORIES_OK, 0);
+	}
+}
+
+static void draw_chooser(GtkDrawingArea *area, cairo_t *cr, int w, int h,
+		gpointer data) {
+	gem_draw_pixelated(cr, w, h, paint_chooser, NULL);
+}
+
+static void chooser_close(bool ok) {
+	if (chooser.window == NULL) {
+		return;
+	}
+	if (ok) {
+		GString *names = g_string_new(NULL);
+		for (guint i = 0; i < ui.categories->list->len; i++) {
+			if (chooser.ticked[i]) {
+				g_string_append_printf(names, "%s%s", names->len ? "\n" : "",
+					((struct category *)ui.categories->list->pdata[i])->name);
+			}
+		}
+		cache_begin(ui.cache);
+		for (guint i = 0; i < chooser.uids->len; i++) {
+			cache_set_categorised(ui.cache, chooser.mailbox,
+				g_array_index(chooser.uids, guint32, i), names->str,
+				ui.categories->version, true);
+		}
+		cache_commit(ui.cache);
+		g_string_free(names, TRUE);
+		load_categorised();
+		if (ui.filter != NULL) {
+			refilter();
+		}
+		gtk_widget_queue_draw(ui.list);
+		gtk_widget_queue_draw(ui.folders);
+	}
+	gtk_window_destroy(GTK_WINDOW(chooser.window));
+}
+
+static void chooser_destroyed(GtkWidget *w, gpointer data) {
+	g_array_unref(chooser.hits);
+	g_array_free(chooser.uids, TRUE);
+	g_free(chooser.ticked);
+	g_free(chooser.mailbox);
+	g_free(chooser.title);
+	memset(&chooser, 0, sizeof(chooser));
+}
+
+static void chooser_pressed(GtkGestureClick *g, int n, double x, double y,
+		gpointer data) {
+	const struct hit *h = hit_at(chooser.hits, x, y);
+	if (h == NULL) {
+		return;
+	}
+	if (h->action == ACT_CATEGORY_TOGGLE) {
+		chooser.ticked[h->index] = !chooser.ticked[h->index];
+		gtk_widget_queue_draw(chooser.area);
+	} else {
+		chooser_close(h->action == ACT_CATEGORIES_OK);
+	}
+}
+
+static gboolean chooser_key(GtkEventControllerKey *c, guint keyval,
+		guint keycode, GdkModifierType state, gpointer data) {
+	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+		chooser_close(true);
+		return TRUE;
+	}
+	if (keyval == GDK_KEY_Escape) {
+		chooser_close(false);
+		return TRUE;
+	}
+	/* 1 to 9 tick the first nine. */
+	if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_9 &&
+			keyval - GDK_KEY_1 < ui.categories->list->len) {
+		chooser.ticked[keyval - GDK_KEY_1] = !chooser.ticked[keyval - GDK_KEY_1];
+		gtk_widget_queue_draw(chooser.area);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void categories_dialog(void) {
+	struct folder *f = current_folder();
+	GPtrArray *t = f != NULL ? targets() : NULL;
+	if (t == NULL || t->len == 0 || chooser.window != NULL ||
+			!categorising_on() || ui.categories->list->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
+		return;
+	}
+	guint n = ui.categories->list->len;
+	chooser.ticked = g_new0(bool, n);
+	chooser.uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	/* Ticked: what they're all in now. */
+	for (guint i = 0; i < n; i++) {
+		const char *name = ((struct category *)ui.categories->list->pdata[i])->name;
+		bool all = true;
+		for (guint k = 0; k < t->len && all; k++) {
+			all = in_category(((struct summary *)t->pdata[k])->uid, name);
+		}
+		chooser.ticked[i] = all;
+	}
+	for (guint k = 0; k < t->len; k++) {
+		g_array_append_val(chooser.uids, ((struct summary *)t->pdata[k])->uid);
+	}
+	chooser.mailbox = g_strdup(f->mailbox);
+	chooser.title = t->len > 1 ?
+		g_strdup_printf("Put these %u messages in:", t->len) :
+		g_strdup("Put this message in:");
+	chooser.hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
+	g_ptr_array_free(t, TRUE);
+
+	chooser.window = gtk_window_new();
+	gtk_window_set_title(GTK_WINDOW(chooser.window), "Categories");
+	gtk_window_set_transient_for(GTK_WINDOW(chooser.window),
+		GTK_WINDOW(ui.window));
+	gtk_window_set_application(GTK_WINDOW(chooser.window), ui.app);
+	gtk_window_set_modal(GTK_WINDOW(chooser.window), TRUE);
+	gtk_window_set_resizable(GTK_WINDOW(chooser.window), FALSE);
+	gtk_widget_add_css_class(chooser.window, "gem-mail");
+	chooser.area = pixel_area(300, 3 + 2 * PAD + ROW_H + PAD + n * ROW_H +
+		2 * PAD + BUTTON_H + 2 * PAD + 3, draw_chooser,
+		G_CALLBACK(chooser_pressed));
+	gtk_widget_set_focusable(chooser.area, TRUE);
+	gtk_window_set_child(GTK_WINDOW(chooser.window), chooser.area);
+	GtkEventController *keys = gtk_event_controller_key_new();
+	g_signal_connect(keys, "key-pressed", G_CALLBACK(chooser_key), NULL);
+	gtk_widget_add_controller(chooser.window, keys);
+	g_signal_connect(chooser.window, "destroy", G_CALLBACK(chooser_destroyed),
+		NULL);
+	gtk_window_present(GTK_WINDOW(chooser.window));
+	gtk_widget_grab_focus(chooser.area);
+}
+
 /* ---- Menus --------------------------------------------------------------- */
 
 static void build_menus(struct app_menu *m, void *data) {
@@ -2066,6 +2658,9 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_ARCHIVE, "Archive", "A", have);
 	app_menu_add_item(m, ACT_MOVE, "Move to Folder...", "M", have);
 	app_menu_add_item(m, ACT_DELETE, "Delete", "Del", have);
+	if (categorising_on()) {
+		app_menu_add_item(m, ACT_CATEGORIES, "Categories...", NULL, have);
+	}
 	app_menu_add_separator(m);
 	bool remote = ui.open != NULL && ui.open->sender != NULL &&
 		has_remote(ui.open->html);
@@ -2077,6 +2672,12 @@ static void build_menus(struct app_menu *m, void *data) {
 	} else {
 		app_menu_add_item(m, ACT_ALWAYS_IMAGES, "Always Show Sender's Images",
 			NULL, remote ? 0 : APP_MENU_DISABLED);
+	}
+	/* Merged into GemWM's Options; only with Augur there to ask. */
+	if (augur_enabled()) {
+		app_menu_add_menu(m, "Options");
+		app_menu_add_item(m, ACT_CATEGORIZE, "Categorize with AI", NULL,
+			ui.categories != NULL && ui.categories->enabled ? APP_MENU_CHECKED : 0);
 	}
 	g_ptr_array_free(t, TRUE);
 }
@@ -2747,6 +3348,9 @@ static void activate(GtkApplication *app, gpointer data) {
 	};
 	add_shortcuts(ui.window, shortcuts, G_N_ELEMENTS(shortcuts));
 	ui.menu = app_menu_new(ui.window, build_menus, menu_activate, NULL);
+	ui.categories = categories_load();
+	augur_watch("org.gemwm.GemMail", augur_changed, NULL);
+	g_timeout_add_seconds(CATEGORISE_TICK, categorise_tick, NULL);
 	gtk_window_present(GTK_WINDOW(ui.window));
 	gtk_widget_grab_focus(ui.list);
 

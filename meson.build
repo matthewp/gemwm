@@ -167,12 +167,13 @@ gmime = dependency('gmime-3.0', required: false)
 if etpan.found() and gmime.found() and webkit.found()
 	executable(
 		'gemmail',
-		['mail/gemmail.c', 'mail/account.c', 'mail/cache.c', 'mail/net.c',
-			'mail/imap.c', 'mail/message.c', 'lib/app-menu.c', 'lib/gem-draw.c',
-			'lib/passwords.c',
+		['mail/gemmail.c', 'mail/account.c', 'mail/cache.c',
+			'mail/categories.c', 'mail/net.c', 'mail/imap.c', 'mail/message.c',
+			'lib/app-menu.c', 'lib/augur.c', 'lib/gem-draw.c', 'lib/passwords.c',
 			client_protocols],
 		dependencies: [etpan, gmime, webkit, dependency('gtk4'),
-			dependency('sqlite3'), wayland_client, cairo],
+			dependency('sqlite3'), dependency('json-glib-1.0'), wayland_client,
+			cairo],
 		include_directories: 'lib',
 		install: true,
 	)

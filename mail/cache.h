@@ -54,6 +54,27 @@ void cache_remove(struct cache *c, const char *mailbox, guint32 uid);
 /* Keeps only the newest keep (by UID). */
 void cache_trim(struct cache *c, const char *mailbox, guint keep);
 
+/* ---- Categories (see categories.h) ---- */
+
+/* What a message was put in: names separated by newlines (empty: none),
+ * the version of the categories and model that did it, and whether you did
+ * (manual: never redone). */
+struct categorised {
+	char *names;
+	char *version;
+	bool manual;
+};
+/* A folder's, by UID (struct categorised). */
+GHashTable *cache_categorised(struct cache *c, const char *mailbox);
+void cache_set_categorised(struct cache *c, const char *mailbox, guint32 uid,
+	const char *names, const char *version, bool manual);
+/* The latest you put in categories yourself, newest first, as examples for
+ * the model: each a struct example. */
+struct example {
+	char *from, *subject, *names;
+};
+GPtrArray *cache_category_examples(struct cache *c, guint limit);
+
 /* A message's text, if it's been fetched before (NULL if not); keeping it. */
 GBytes *cache_body(struct cache *c, const char *mailbox, guint32 uid);
 void cache_set_body(struct cache *c, const char *mailbox, guint32 uid,
