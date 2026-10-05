@@ -15,6 +15,21 @@ log_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
 mkdir -p "$log_dir"
 [ -f "$log_dir/gemwm.log" ] && mv "$log_dir/gemwm.log" "$log_dir/gemwm.log.old"
 
-# Tell D-Bus and systemd services (portals, notifications) where we are.
-exec gemwm -s "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP" \
+# AI (Augur, the service programs ask for it) is off with [ai] enabled =
+# false in GemWM's config: Augur reports itself off, and programs hide
+# their AI features. Set either way, so a session after one with it off
+# has it on again.
+AUGUR_DISABLED=$(awk '
+	/^[ \t]*\[/ { section = $0; gsub(/[][ \t]/, "", section); next }
+	section == "ai" && /^[ \t]*enabled[ \t]*=/ {
+		value = $0; sub(/^[^=]*=[ \t]*/, "", value); sub(/[ \t]*#.*/, "", value)
+		off = value ~ /^(false|no|off|0)$/
+	}
+	END { print off ? "1" : "" }
+' "$config/config" 2>/dev/null)
+export AUGUR_DISABLED
+
+# Tell D-Bus and systemd services (portals, notifications, Augur) where we
+# are.
+exec gemwm -s "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP AUGUR_DISABLED" \
 	> "$log_dir/gemwm.log" 2>&1

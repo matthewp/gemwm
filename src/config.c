@@ -360,7 +360,8 @@ static void parse(struct server *server, FILE *f, const char *name) {
 			int size = atoi(value);
 			server->font_size = size < 6 ? 0 : size > 48 ? 48 : size;
 		} else if (strcmp(section, "clock") != 0 &&
-				strcmp(section, "battery") != 0) { /* the menu bar's */
+				strcmp(section, "battery") != 0 && /* the menu bar's */
+				strcmp(section, "ai") != 0) {      /* gemwm-session's */
 			wlr_log(WLR_ERROR, "%s:%d: unknown setting", name, lineno);
 		}
 	}

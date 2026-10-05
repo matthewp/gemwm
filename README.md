@@ -239,6 +239,9 @@ each line adds or replaces one binding, and `none` removes one.
     family = Atari ST 8x16
     size = 16
 
+    [ai]                                 # see AI
+    enabled = true
+
 Modifiers are `Super`, `Alt`, `Ctrl` and `Shift`; keys use xkb names
 (`Q`, `Tab`, `Return`, `Page_Down`, `F1`, `1`...). An action is any
 `gemwm msg` command (see below), plus `exec <command>` and `quit`.
@@ -779,6 +782,23 @@ what you have open (with Sync on, it appears as it's made):
 See `gemwrite-cli(1)`. GemWrite is built when GTK 4, libxml2, libarchive
 and enchant are there (`pacman -S libxml2 libarchive enchant`); `meson
 test` runs its core's tests.
+
+## AI
+
+GemWM's programs get AI from [Augur](https://github.com/matthewp/augur), a
+service any program on the session bus can ask: the providers, keys and
+models are set up in Augur's own config (`~/.config/augur/config`), not
+here. With Augur installed and set up, programs show their AI features;
+they ask Augur whether it's on.
+
+To turn AI off for the whole session:
+
+    [ai]
+    enabled = false
+
+`gemwm-session` reads this when you log in and tells Augur (by
+`AUGUR_DISABLED` in the session's environment), so it says it's off to
+every program that asks. It takes effect at the next login.
 
 ## Windows
 
