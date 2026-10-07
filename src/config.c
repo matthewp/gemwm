@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
@@ -102,9 +103,9 @@ static const char default_config[] =
 	"\n"
 	"[desktop]\n"
 	"color = green\n"
-	"image =\n"
+	"image = " GEMWM_BACKGROUND "\n"
 	"image-mode = fill\n"
-	"dither = off\n"
+	"dither = st16\n"
 	"dither-style = diffuse\n"
 	"pixel-size = 2\n"
 	"resolution = off\n"
@@ -199,6 +200,15 @@ static bool parse_color(const char *s, float color[4]) {
 	return true;
 }
 
+/* What the user's own file chose for the desktop, so the default picture
+ * goes to those who chose nothing (config_load). */
+enum {
+	CHOSE_COLOR = 1 << 0,
+	CHOSE_IMAGE = 1 << 1,
+	CHOSE_DITHER = 1 << 2,
+};
+static unsigned desktop_chosen;
+
 static void parse(struct server *server, FILE *f, const char *name) {
 	char *line = NULL;
 	size_t cap = 0;
@@ -237,6 +247,14 @@ static void parse(struct server *server, FILE *f, const char *name) {
 			}
 		}
 		char *key = trim(s), *value = trim(eq + 1);
+
+		if (strcmp(name, "defaults") != 0 && strcmp(section, "desktop") == 0) {
+			desktop_chosen |=
+				strcmp(key, "color") == 0 || strcmp(key, "pattern") == 0 ?
+					CHOSE_COLOR :
+				strcmp(key, "image") == 0 ? CHOSE_IMAGE :
+				strcmp(key, "dither") == 0 ? CHOSE_DITHER : 0;
+		}
 
 		if (strcmp(section, "keys") == 0) {
 			uint32_t mods;
@@ -374,6 +392,7 @@ static void font_configure(struct server *server);
 void config_load(struct server *server) {
 	config_finish(server);
 
+	desktop_chosen = 0;
 	FILE *f = fmemopen((void *)default_config, strlen(default_config), "r");
 	parse(server, f, "defaults");
 	fclose(f);
@@ -396,6 +415,28 @@ void config_load(struct server *server) {
 	if ((f = fopen(path, "r")) != NULL) {
 		parse(server, f, path);
 		fclose(f);
+	}
+	/* The sunburst, dithered, is the desktop until you choose one: a colour
+	 * or pattern of your own is shown plain, as before there was a default
+	 * picture, and a picture of your own isn't dithered unless you say. */
+	const char *env = getenv("GEMWM_DESKTOP");
+	if (env != NULL && env[0] != '\0') {
+		desktop_chosen |= CHOSE_COLOR;
+	}
+	if ((desktop_chosen & CHOSE_COLOR) && !(desktop_chosen & CHOSE_IMAGE)) {
+		free(server->desktop_image);
+		server->desktop_image = NULL;
+	}
+	if ((desktop_chosen & (CHOSE_COLOR | CHOSE_IMAGE)) &&
+			!(desktop_chosen & CHOSE_DITHER)) {
+		server->desktop_palette = DITHER_OFF;
+	}
+	/* Run from the build directory, before it's installed: no picture. */
+	if (server->desktop_image != NULL &&
+			strcmp(server->desktop_image, GEMWM_BACKGROUND) == 0 &&
+			access(server->desktop_image, R_OK) != 0) {
+		free(server->desktop_image);
+		server->desktop_image = NULL;
 	}
 	if (server->greeter) {
 		/* Nothing to run from a key before login: no terminals. */

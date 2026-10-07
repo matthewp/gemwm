@@ -75,6 +75,11 @@ foreach p : [xdg_shell_xml, viewporter_xml, layer_shell_xml, scroll_xml,
 	)
 endforeach
 
+# The default desktop picture (extras/backgrounds), dithered as an ST
+# would show it.
+backgrounddir = get_option('datadir') / 'gemwm' / 'backgrounds'
+install_data('extras/backgrounds/sunburst.jpg', install_dir: backgrounddir)
+
 executable(
 	'gemwm',
 	[
@@ -98,6 +103,8 @@ executable(
 	],
 	dependencies: [wlroots, wayland_server, xkbcommon, cairo, libdrm, gdk_pixbuf,
 		libm],
+	c_args: ['-DGEMWM_BACKGROUND="@0@"'.format(get_option('prefix') / backgrounddir /
+		'sunburst.jpg')],
 	install: true,
 )
 

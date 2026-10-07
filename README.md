@@ -259,9 +259,9 @@ each line adds or replaces one binding, and `none` removes one.
 
     [desktop]                            # see Desktop
     color = green
-    image =
+    image = (the sunburst)
     image-mode = fill
-    dither = off
+    dither = st16
     dither-style = diffuse
     pixel-size = 2
     resolution = off
@@ -419,7 +419,13 @@ saved answers, unless `--blank`).
 
 ## Desktop
 
-The desktop is set in `[desktop]` in `~/.config/gemwm/config`:
+Out of the box the desktop is GemWM's sunburst
+(`extras/backgrounds/sunburst.jpg`), shown as an ST would have shown it:
+dithered to 16 of the ST's colours (`st16`, below). It's yours to change in
+`[desktop]` in `~/.config/gemwm/config`, and choosing anything there replaces
+it: a colour or pattern of your own is shown plain, and a picture of your own
+isn't dithered unless you set `dither`. `image =`, left empty, is the
+colour ST's own plain green desktop.
 
     [desktop]
     color = green             # or a name below, mono, or #rrggbb
