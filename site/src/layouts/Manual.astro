@@ -125,8 +125,10 @@ const here = Astro.url.pathname;
 	}
 
 	@media (max-width: 700px) {
+		/* minmax(0, ...): a long line of code or a wide table scrolls in
+		 * its own box, rather than widening the page past the screen. */
 		.manual {
-			grid-template-columns: 1fr;
+			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.side {
