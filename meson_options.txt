@@ -1,3 +1,6 @@
 option('wayland_sessions_dir', type: 'string',
 	value: '/usr/share/wayland-sessions',
 	description: 'Where to install gemwm.desktop, so display managers list it')
+option('portal_dir', type: 'string',
+	value: '/usr/share/xdg-desktop-portal',
+	description: 'Where xdg-desktop-portal looks for portals and portals.conf files (it reads only its own)')

@@ -268,6 +268,30 @@ if gtk4.found()
 		)
 	endif
 
+	# gemwm-portal: xdg-desktop-portal's file chooser as GEM's item
+	# selector, for other programs' Open and Save. xdg-desktop-portal reads
+	# portals only from its own directory (portal_dir), not the prefix.
+	executable(
+		'gemwm-portal',
+		['portal/gemwm-portal.c', 'lib/gem-alert.c', 'lib/gem-draw.c',
+			'lib/gem-file.c', 'lib/gem-scrollbar.c', 'lib/gem-ui.c'],
+		dependencies: [gtk4, dependency('gtk4-wayland')],
+		include_directories: 'lib',
+		install: true,
+	)
+	configure_file(
+		input: 'portal/org.freedesktop.impl.portal.desktop.gemwm.service.in',
+		output: 'org.freedesktop.impl.portal.desktop.gemwm.service',
+		configuration: { 'bindir': get_option('prefix') / get_option('bindir') },
+		install_dir: get_option('datadir') / 'dbus-1' / 'services',
+	)
+	install_data('portal/org.gemwm.ItemSelector.desktop',
+		install_dir: get_option('datadir') / 'applications')
+	install_data('portal/gemwm.portal',
+		install_dir: get_option('portal_dir') / 'portals')
+	install_data('portal/gemwm-portals.conf',
+		install_dir: get_option('portal_dir'))
+
 	# gemwm-greeter: the login screen, for greetd (gemwm -G gemwm-greeter;
 	# see README). Who logged in last is kept in /var/cache/gemwm-greeter,
 	# which systemd-tmpfiles makes for the greeter user.

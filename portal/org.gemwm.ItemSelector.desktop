@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Item Selector
+Comment=GEM's item selector, for other programs' Open and Save
+Exec=gemwm-portal
+NoDisplay=true

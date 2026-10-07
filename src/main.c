@@ -30,6 +30,9 @@
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_xdg_foreign_registry.h>
+#include <wlr/types/wlr_xdg_foreign_v1.h>
+#include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
@@ -643,6 +646,13 @@ int main(int argc, char *argv[]) {
 	server.new_virtual_pointer.notify = server_new_virtual_pointer;
 	wl_signal_add(&vptr->events.new_virtual_pointer,
 		&server.new_virtual_pointer);
+	/* A window of one program over another's (a portal's file dialog over
+	 * the program that asked): xdg-foreign makes it the other's child,
+	 * which centres it there. */
+	struct wlr_xdg_foreign_registry *foreign =
+		wlr_xdg_foreign_registry_create(server.wl_display);
+	wlr_xdg_foreign_v1_create(server.wl_display, foreign);
+	wlr_xdg_foreign_v2_create(server.wl_display, foreign);
 	struct wlr_virtual_keyboard_manager_v1 *vkbd =
 		wlr_virtual_keyboard_manager_v1_create(server.wl_display);
 	server.new_virtual_keyboard.notify = server_new_virtual_keyboard;

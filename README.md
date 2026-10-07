@@ -326,6 +326,23 @@ each with a GEM slider and Mute. The volume keys run `gemwm-volume up`,
 at once. It uses PulseAudio, or PipeWire's PulseAudio server, and is built
 when GTK 4 and `libpulse` are there.
 
+## Open and Save dialogs
+
+GemWM's programs pick files in GEM's item selector (`lib/gem-file.c`):
+the directory line with its pattern (edit it to go elsewhere or see other
+files), the folder's list with a close box to go up, and the selection
+beside it. Other programs get it too, when they ask the desktop portal
+for their Open and Save dialogs, as Firefox, Chromium and Flatpak apps
+do: `gemwm-portal` is xdg-desktop-portal's file chooser on GemWM, framed
+as GemWM frames everything, and centred over the program that asked.
+The rest of the portal (settings, screenshots...) is still GTK's.
+
+It's set up by installing it (`gemwm.portal` and `gemwm-portals.conf` go
+in `/usr/share/xdg-desktop-portal`, where xdg-desktop-portal looks; the
+`portal_dir` build option says where else); log in again for the portal
+to pick it up. One file is chosen at a time, even where several may be,
+as GEM's selector chose one.
+
 ## Notifications
 
 `gemwm-notify` shows notifications as GEM would have: GEM had none, but
