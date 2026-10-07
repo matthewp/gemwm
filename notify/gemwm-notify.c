@@ -1010,6 +1010,11 @@ static void got_history(GObject *src, GAsyncResult *res, gpointer data) {
 	g_clear_pointer(&h.notes, g_ptr_array_unref);
 	h.notes = notes_from_json(json);
 	g_variant_unref(r);
+	/* Clear All is only there with something to clear: the menus are
+	 * built before the history arrives. */
+	if (h.menu != NULL) {
+		app_menu_update(h.menu);
+	}
 	g_idle_add(fit_bar, NULL);
 	gtk_widget_queue_draw(h.area);
 	char *title = g_strdup_printf("Notifications: %u", h.notes->len);
