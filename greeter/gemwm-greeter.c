@@ -507,6 +507,9 @@ static void paint_person(cairo_t *cr, int x, int y, bool on) {
 	cairo_save(cr);
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 	cairo_set_line_width(cr, 1);
+	/* A fresh path: the last name drawn leaves a current point, which
+	 * cairo_arc would join to the shoulders with a line. */
+	cairo_new_path(cr);
 	/* Shoulders: half an ellipse. */
 	cairo_save(cr);
 	cairo_translate(cr, x + ICON_W / 2.0, y + ICON_H);
