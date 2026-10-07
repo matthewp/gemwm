@@ -9,6 +9,9 @@ in the Atari ST's 8x16 font (`public/fonts`, from `extras/fonts`, GPL-2.0+).
     pnpm build        # into dist/
     pnpm run deploy   # build, then publish it with `cf deploy`
 
+Pushing to `main` deploys it: Cloudflare's Workers Builds runs
+`pnpm run deploy` in `site/` for every push that changes something here.
+
 - `src/content/docs/`: the manual, a Markdown file a page; `section` and
   `order` place it in the Docs menu and the side list.
 - `src/content/apps/`: a page per application or utility; `kind`, `icon`
