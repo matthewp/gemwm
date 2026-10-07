@@ -169,12 +169,22 @@ static void json_windows(struct server *server, struct strbuf *sb,
 		bool maximized = view->maximized ||
 			(view->workspace != NULL && view->workspace->zoomed == view);
 		sb_printf(sb, ",\"workspace\":%d,\"focused\":%s,\"tiled\":%s,"
-			"\"maximized\":%s,\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
+			"\"maximized\":%s,\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d",
 			view->workspace ? workspace_number(view->workspace) : 0,
 			server->focused_view == view ? "true" : "false",
 			view_is_tiled(view) ? "true" : "false",
 			maximized ? "true" : "false",
 			box.x, box.y, box.width, box.height);
+		/* What the window's scroll bars were last told (debugging a
+		 * client whose bars stop following it). */
+		if (view->scroll != NULL) {
+			sb_printf(sb, ",\"scroll\":{\"vertical\":[%d,%d,%d],"
+				"\"horizontal\":[%d,%d,%d]}", view->scroll_v.position,
+				view->scroll_v.visible, view->scroll_v.total,
+				view->scroll_h.position, view->scroll_h.visible,
+				view->scroll_h.total);
+		}
+		sb_append(sb, "}", 1);
 		first = false;
 	}
 	sb_append(sb, "]}", 2);

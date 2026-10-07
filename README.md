@@ -530,7 +530,8 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
 
     gemwm msg workspaces              # list workspaces and their windows
     gemwm msg windows                 # id, title, app_id, workspace, focused,
-                                      # tiled, and the frame's x/y/width/height
+                                      # tiled, the frame's x/y/width/height,
+                                      # and its scroll bars' position/shown/total
     gemwm msg workspace 2             # also: new, next, prev
     gemwm msg move-window 12 3        # window id or "focused"; 3 or "new"
     gemwm msg focus-window 12         # switches to its workspace if needed
@@ -732,6 +733,10 @@ article, such as a home page, says so in the info line instead.
 
 Under GemWM a page scrolls with the window frame's own scroll bars, and its
 built-in scroll bar is hidden; elsewhere, pages get GEM-styled scroll bars.
+If the frame's scroll bars stop following a page, run `gemweb --debug` while
+it's still happening: the running GemWeb writes what its pages last reported,
+and its recent scroll history, to `~/.local/state/gemweb/debug.log`, and
+`gemwm msg windows` shows what each frame's scroll bars were last told.
 
 ## GemMail
 

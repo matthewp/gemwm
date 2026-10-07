@@ -23,6 +23,7 @@
 #include <libsoup/soup.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
 #include <webkit/webkit.h>
@@ -69,6 +70,8 @@ struct tab {
 	WebKitUserContentManager *content;
 	/* The page's scroll state, as its script last reported it (CSS px). */
 	int scroll_x, scroll_y, view_w, view_h, doc_w, doc_h;
+	unsigned scroll_messages; /* how many, and when the last came */
+	gint64 scroll_last;
 	/* The page has video or sound (noticed only if we can't play it), or
 	 * it's a new window's first page: both show what to install. */
 	bool media;
@@ -772,13 +775,42 @@ static void sync_tabbar(struct browser *b) {
  * The vertical bar is always there; the horizontal one only for pages
  * wider than the window (it takes height, not width, so it can't make the
  * page reflow in and out of needing it). */
+/* The last DEBUG_LINES things the scroll bars were told, and why, kept in
+ * memory all the time, so that when they stop following a page `gemweb
+ * --debug` can write out what led up to it without a restart (which
+ * would put it right). */
+#define DEBUG_LINES 400
+static char *debug_lines[DEBUG_LINES];
+static unsigned debug_next;
+
+static void scroll_debug(const char *format, ...) G_GNUC_PRINTF(1, 2);
+static void scroll_debug(const char *format, ...) {
+	GDateTime *now = g_date_time_new_now_local();
+	char *when = g_date_time_format(now, "%H:%M:%S.%f");
+	g_date_time_unref(now);
+	va_list args;
+	va_start(args, format);
+	char *what = g_strdup_vprintf(format, args);
+	va_end(args);
+	char **slot = &debug_lines[debug_next++ % DEBUG_LINES];
+	g_free(*slot);
+	*slot = g_strdup_printf("%.12s %s", when, what);
+	g_free(what);
+	g_free(when);
+}
+
 static void report_scroll(struct browser *b) {
 	struct tab *t = b->active >= 0 && b->active < (int)b->tabs->len ?
 		g_ptr_array_index(b->tabs, b->active) : NULL;
 	if (b->scroll == NULL || t == NULL) {
+		scroll_debug("report: not sent (%s)", b->scroll == NULL ?
+			"no scroll bars from GemWM for this window" : "no tab");
 		return;
 	}
 	int doc_h = t->doc_h > t->view_h ? t->doc_h : t->view_h;
+	scroll_debug("report: vertical %d of %d, showing %d; horizontal %d of %d, "
+		"showing %d", t->scroll_y, doc_h, t->view_h, t->scroll_x, t->doc_w,
+		t->view_w);
 	gemwm_scroll_v1_set_axis(b->scroll, GEMWM_SCROLL_V1_AXIS_VERTICAL,
 		t->scroll_y, t->view_h, doc_h > 0 ? doc_h : 1);
 	gemwm_scroll_v1_set_axis(b->scroll, GEMWM_SCROLL_V1_AXIS_HORIZONTAL,
@@ -794,6 +826,14 @@ static void on_scroll_message(WebKitUserContentManager *content,
 		*fields[i] = jsc_value_to_int32(v);
 		g_object_unref(v);
 	}
+	t->scroll_messages++;
+	t->scroll_last = g_get_monotonic_time();
+	scroll_debug("page says: x %d y %d, viewport %dx%d, document %dx%d (%s)%s",
+		t->scroll_x, t->scroll_y, t->view_w, t->view_h, t->doc_w, t->doc_h,
+		webkit_web_view_get_uri(t->view),
+		t->browser->active >= 0 &&
+		g_ptr_array_index(t->browser->tabs, t->browser->active) == t ? "" :
+		" [a background tab]");
 	if (t->browser->active >= 0 &&
 			g_ptr_array_index(t->browser->tabs, t->browser->active) == t) {
 		report_scroll(t->browser);
@@ -808,6 +848,8 @@ static void on_scroll_to(void *data, struct gemwm_scroll_v1 *scroll,
 		return;
 	}
 	struct tab *t = g_ptr_array_index(b->tabs, b->active);
+	scroll_debug("GemWM says: scroll %s to %d", axis ==
+		GEMWM_SCROLL_V1_AXIS_VERTICAL ? "down" : "across", position);
 	char js[96];
 	if (axis == GEMWM_SCROLL_V1_AXIS_VERTICAL) {
 		snprintf(js, sizeof(js), "window.scrollTo(window.scrollX, %d)", position);
@@ -826,12 +868,17 @@ static const struct gemwm_scroll_v1_listener scroll_listener = {
  * bars on. */
 static void window_mapped(GtkWidget *window, struct browser *b) {
 	if (shared.scroll_manager == NULL || b->scroll != NULL) {
+		scroll_debug("window shown: %s", shared.scroll_manager == NULL ?
+			"GemWM offers no scroll bars (gemwm-scroll-v1 not found)" :
+			"already has its scroll bars");
 		return;
 	}
 	GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
 	if (!GDK_IS_WAYLAND_SURFACE(surface)) {
+		scroll_debug("window shown: not a Wayland surface");
 		return;
 	}
+	scroll_debug("window shown: scroll bars from GemWM");
 	b->scroll = gemwm_scroll_manager_v1_get_scroll(shared.scroll_manager,
 		gdk_wayland_surface_get_wl_surface(surface));
 	gemwm_scroll_v1_add_listener(b->scroll, &scroll_listener, b);
@@ -4434,11 +4481,78 @@ static void app_open(const char *input, const char *name) {
 
 /* Every `gemweb [URL...]` lands here, in the first instance: URLs open as
  * tabs in the existing window. */
+/* gemweb --debug: writes the scroll history and how every window and tab
+ * stands now to ~/.local/state/gemweb/debug.log; returns its path. */
+static char *debug_dump(void) {
+	char *dir = g_build_filename(g_get_user_state_dir(), "gemweb", NULL);
+	g_mkdir_with_parents(dir, 0700);
+	char *path = g_build_filename(dir, "debug.log", NULL);
+	g_free(dir);
+	FILE *f = fopen(path, "w");
+	if (f == NULL) {
+		g_free(path);
+		return NULL;
+	}
+	gint64 now = g_get_monotonic_time();
+	fprintf(f, "GemWeb (pid %d)\n\n", (int)getpid());
+	fprintf(f, "GemWM scroll bars: %s\n\n", shared.scroll_manager != NULL ?
+		"offered" : "NOT OFFERED (gemwm-scroll-v1 missing)");
+	int n = 0;
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		if (b == NULL) {
+			continue;
+		}
+		fprintf(f, "Window %d \"%s\"%s: scroll bar link %s, tab %d of %u in "
+			"front\n", ++n, gtk_window_get_title(GTK_WINDOW(b->window)) ?
+			gtk_window_get_title(GTK_WINDOW(b->window)) : "",
+			b->app ? " (web app)" : "", b->scroll != NULL ? "held" : "NONE",
+			b->active + 1, b->tabs->len);
+		for (guint i = 0; i < b->tabs->len; i++) {
+			struct tab *t = g_ptr_array_index(b->tabs, i);
+			fprintf(f, "  tab %u%s: %s\n", i + 1, (int)i == b->active ?
+				" (front)" : "", webkit_web_view_get_uri(t->view) ?
+				webkit_web_view_get_uri(t->view) : "(nothing)");
+			if (t->scroll_messages == 0) {
+				fprintf(f, "    page has sent NO scroll reports\n");
+			} else {
+				fprintf(f, "    %u scroll reports, last %.1fs ago: x %d y %d, "
+					"viewport %dx%d, document %dx%d\n", t->scroll_messages,
+					(now - t->scroll_last) / 1e6, t->scroll_x, t->scroll_y,
+					t->view_w, t->view_h, t->doc_w, t->doc_h);
+			}
+		}
+	}
+	fprintf(f, "\nLast %d events, oldest first:\n", DEBUG_LINES);
+	for (unsigned i = 0; i < DEBUG_LINES; i++) {
+		char *line = debug_lines[(debug_next + i) % DEBUG_LINES];
+		if (line != NULL) {
+			fprintf(f, "%s\n", line);
+		}
+	}
+	fclose(f);
+	return path;
+}
+
 static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 	int argc;
 	char **argv = g_application_command_line_get_arguments(cmdline, &argc);
 	/* A second `gemweb` hands its arguments to this one and exits: say so
 	 * on its terminal, or it looks as if a fresh GemWeb started. */
+	if (argc == 2 && strcmp(argv[1], "--debug") == 0) {
+		char *path = shared.app != NULL ? debug_dump() : NULL;
+		if (path != NULL) {
+			g_application_command_line_print(cmdline,
+				"gemweb: wrote %s\n", path);
+		} else {
+			g_application_command_line_printerr(cmdline,
+				"gemweb: no GemWeb running to ask\n");
+		}
+		g_free(path);
+		g_strfreev(argv);
+		return path != NULL ? 0 : 1;
+	}
 	if (g_application_command_line_get_is_remote(cmdline)) {
 		g_application_command_line_printerr(cmdline,
 			"gemweb: opening in the GemWeb already running (pid %d)\n",
