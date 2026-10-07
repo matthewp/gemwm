@@ -59,6 +59,7 @@ struct note {
 	char **actions;          /* key, label, key, label... */
 	int timeout;             /* ms; 0: until closed */
 	char *sender;            /* who to tell about actions and closing */
+	char *entry;             /* the app's desktop-entry hint, if it gave one */
 	/* While it's showing: */
 	GtkWidget *popup;
 	GArray *hits;
@@ -139,6 +140,7 @@ static void note_free(gpointer p) {
 	g_free(n->body);
 	g_strfreev(n->actions);
 	g_free(n->sender);
+	g_free(n->entry);
 	if (n->hits != NULL) {
 		g_array_unref(n->hits);
 	}
@@ -465,6 +467,63 @@ static void paint_popup(cairo_t *cr, int w, int h, void *data) {
 	g_strfreev(l.body);
 }
 
+/* Whether a window's app ID is the notification's app: its desktop entry
+ * (with or without .desktop; or its last part, for reverse-DNS IDs), or
+ * the name it gave, whatever the case. */
+static bool same_app(const char *app_id, const char *name) {
+	if (app_id == NULL || name == NULL || name[0] == '\0') {
+		return false;
+	}
+	char *want = g_str_has_suffix(name, ".desktop") ?
+		g_strndup(name, strlen(name) - strlen(".desktop")) : g_strdup(name);
+	const char *dot = strrchr(app_id, '.');
+	bool same = g_ascii_strcasecmp(app_id, want) == 0 ||
+		(dot != NULL && g_ascii_strcasecmp(dot + 1, want) == 0);
+	g_free(want);
+	return same;
+}
+
+/* No default action to ask the app for: its window brought forward
+ * instead, the one used last, by asking GemWM (gemwm msg). */
+static void focus_app(struct note *n) {
+	char *out = NULL;
+	const char *argv[] = { "gemwm", "msg", "windows", NULL };
+	if (!g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH |
+			G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, &out, NULL, NULL, NULL)) {
+		return;
+	}
+	JsonNode *root = json_from_string(out, NULL);
+	g_free(out);
+	JsonObject *o = root != NULL && JSON_NODE_HOLDS_OBJECT(root) ?
+		json_node_get_object(root) : NULL;
+	JsonArray *windows = o != NULL && json_object_has_member(o, "windows") ?
+		json_object_get_array_member(o, "windows") : NULL;
+	gint64 found = -1;
+	/* The list's most recently used first: the entry first, then the name. */
+	const char *names[] = { n->entry, n->app };
+	for (guint k = 0; k < G_N_ELEMENTS(names) && found < 0; k++) {
+		for (guint i = 0; windows != NULL && i < json_array_get_length(windows) &&
+				found < 0; i++) {
+			JsonObject *w = json_array_get_object_element(windows, i);
+			if (same_app(json_object_get_string_member_with_default(w, "app_id",
+					NULL), names[k])) {
+				found = json_object_get_int_member_with_default(w, "id", -1);
+			}
+		}
+	}
+	if (root != NULL) {
+		json_node_unref(root);
+	}
+	if (found >= 0) {
+		char *id = g_strdup_printf("%" G_GINT64_FORMAT, found);
+		const char *focus[] = { "gemwm", "msg", "focus-window", id, NULL };
+		g_spawn_async(NULL, (char **)focus, NULL, G_SPAWN_SEARCH_PATH |
+			G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL,
+			NULL, NULL);
+		g_free(id);
+	}
+}
+
 static void popup_pressed(GtkGestureClick *g, int n_press, double x, double y,
 		gpointer data) {
 	struct note *n = data;
@@ -487,6 +546,8 @@ static void popup_pressed(GtkGestureClick *g, int n_press, double x, double y,
 	if (key != NULL) {
 		g_dbus_connection_emit_signal(d.bus, n->sender, PATH, IFACE,
 			"ActionInvoked", g_variant_new("(us)", n->id, key), NULL);
+	} else if (hit->id == HIT_BODY) {
+		focus_app(n);
 	}
 	popup_close(n, DISMISSED);
 }
@@ -603,6 +664,10 @@ static guint32 notify(GVariant *params, const char *sender) {
 	n->critical = urgency >= 2;
 	n->actions = g_variant_dup_strv(actions, NULL);
 	n->sender = g_strdup(sender);
+	const char *entry = NULL;
+	if (g_variant_lookup(hints, "desktop-entry", "&s", &entry) && entry[0] != '\0') {
+		n->entry = g_strdup(entry);
+	}
 	/* Critical ones stay until closed, as the spec says. */
 	n->timeout = n->critical ? 0 : timeout < 0 ? DEFAULT_TIMEOUT : timeout;
 	g_variant_unref(actions);

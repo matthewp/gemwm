@@ -332,7 +332,10 @@ when GTK 4 and `libpulse` are there.
 it had form_alert, so each is a small alert box that doesn't wait for
 you, under the menu bar at the right. It has a close box, the app's name
 and the time, the note icon (stop, for critical ones), and its actions
-as buttons; click the body for the app's default action. Up to three show
+as buttons. Click the body for the app's default action (it usually
+brings its window forward and opens what the notification's about); for
+one with no default action, the app's window is brought forward instead,
+found by the app ID it gave, or its name. Up to three show
 at once, newest at the top; each goes after five seconds (or as long as
 the app asks), but waits while the pointer's over it, and critical ones
 stay until you close them.
