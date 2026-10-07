@@ -622,6 +622,13 @@ keep its pixels crisp, 80 or 90% is closer to other desktops), kept as
 it's remembered: its pages open that way from then on (the sites are in
 `~/.local/state/gemweb/zoom`), and Ctrl+0 puts it back to the default.
 
+**View > Website Appearance** picks whether sites that have a dark design
+show it: **Automatic** (the default) follows the desktop's colour scheme,
+and **Light** or **Dark** overrides it, in every window, kept as
+`appearance` under `[view]` in the settings file. Sites without a dark
+design look as they always do; GemWeb's own GEM chrome stays black and
+white.
+
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
 tab to close it. Text that isn't an address is searched. Downloads go to
 `~/Downloads`; cookies and site data live in `~/.local/share/gemweb`. A

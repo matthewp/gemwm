@@ -107,6 +107,14 @@ pixels crisp, 80 or 90% is closer to other desktops). Zoom a site in or out
 and it's remembered: its pages open that way from then on, and Ctrl+0 puts it
 back to the default.
 
+## Light or dark
+
+**View > Website Appearance** picks whether sites that have a dark design
+show it. **Automatic** (the default) follows the desktop's colour scheme;
+**Light** and **Dark** override it, in every window. Sites without a dark
+design look as they always do, and GemWeb's own chrome stays GEM's black and
+white.
+
 ## Settings
 
 In `~/.config/gemweb/settings` (changes apply to the next page loaded):

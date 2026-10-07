@@ -1836,6 +1836,7 @@ enum action {
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
 	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD,
 	ACT_DEFAULT_ZOOM = 2000, /* View > Default Zoom: this, plus a step */
+	ACT_APPEARANCE = 2100,   /* View > Website Appearance: this, plus one */
 };
 
 static struct browser *browser_new(GtkApplication *app);
@@ -3125,6 +3126,46 @@ static void zoom_apply_all(void) {
 	}
 }
 
+/* ---- Website appearance ------------------------------------------------ */
+
+/* View > Website Appearance: whether sites with a dark design show it.
+ * Automatic follows the desktop's colour scheme; Light and Dark override
+ * it, for every window. Pages without one look as they always do. WebKit
+ * takes it from GTK's prefer-dark setting, set here for GemWeb alone. */
+enum appearance { APPEARANCE_AUTO, APPEARANCE_LIGHT, APPEARANCE_DARK };
+static const char *const appearances[] = { "automatic", "light", "dark" };
+static const char *const appearance_labels[] = { "Automatic", "Light", "Dark" };
+
+static enum appearance appearance(void) {
+	char *v = setting("view", "appearance", "GEMWEB_APPEARANCE");
+	enum appearance a = APPEARANCE_AUTO;
+	for (guint i = 0; v != NULL && i < G_N_ELEMENTS(appearances); i++) {
+		if (g_ascii_strcasecmp(v, appearances[i]) == 0) {
+			a = (enum appearance)i;
+		}
+	}
+	g_free(v);
+	return a;
+}
+
+static void appearance_apply(void) {
+	GtkSettings *gs = gtk_settings_get_default();
+	GtkInterfaceColorScheme desktop = GTK_INTERFACE_COLOR_SCHEME_DEFAULT;
+	g_object_get(gs, "gtk-interface-color-scheme", &desktop, NULL);
+	enum appearance a = appearance();
+	gboolean dark = a == APPEARANCE_DARK ||
+		(a == APPEARANCE_AUTO && desktop == GTK_INTERFACE_COLOR_SCHEME_DARK);
+	g_object_set(gs, "gtk-application-prefer-dark-theme", dark, NULL);
+}
+
+static void appearance_init(void) {
+	appearance_apply();
+	/* The desktop's colour scheme changing, for Automatic. */
+	g_signal_connect(gtk_settings_get_default(),
+		"notify::gtk-interface-color-scheme", G_CALLBACK(appearance_apply),
+		NULL);
+}
+
 static void ads_apply_all(void) {
 	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
 			w = w->next) {
@@ -3960,6 +4001,13 @@ static void build_menus(struct app_menu *m, void *data) {
 		g_free(label);
 	}
 	app_menu_end_submenu(m);
+	enum appearance look = appearance();
+	app_menu_add_submenu(m, "Website Appearance", 0);
+	for (guint i = 0; i < G_N_ELEMENTS(appearances); i++) {
+		app_menu_add_item(m, ACT_APPEARANCE + i, appearance_labels[i], NULL,
+			i == look ? APP_MENU_CHECKED : 0);
+	}
+	app_menu_end_submenu(m);
 
 	app_menu_add_menu(m, "Go");
 	app_menu_add_item(m, ACT_BACK, "Back", "Alt+Left",
@@ -3997,6 +4045,22 @@ static void menu_activate(uint32_t id, void *data) {
 		setting_write("zoom", "default", value);
 		zoom_apply_all(); /* sites with their own keep it */
 		app_menu_update(b->menu);
+		return;
+	}
+	if (id >= ACT_APPEARANCE &&
+			id < ACT_APPEARANCE + G_N_ELEMENTS(appearances)) {
+		enum appearance a = id - ACT_APPEARANCE;
+		/* Automatic is the default: written as no setting at all. */
+		setting_write("view", "appearance",
+			a == APPEARANCE_AUTO ? NULL : appearances[a]);
+		appearance_apply();
+		for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+				w = w->next) {
+			struct browser *o = g_object_get_data(G_OBJECT(w->data), "browser");
+			if (o != NULL) {
+				app_menu_update(o->menu);
+			}
+		}
 		return;
 	}
 	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
@@ -4168,6 +4232,7 @@ static void find_scroll_manager(void) {
 
 static void shared_init(GtkApplication *app) {
 	shared.app = app;
+	appearance_init();
 	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
 	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
 	g_mkdir_with_parents(data, 0700);
