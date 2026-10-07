@@ -303,6 +303,19 @@ void process_interactive_motion(struct server *server);
 void end_interactive(struct server *server);
 void view_cycle(struct server *server, int direction, bool held);
 void view_cycle_end(struct server *server);
+
+/* The overview (overview.c): Super+W, every window on the workspace. */
+bool overview_active(struct server *server);
+void overview_open(struct server *server);
+void overview_close(struct server *server, struct view *chosen);
+void overview_cancel(struct server *server);
+void overview_toggle(struct server *server);
+void overview_step(struct server *server, int direction);
+bool overview_tick(struct server *server);
+bool overview_key(struct server *server, xkb_keysym_t sym);
+void overview_pointer(struct server *server, double x, double y);
+bool overview_button(struct server *server, double x, double y, bool pressed);
+void overview_view_gone(struct server *server, struct view *view);
 void greeter_fit(struct server *server);
 void highlight_update(struct server *server);
 

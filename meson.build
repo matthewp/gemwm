@@ -86,6 +86,7 @@ executable(
 		'src/scroll.c',
 		'src/scrollbar.c',
 		'src/animate.c',
+		'src/overview.c',
 		'src/appmenu.c',
 		'src/ipc.c',
 		'src/config.c',

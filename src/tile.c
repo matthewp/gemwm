@@ -274,6 +274,7 @@ void tile_set_mode(struct server *server, enum layout_mode mode) {
 		scroll_clear(server);
 	}
 
+	overview_cancel(server);
 	server->mode = mode;
 	if (mode == MODE_SCROLLING) {
 		scroll_build(server);

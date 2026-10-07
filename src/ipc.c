@@ -19,6 +19,7 @@
  *   fullscreen <id>|focused       toggle: the window fills its screen
  *   close-window <id>|focused
  *   cycle-windows next|prev       focus the next/previous window (window mode)
+ *   overview                      show every window on the workspace, or stop
  *   mode [window|tiling|scrolling|toggle]  report or change the window
  *                                 mode (toggle steps through the three)
  *   focus-direction left|right|up|down  focus the neighbouring window
@@ -461,6 +462,10 @@ static char *execute(struct server *server, struct ipc_client *client,
 		wlr_xdg_toplevel_send_close(view->xdg_toplevel);
 		return strdup(ok);
 	}
+	if (strcmp(cmd, "overview") == 0) {
+		overview_toggle(server);
+		return strdup(ok);
+	}
 	if (strcmp(cmd, "cycle-windows") == 0) {
 		int direction = argv[1] != NULL && strcmp(argv[1], "prev") == 0 ? -1 : 1;
 		/* From a key, the cycle lasts while its modifier is held. */
@@ -691,7 +696,7 @@ int ipc_client_main(int argc, char *argv[]) {
 		fprintf(stderr, "usage: gemwm msg <command> [args...]\n"
 			"commands: workspaces, windows, workspace <n|new|next|prev>,\n"
 			"  move-window <id|focused> <n|new>, focus-window <id>,\n"
-			"  close-window <id|focused>, cycle-windows <next|prev>,\n"
+			"  close-window <id|focused>, cycle-windows <next|prev>, overview,\n"
 			"  mode [window|tiling|scrolling|toggle],\n"
 			"  focus-direction|move-direction <left|right|up|down>,\n"
 			"  consume-or-expel <left|right>, column-width <cycle|fraction>,\n"

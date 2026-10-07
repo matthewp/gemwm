@@ -22,6 +22,7 @@ static const char default_config[] =
 	"Super+Q = close-window focused\n"
 	"Super+Z = maximize focused\n"
 	"Super+F = fullscreen focused\n"
+	"Super+W = overview\n"
 	"Super+Tab = cycle-windows next\n"
 	"Super+Shift+Tab = cycle-windows prev\n"
 	"Super+T = exec ${TERMINAL:-gemwm-terminal}\n"

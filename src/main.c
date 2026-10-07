@@ -167,6 +167,11 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		handled = bindings_handle(server,
 			wlr_keyboard_get_modifiers(keyboard->wlr_keyboard),
 			base, nbase, syms, nsyms);
+		/* The overview takes every key its bindings don't (Super+Tab and
+		 * Super+W are its own): nothing goes to the hidden windows. */
+		if (!handled && overview_active(server)) {
+			handled = overview_key(server, nsyms > 0 ? syms[0] : XKB_KEY_NoSymbol);
+		}
 		if (code < KEY_CNT) {
 			keyboard->swallowed[code] = handled;
 		}
@@ -304,6 +309,12 @@ static void process_cursor_motion(struct server *server, uint32_t time) {
 	if (view == NULL || on_frame) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
+	if (surface == NULL && overview_active(server)) {
+		/* Over the overview (not the menu bar): it selects. */
+		wlr_seat_pointer_clear_focus(server->seat);
+		overview_pointer(server, server->cursor->x, server->cursor->y);
+		return;
+	}
 	if (surface != NULL) {
 		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
 		wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
@@ -353,6 +364,20 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			process_cursor_motion(server, event->time_msec);
 		}
 		return;
+	}
+
+	/* The overview's clicks are its own (the menu bar's still work). */
+	if (overview_active(server) || event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		struct wlr_surface *under = NULL;
+		double ux, uy;
+		bool frame;
+		view_at(server, server->cursor->x, server->cursor->y, &under, &ux, &uy,
+			&frame);
+		if (under == NULL && overview_button(server, server->cursor->x,
+				server->cursor->y,
+				event->state == WL_POINTER_BUTTON_STATE_PRESSED)) {
+			return;
+		}
 	}
 
 	wlr_seat_pointer_notify_button(server->seat,
@@ -418,7 +443,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(
 		output->server->scene, output->wlr_output);
 	/* Something moving asks for the frame after this one too. */
-	if (animate_tick(output->server)) {
+	bool moving = animate_tick(output->server);
+	if (overview_tick(output->server) || moving) {
 		wlr_output_schedule_frame(output->wlr_output);
 	}
 	wlr_scene_output_commit(scene_output, NULL);

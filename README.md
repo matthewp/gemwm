@@ -87,6 +87,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+F             | fullscreen the focused window (toggle)   |
 | Super+Tab           | cycle windows (Shift goes backwards); window mode |
 | Alt+Tab             | the same                                 |
+| Super+W             | the overview: every window at once; window mode |
 | Super+Arrows        | focus the neighbouring tile or column    |
 | Super+Ctrl+Arrows   | tiling: swap with the window that way; scrolling: move the column / the window |
 | Super+Shift+Left/Right | tiling: push the window into the other column |
@@ -537,6 +538,7 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
     gemwm msg fullscreen focused      # or an id; toggles, like Super+F
     gemwm msg close-window focused
     gemwm msg cycle-windows next      # or prev, like Super+Tab
+    gemwm msg overview                # shows every window, or stops; Super+W
     gemwm msg mode scrolling          # window, tiling, toggle; alone: report
     gemwm msg focus-direction left    # right, up, down (tiling, scrolling)
     gemwm msg move-direction right    # scrolling: move column / window;
@@ -980,6 +982,13 @@ every program that asks. It takes effect at the next login.
 - An application can bring its own window forward (xdg-activation), as
   GemWeb does when asked to open a link: the window is focused, on its
   workspace.
+- Super+W (window mode) shows every window on the workspace at once,
+  shrunk into a grid over the desktop, each in its frame with what it
+  shows now (a video plays on), as the Mac's Mission Control does. The
+  selected one is drawn as the active window: Super+Tab (Shift: back), the
+  arrow keys or the pointer move the selection; Return or a click brings it
+  forward, and Escape, Super+W again or a click on the desktop leaves
+  everything as it was.
 - Fullscreen (a video, a browser's F11, a game, or Super+F) covers the
   whole screen, menu bar and all, without a frame. Focusing another window
   on that workspace brings it back out, into its old place.

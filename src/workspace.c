@@ -102,6 +102,7 @@ void workspace_switch(struct server *server, struct workspace *ws) {
 	if (ws == NULL || ws == server->active_workspace) {
 		return;
 	}
+	overview_cancel(server);
 	if (server->grabbed_view != NULL) {
 		/* Drop a drag in progress rather than move a window we hide. */
 		server->drag_box = server->grab_box;

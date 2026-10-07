@@ -313,6 +313,10 @@ struct view *view_at(struct server *server, double lx, double ly,
  * the order is frozen, so repeated presses walk the whole list; releasing
  * it ends the cycle (view_cycle_end, from the keyboard code). */
 void view_cycle(struct server *server, int direction, bool held) {
+	if (overview_active(server)) {
+		overview_step(server, direction); /* its selection, not a cycle */
+		return;
+	}
 	if (server->mode != MODE_WINDOW) {
 		return; /* tiling and scrolling move focus with Super+Arrows */
 	}
@@ -678,6 +682,7 @@ static int clamp(int v, int lo, int hi) {
 static void view_map(struct wl_listener *listener, void *data) {
 	struct view *view = wl_container_of(listener, view, map);
 	struct server *server = view->server;
+	overview_cancel(server); /* a new window shows itself */
 
 	/* Cascade new windows from the top-left of the usable area under the
 	 * pointer, like GEM's desktop opening drive windows. A dialog goes in
@@ -740,6 +745,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 		end_interactive(server);
 	}
 	view_cycle_end(server);
+	overview_view_gone(server, view);
 	animate_view_gone(view);
 	view->placed = false;
 	view->tile_box_valid = false;
