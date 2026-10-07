@@ -114,7 +114,9 @@ static void read_folder(struct selector *s) {
 	}
 	g_array_sort(s->entries, entry_cmp);
 	s->selected = -1;
-	gtk_adjustment_configure(s->adj, 0, 0, s->entries->len, 1, ROWS - 1, ROWS);
+	/* At least a page: GTK refuses a page bigger than the range. */
+	gtk_adjustment_configure(s->adj, 0, 0, MAX(s->entries->len, ROWS), 1,
+		ROWS - 1, ROWS);
 	show_directory_line(s);
 	gtk_widget_queue_draw(s->area);
 }
@@ -449,7 +451,7 @@ void gem_file_select(GtkOverlay *host, const char *title, bool save,
 	s->hits = gem_hits_new();
 	s->entries = g_array_new(FALSE, TRUE, sizeof(struct entry));
 	g_array_set_clear_func(s->entries, entry_clear);
-	s->adj = g_object_ref_sink(gtk_adjustment_new(0, 0, 0, 1, ROWS - 1, ROWS));
+	s->adj = g_object_ref_sink(gtk_adjustment_new(0, 0, ROWS, 1, ROWS - 1, ROWS));
 	g_signal_connect(s->adj, "value-changed", G_CALLBACK(scrolled), s);
 
 	s->box = gtk_overlay_new();

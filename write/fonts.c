@@ -260,8 +260,9 @@ void font_dialog(GtkOverlay *host, WpEditor *ed) {
 	f->ed = ed;
 	f->hits = gem_hits_new();
 	f->families = list_families(GTK_WIDGET(host));
-	f->adj = g_object_ref_sink(gtk_adjustment_new(0, 0, f->families->len, 1,
-		ROWS - 1, ROWS));
+	/* At least a page: GTK refuses a page bigger than the range. */
+	f->adj = g_object_ref_sink(gtk_adjustment_new(0, 0,
+		MAX(f->families->len, ROWS), 1, ROWS - 1, ROWS));
 	g_signal_connect(f->adj, "value-changed", G_CALLBACK(scrolled), f);
 
 	f->box = gtk_overlay_new();
