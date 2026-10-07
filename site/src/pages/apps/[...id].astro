@@ -1,0 +1,65 @@
+---
+import { render } from 'astro:content';
+import Manual from '../../layouts/Manual.astro';
+import Icon from '../../components/Icon.astro';
+import { apps, appHref } from '../../lib/nav';
+
+export async function getStaticPaths() {
+	const all = await apps();
+	return all.map((entry) => ({ params: { id: entry.id }, props: { entry } }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const all = await apps();
+const groups = [
+	{ name: 'Applications', items: all.filter((a) => a.data.kind === 'app') },
+	{ name: 'Utilities', items: all.filter((a) => a.data.kind === 'utility') },
+].map((g) => ({ name: g.name, items: g.items.map((a) => ({ label: a.data.title, href: appHref(a) })) }));
+const { title, description, icon, command, screenshot, alt } = entry.data;
+---
+<Manual
+	title={title}
+	description={description}
+	window={`Apps \\ ${title}`}
+	close="/apps/"
+	groups={groups}
+	image={screenshot}
+>
+	<header class="app">
+		<Icon name={icon} size={64} />
+		<div>
+			<h1>{title}</h1>
+			<p class="lede">{description}</p>
+			<p class="command"><code>{command}</code></p>
+		</div>
+	</header>
+	{screenshot && (
+		<figure>
+			<img src={screenshot} alt={alt ?? `${title} on GemWM`} loading="eager" />
+		</figure>
+	)}
+	<Content />
+</Manual>
+
+<style>
+	.app {
+		display: flex;
+		gap: 24px;
+		align-items: flex-start;
+		margin-bottom: 24px;
+	}
+
+	.app :global(svg) {
+		flex: none;
+		image-rendering: pixelated;
+	}
+
+	.app h1 {
+		margin: 0 0 8px;
+	}
+
+	.app p {
+		margin: 0 0 4px;
+	}
+</style>

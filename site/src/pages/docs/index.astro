@@ -1,0 +1,51 @@
+---
+import Manual from '../../layouts/Manual.astro';
+import { docSections, docHref } from '../../lib/nav';
+
+const sections = await docSections();
+const groups = sections.map(({ section, pages }) => ({
+	name: section,
+	items: pages.map((d) => ({ label: d.data.short ?? d.data.title, href: docHref(d) })),
+}));
+---
+<Manual
+	title="Docs"
+	description="GemWM's manual: installing it, making it yours, its three modes, and scripting it."
+	window="Docs"
+	close="/"
+	groups={groups}
+>
+	<h1>The Manual</h1>
+	<p>
+		Everything GemWM does, and how to change it. GemWM works out of the box:
+		install it, log in, and the defaults are the Atari ST's. Then make it yours
+		with one small text file, writing only what you change.
+	</p>
+	{sections.map(({ section, pages }) => (
+		<>
+			<h2>{section}</h2>
+			<dl class="index">
+				{pages.map((d) => (
+					<>
+						<dt><a href={docHref(d)}>{d.data.title}</a></dt>
+						<dd>{d.data.description}</dd>
+					</>
+				))}
+			</dl>
+		</>
+	))}
+</Manual>
+
+<style>
+	.index {
+		margin: 0 0 16px;
+	}
+
+	.index dt {
+		margin-top: 12px;
+	}
+
+	.index dd {
+		margin: 0 0 0 24px;
+	}
+</style>

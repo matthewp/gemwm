@@ -1,0 +1,95 @@
+---
+/*
+ * The Apps window, as GEM showed a folder: its contents as icons.
+ */
+import Base from '../../layouts/Base.astro';
+import Window from '../../components/Window.astro';
+import Icon from '../../components/Icon.astro';
+import { apps, appHref } from '../../lib/nav';
+
+const all = await apps();
+const groups = [
+	{ name: 'Applications', note: 'Programs of their own, in GEM chrome.', items: all.filter((a) => a.data.kind === 'app') },
+	{ name: 'Utilities', note: 'Small programs around the menu bar, and the parts of a desktop GemWM draws itself.', items: all.filter((a) => a.data.kind === 'utility') },
+];
+---
+<Base title="Apps" description="GemWM's own applications, a web browser, mail, a word processor and more, and the utilities around its menu bar.">
+	<Window title="Apps" close="/" page width={1000} heading={false}>
+		<div class="prose apps">
+			<h1>Apps</h1>
+			<p>
+				GemWM comes with its own programs, drawn the way GEM drew them:
+				black and white, in the ST's font, with menus in the menu bar. Each
+				is optional; it's built when what it needs is installed.
+			</p>
+			{groups.map((group) => (
+				<section>
+					<h2>{group.name}</h2>
+					<p>{group.note}</p>
+					<ul class="folder">
+						{group.items.map((a) => (
+							<li>
+								<a class="file" href={appHref(a)}>
+									<Icon name={a.data.icon} />
+									<span class="name">{a.data.title}</span>
+									<span class="what">{a.data.description}</span>
+								</a>
+							</li>
+						))}
+					</ul>
+				</section>
+			))}
+		</div>
+	</Window>
+</Base>
+
+<style>
+	.apps {
+		max-width: none;
+	}
+
+	.folder {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		gap: 8px 24px;
+		padding: 0 !important;
+	}
+
+	.folder li::before {
+		content: none !important;
+	}
+
+	.file {
+		display: grid;
+		grid-template-columns: 32px 1fr;
+		gap: 0 12px;
+		padding: 8px;
+		text-decoration: none;
+	}
+
+	.file :global(svg) {
+		grid-row: span 2;
+	}
+
+	.file .name {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+
+	.file .what {
+		color: #333;
+	}
+
+	.file:hover {
+		background: var(--ink) !important;
+		color: var(--paper) !important;
+	}
+
+	.file:hover .what {
+		color: var(--paper);
+	}
+
+	.file:hover :global(svg) {
+		filter: invert(1);
+	}
+</style>

@@ -1,0 +1,36 @@
+---
+/* A GEM alert box: the icon, the message, and its one button. */
+import Base from '../layouts/Base.astro';
+import Icon from '../components/Icon.astro';
+---
+<Base title="Not Found" description="There's no page here.">
+	<div class="alert dialog" role="alertdialog" aria-labelledby="alert-text">
+		<Icon name="alert" size={32} />
+		<p id="alert-text">
+			This page can't be found.<br />
+			It may have moved, or the<br />
+			link may be wrong.
+		</p>
+		<a class="button default" href="/">OK</a>
+	</div>
+</Base>
+
+<style>
+	.alert {
+		display: grid;
+		grid-template-columns: 32px 1fr;
+		gap: 16px 24px;
+		width: min(440px, 100%);
+		margin: 15vh auto 0;
+		padding: 24px;
+	}
+
+	.alert p {
+		margin: 0;
+	}
+
+	.alert .button {
+		grid-column: 2;
+		justify-self: end;
+	}
+</style>

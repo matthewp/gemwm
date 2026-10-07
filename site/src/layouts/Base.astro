@@ -1,0 +1,38 @@
+---
+import MenuBar from '../components/MenuBar.astro';
+import '../styles/gem.css';
+
+interface Props {
+	title: string;
+	description: string;
+	image?: string;
+}
+const { title, description, image = '/screenshots/desktop.png' } = Astro.props;
+const fullTitle = title === 'GemWM' ? 'GemWM: the Atari ST desktop for Wayland' : `${title} | GemWM`;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{fullTitle}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="preload" href="/fonts/AtariST8x16.ttf" as="font" type="font/ttf" crossorigin />
+		<meta name="theme-color" content="#f0b040" />
+		<meta property="og:type" content="website" />
+		<meta property="og:title" content={fullTitle} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={canonical} />
+		<meta property="og:image" content={new URL(image, Astro.site)} />
+		<meta name="twitter:card" content="summary_large_image" />
+	</head>
+	<body>
+		<MenuBar />
+		<main class="desktop">
+			<slot />
+		</main>
+	</body>
+</html>

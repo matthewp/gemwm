@@ -1,0 +1,152 @@
+---
+/*
+ * GEM desktop icons: 32x32, black on a white mask, drawn on the pixel grid
+ * so they stay sharp at whole-number sizes.
+ */
+interface Props {
+	name: string;
+	size?: number;
+}
+const { name, size = 32 } = Astro.props;
+
+// Shapes on the pixel grid: a white box with a 1px black edge, a black
+// fill, lines, and paths for the rest.
+const box = (x: number, y: number, w: number, h: number) =>
+	`<rect x="${x + 0.5}" y="${y + 0.5}" width="${w - 1}" height="${h - 1}" fill="#fff" stroke="#000"/>`;
+const fill = (x: number, y: number, w: number, h: number) =>
+	`<rect x="${x}" y="${y}" width="${w}" height="${h}"/>`;
+const white = (x: number, y: number, w: number, h: number) =>
+	`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#fff"/>`;
+const hl = (x: number, y: number, w: number) => fill(x, y, w, 1);
+const vl = (x: number, y: number, h: number) => fill(x, y, 1, h);
+const path = (d: string, fillColour = '#fff', width = 1) =>
+	`<path d="${d}" fill="${fillColour}" stroke="#000" stroke-width="${width}"/>`;
+const circle = (cx: number, cy: number, r: number) =>
+	`<circle cx="${cx}" cy="${cy}" r="${r}" fill="#fff" stroke="#000"/>`;
+
+const icons: Record<string, string> = {
+	floppy: [
+		box(3, 2, 26, 28),
+		box(9, 2, 15, 11), fill(18, 4, 3, 7),
+		box(7, 16, 18, 14), hl(10, 20, 12), hl(10, 23, 12), hl(10, 26, 8),
+		fill(4, 26, 2, 2),
+	].join(''),
+	folder: [
+		box(3, 6, 12, 5),
+		box(3, 10, 26, 18),
+		hl(4, 13, 24),
+	].join(''),
+	drive: [
+		box(2, 10, 28, 14),
+		hl(5, 18, 14), hl(5, 20, 14),
+		fill(24, 17, 3, 3),
+		box(5, 24, 4, 3), box(23, 24, 4, 3),
+	].join(''),
+	trash: [
+		box(13, 3, 6, 4),
+		box(7, 6, 18, 4),
+		path('M8.5 9.5 H23.5 L22.5 28.5 H9.5 Z'),
+		vl(12, 12, 14), vl(16, 12, 14), vl(20, 12, 14),
+	].join(''),
+	globe: [
+		circle(16, 16, 12.5),
+		`<ellipse cx="16" cy="16" rx="5.5" ry="12.5" fill="none" stroke="#000"/>`,
+		hl(4, 16, 25), hl(6, 10, 21), hl(6, 22, 21),
+		vl(16, 4, 25),
+	].join(''),
+	envelope: [
+		box(3, 8, 26, 17),
+		path('M3.5 8.5 L16 19 L28.5 8.5', 'none'),
+		path('M3.5 24.5 L12 16 M28.5 24.5 L20 16', 'none'),
+	].join(''),
+	document: [
+		path('M6.5 2.5 H20.5 L26.5 8.5 V29.5 H6.5 Z'),
+		path('M20.5 2.5 V8.5 H26.5', 'none'),
+		hl(9, 6, 9), hl(9, 12, 15), hl(9, 15, 15), hl(9, 18, 15), hl(9, 21, 15),
+		hl(9, 24, 10),
+	].join(''),
+	terminal: [
+		box(3, 3, 26, 20), fill(5, 5, 22, 16),
+		path('M8 9 L12 12 L8 15', 'none'),
+		`<path d="M8 9 L12 12 L8 15" fill="none" stroke="#fff" stroke-width="1.5"/>`,
+		white(14, 15, 6, 2),
+		box(12, 22, 8, 4), box(7, 25, 18, 4),
+	].join(''),
+	crossword: [
+		box(4, 4, 25, 25),
+		vl(10, 4, 25), vl(16, 4, 25), vl(22, 4, 25),
+		hl(4, 10, 25), hl(4, 16, 25), hl(4, 22, 25),
+		fill(11, 5, 5, 5), fill(23, 11, 5, 5), fill(5, 17, 5, 5), fill(17, 23, 5, 5),
+		fill(5, 5, 2, 2), fill(17, 5, 2, 2), fill(11, 11, 2, 2),
+	].join(''),
+	bell: [
+		path('M16 4.5 C10.5 4.5 9.5 9 9.5 13.5 V19.5 L6.5 23.5 H25.5 L22.5 19.5 V13.5 C22.5 9 21.5 4.5 16 4.5 Z'),
+		fill(14, 24, 4, 3),
+		fill(15, 2, 2, 3),
+	].join(''),
+	wifi: [
+		box(5, 22, 5, 7), box(11, 17, 5, 12), box(17, 12, 5, 17), box(23, 6, 5, 23),
+		fill(6, 23, 3, 5), fill(12, 18, 3, 10), fill(18, 13, 3, 15),
+	].join(''),
+	bluetooth: [
+		circle(16, 16, 13.5),
+		`<path d="M10.5 11 L21 20.5 L15.5 26 V6 L21 11.5 L10.5 21" fill="none" stroke="#000" stroke-width="2" stroke-linejoin="miter"/>`,
+	].join(''),
+	speaker: [
+		path('M4.5 12.5 H10.5 L17.5 5.5 V26.5 L10.5 19.5 H4.5 Z'),
+		path('M21 11.5 Q24 16 21 20.5', 'none', 1.5),
+		path('M24.5 8 Q30 16 24.5 24', 'none', 1.5),
+	].join(''),
+	printer: [
+		box(9, 3, 15, 10),
+		box(4, 11, 24, 12),
+		fill(23, 14, 3, 2),
+		box(9, 18, 15, 11), hl(11, 22, 11), hl(11, 25, 8),
+	].join(''),
+	selector: [
+		box(3, 3, 26, 26),
+		fill(3, 3, 26, 5),
+		white(5, 5, 14, 1),
+		box(6, 10, 14, 16),
+		hl(8, 13, 9), hl(8, 16, 7), hl(8, 19, 10), hl(8, 22, 6),
+		box(22, 10, 5, 16), fill(23, 11, 3, 5),
+	].join(''),
+	key: [
+		circle(10, 16, 6.5),
+		fill(8, 14, 4, 4),
+		box(16, 14, 13, 5),
+		fill(21, 18, 2, 4), fill(25, 18, 2, 5),
+	].join(''),
+	camera: [
+		box(11, 6, 10, 5),
+		box(3, 9, 26, 18),
+		circle(16, 18, 6.5),
+		circle(16, 18, 3.5),
+		fill(24, 12, 3, 2),
+	].join(''),
+	clock: [
+		circle(16, 16, 13.5),
+		vl(16, 6, 11), hl(16, 16, 7),
+		fill(15, 4, 2, 2), fill(15, 26, 2, 2), fill(4, 15, 2, 2), fill(26, 15, 2, 2),
+	].join(''),
+	person: [
+		circle(16, 10, 6.5),
+		path('M5.5 29.5 C5.5 21 9.5 18.5 16 18.5 C22.5 18.5 26.5 21 26.5 29.5 Z'),
+	].join(''),
+	alert: [
+		path('M16 3.5 L29.5 28.5 H2.5 Z'),
+		fill(15, 11, 3, 10), fill(15, 23, 3, 3),
+	].join(''),
+};
+
+const svg = icons[name] ?? icons.document;
+---
+<svg
+	xmlns="http://www.w3.org/2000/svg"
+	viewBox="0 0 32 32"
+	width={size}
+	height={size}
+	aria-hidden="true"
+	shape-rendering="crispEdges"
+	set:html={svg}
+/>

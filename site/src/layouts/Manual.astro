@@ -1,0 +1,148 @@
+---
+/*
+ * A window with a list down its side, as GEM's item selector lists a
+ * folder: the docs' sections, or the apps. The page you're on is
+ * selected (inverted). On a phone the list folds into a box at the top.
+ */
+import Base from './Base.astro';
+import Window from '../components/Window.astro';
+
+interface Props {
+	title: string;
+	description: string;
+	window: string;
+	close: string;
+	groups: { name: string; items: { label: string; href: string }[] }[];
+	image?: string;
+}
+const { title, description, window: windowTitle, close, groups, image } = Astro.props;
+const here = Astro.url.pathname;
+---
+<Base title={title} description={description} image={image}>
+	<Window title={windowTitle} close={close} page width={1080} heading={false}>
+		<div class="manual">
+			<nav class="side" aria-label={windowTitle}>
+				<details open data-side>
+					<summary>Contents</summary>
+					{groups.map((group) => (
+						<div class="group">
+							<h2>{group.name}</h2>
+							<ul>
+								{group.items.map((item) => (
+									<li>
+										<a href={item.href} aria-current={item.href === here ? 'page' : undefined}>
+											{item.label}
+										</a>
+									</li>
+								))}
+							</ul>
+						</div>
+					))}
+				</details>
+			</nav>
+			<article class="prose">
+				<slot />
+			</article>
+		</div>
+	</Window>
+</Base>
+
+<script>
+	// The list starts folded on a phone, open beside the page elsewhere.
+	const side = document.querySelector<HTMLDetailsElement>('[data-side]');
+	if (side && matchMedia('(max-width: 700px)').matches) side.open = false;
+
+	// A screenshot, shrunk to fit, opens full size, where its pixels are sharp.
+	for (const img of document.querySelectorAll<HTMLImageElement>('.prose img')) {
+		if (img.closest('a')) continue;
+		const link = document.createElement('a');
+		link.href = img.src;
+		link.className = 'shot-link';
+		img.replaceWith(link);
+		link.append(img);
+	}
+</script>
+
+<style>
+	.manual {
+		display: grid;
+		grid-template-columns: 216px minmax(0, 1fr);
+		min-height: 100%;
+	}
+
+	.side {
+		border-right: 1px solid var(--ink);
+		padding: 8px 0 24px;
+	}
+
+	.side summary {
+		display: none;
+	}
+
+	.group + .group {
+		margin-top: 16px;
+	}
+
+	.side h2 {
+		margin: 0;
+		padding: 0 16px;
+		font-size: inherit;
+		font-weight: normal;
+		line-height: var(--row);
+		color: #555;
+	}
+
+	.side ul {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.side a {
+		display: block;
+		padding: 0 16px 0 24px;
+		line-height: 22px;
+		text-decoration: none;
+	}
+
+	.side a:hover {
+		text-decoration: underline;
+	}
+
+	.side a[aria-current='page'] {
+		background: var(--ink);
+		color: var(--paper);
+		text-decoration: none;
+	}
+
+	.manual :global(.shot-link:hover) {
+		background: none;
+	}
+
+	.manual :global(.shot-link) {
+		display: block;
+		cursor: zoom-in;
+	}
+
+	@media (max-width: 700px) {
+		.manual {
+			grid-template-columns: 1fr;
+		}
+
+		.side {
+			border-right: 0;
+			border-bottom: 1px solid var(--ink);
+			padding: 0;
+		}
+
+		.side summary {
+			display: block;
+			padding: 4px 16px;
+			cursor: default;
+		}
+
+		.side details[open] {
+			padding-bottom: 16px;
+		}
+	}
+</style>

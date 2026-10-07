@@ -1,0 +1,335 @@
+---
+/*
+ * The desktop: icons down the left, as the ST showed its drives, the
+ * trash in the corner, and the GemWM window open on it.
+ */
+import Base from '../layouts/Base.astro';
+import Window from '../components/Window.astro';
+import Icon from '../components/Icon.astro';
+import { apps, appHref, REPO } from '../lib/nav';
+
+const programs = (await apps()).filter((a) => a.data.kind === 'app');
+
+const modes = [
+	{
+		name: 'Window',
+		href: '/docs/window-mode/',
+		shot: '/screenshots/desktop.png',
+		text: 'Overlapping GEM windows. Drag the title bar and an outline follows the pointer; the window moves when you let go. Super+W shows every window at once.',
+	},
+	{
+		name: 'Tiling',
+		href: '/docs/tiling/',
+		shot: '/screenshots/tiling.png',
+		text: 'Two columns that share the screen, each stacking its windows, as in i3 and sway. Windows glide to their new places, or step there in outline, the way GEM did.',
+	},
+	{
+		name: 'Scrolling',
+		href: '/docs/scrolling/',
+		shot: '/screenshots/scrolling.png',
+		text: 'A strip of columns that scrolls sideways, after niri. New windows open to the right; the view slides to keep the one you are in in sight.',
+	},
+];
+---
+<Base
+	title="GemWM"
+	description="GemWM is a Wayland compositor that looks like the Atari ST's GEM desktop: a desktop in the ST's colours, the GEM menu bar and black and white windows, with window, tiling and scrolling modes, and apps of its own."
+>
+	<ul class="icons desk-icons" aria-label="Desktop">
+		<li><a class="icon" href="/docs/install/"><Icon name="floppy" /><span class="label">Install</span></a></li>
+		<li><a class="icon" href="/docs/"><Icon name="folder" /><span class="label">Docs</span></a></li>
+		<li><a class="icon" href="/apps/"><Icon name="folder" /><span class="label">Apps</span></a></li>
+		<li><a class="icon" href={REPO}><Icon name="drive" /><span class="label">Source</span></a></li>
+	</ul>
+	<button class="icon trash" type="button" data-trash>
+		<Icon name="trash" /><span class="label">Trash</span>
+	</button>
+
+	<Window title="GemWM" page width={960} heading={false} class="landing">
+		<div class="prose home">
+			<header class="hero">
+				<h1>The Atari ST's desktop, for Wayland.</h1>
+				<p class="lede">
+					GemWM is a Wayland compositor that looks like GEM, the desktop of
+					Atari's TOS: a desktop in the ST's own colours, the menu bar along the top, and black
+					and white windows with a closer, a fuller and a sizer. Under it is a
+					modern window manager, with tiling and scrolling modes, workspaces,
+					an overview of every window, and programs of its own.
+				</p>
+				<div class="buttons">
+					<a class="button default" href="/docs/install/">Install</a>
+					<a class="button" href="/docs/">Read the Docs</a>
+					<a class="button" href={REPO}>Source Code</a>
+				</div>
+			</header>
+
+			<figure class="shot">
+				<img
+					src="/screenshots/desktop.png"
+					width="1280"
+					height="720"
+					alt="The GemWM desktop: the menu bar, and a terminal and GemWeb in GEM windows on the dithered sunburst desktop"
+				/>
+			</figure>
+
+			<h2>Three Ways to Work</h2>
+			<p>
+				Switch between them in <strong>Options &gt; Mode</strong>, with a key, or
+				with one command. The frames stay GEM's in all three.
+			</p>
+			<div class="modes">
+				{modes.map((m) => (
+					<a class="mode" href={m.href}>
+						<img src={m.shot} width="1280" height="720" alt={`${m.name} mode`} loading="lazy" />
+						<span class="name">{m.name}</span>
+						<span>{m.text}</span>
+					</a>
+				))}
+			</div>
+
+			<h2>Its Own Applications</h2>
+			<p>
+				A desktop is more than its windows, so GemWM comes with the programs to
+				fill them, all drawn as GEM drew: menus in the bar, GEM's dialogs and
+				its item selector, in the ST's own font.
+			</p>
+			<ul class="programs">
+				{programs.map((a) => (
+					<li>
+						<a href={appHref(a)}>
+							<Icon name={a.data.icon} />
+							<span class="name">{a.data.title}</span>
+							<span>{a.data.description}</span>
+						</a>
+					</li>
+				))}
+			</ul>
+			<p>
+				And the rest of a desktop:
+				<a href="/apps/notifications/">notifications</a>,
+				<a href="/apps/open-and-save/">Open and Save dialogs</a> for every program,
+				<a href="/apps/wi-fi/">Wi-Fi</a>, <a href="/apps/bluetooth/">Bluetooth</a>,
+				<a href="/apps/volume/">volume</a>, <a href="/apps/printing/">printing</a>,
+				<a href="/apps/screenshots/">screenshots</a> and a
+				<a href="/docs/login-screen/">login screen</a>.
+				See <a href="/apps/">all of them</a>.
+			</p>
+
+			<h2>Made to Be Changed</h2>
+			<p>
+				One small file, <code>~/.config/gemwm/config</code>, and you only write what
+				you change. The desktop can be any ST colour, a picture redrawn in the
+				ST's own palette, or a GEM fill pattern; the menus are a text file too.
+			</p>
+<pre><code>[desktop]
+color = blue
+image = ~/Pictures/atari.png
+dither = st16                 # the picture, as an ST would show it
+
+[keys]
+Super+Return = exec foot
+Super+Page_Down = workspace next
+
+[animation]
+mode = outline                # GEM's moving boxes</code></pre>
+			<p>
+				<a href="/docs/desktop/">Desktop and looks</a>,
+				<a href="/docs/keybindings/">key bindings</a>,
+				<a href="/docs/menu-bar/">the menu bar</a>.
+			</p>
+
+			<h2>Scriptable</h2>
+			<p>
+				<code>gemwm msg</code> runs any command and prints JSON, and
+				<code>gemwm msg subscribe</code> streams what changes. Every item at the
+				right of the menu bar is a <a href="/docs/menu-apps/">menu app</a>: a
+				program that prints a line, which a shell script can be.
+			</p>
+<pre><code># Send every terminal to workspace 2
+gemwm msg windows | jq '.windows[] | select(.app_id=="foot") | .id' |
+    xargs -I{} gemwm msg move-window {} 2</code></pre>
+
+			<hr />
+			<p class="small">
+				GemWM is free software under the BSD license, written in C on
+				<a href="https://gitlab.freedesktop.org/wlroots/wlroots">wlroots</a>.
+				The Atari ST font is built from
+				<a href="https://emutos.sourceforge.io/">EmuTOS</a>'s, under the GPL.
+				GEM and TOS were Digital Research's and Atari's; GemWM is a tribute,
+				not affiliated with either.
+			</p>
+		</div>
+	</Window>
+
+	<div class="dialog trash-alert" role="alertdialog" aria-labelledby="trash-text" hidden data-trash-alert>
+		<Icon name="alert" />
+		<p id="trash-text">The Trash is empty.</p>
+		<button class="button default" type="button" data-trash-ok>OK</button>
+	</div>
+</Base>
+
+<script>
+	// The trash, as on the ST, holds nothing; opening it says so.
+	const alert = document.querySelector<HTMLElement>('[data-trash-alert]')!;
+	const ok = document.querySelector<HTMLElement>('[data-trash-ok]')!;
+	document.querySelector('[data-trash]')?.addEventListener('click', () => {
+		alert.hidden = false;
+		ok.focus();
+	});
+	ok.addEventListener('click', () => { alert.hidden = true; });
+	document.addEventListener('keydown', (e) => {
+		if (!alert.hidden && (e.key === 'Escape' || e.key === 'Enter')) {
+			e.preventDefault();
+			alert.hidden = true;
+		}
+	});
+</script>
+
+<style>
+	.desk-icons {
+		position: fixed;
+		top: calc(var(--bar) + 24px);
+		left: 8px;
+	}
+
+	.trash {
+		position: fixed;
+		right: 8px;
+		bottom: 16px;
+		border: 0;
+		background: none;
+		font: inherit;
+		color: inherit;
+		cursor: default;
+	}
+
+	:global(.window.landing:not([style*='left']):not(.full)) {
+		left: max(120px, calc((100vw - 960px) / 2));
+		width: min(960px, calc(100vw - 120px - 112px));
+	}
+
+	.home {
+		max-width: none;
+	}
+
+	.hero h1 {
+		margin-top: 16px;
+	}
+
+	.lede {
+		max-width: 68ch;
+	}
+
+	.shot img,
+	.mode img {
+		display: block;
+		width: 100%;
+		height: auto;
+		image-rendering: auto;
+	}
+
+	.modes {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 24px;
+		margin-bottom: 16px;
+	}
+
+	.mode {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		text-decoration: none;
+	}
+
+	.mode .name,
+	.programs .name {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+
+	.mode:hover {
+		background: none !important;
+		color: inherit !important;
+	}
+
+	.mode:hover img {
+		outline: 2px solid var(--ink);
+	}
+
+	.programs {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+		gap: 8px 24px;
+		padding: 0 !important;
+	}
+
+	.programs li::before {
+		content: none !important;
+	}
+
+	.programs a {
+		display: grid;
+		grid-template-columns: 32px 1fr;
+		gap: 0 12px;
+		padding: 8px;
+		text-decoration: none;
+	}
+
+	.programs :global(svg) {
+		grid-row: span 2;
+	}
+
+	.programs a:hover :global(svg) {
+		filter: invert(1);
+	}
+
+	.small {
+		color: #333;
+	}
+
+	.trash-alert {
+		position: fixed;
+		z-index: 150;
+		top: 30vh;
+		left: 50%;
+		display: grid;
+		grid-template-columns: 32px auto;
+		gap: 16px 24px;
+		width: 320px;
+		margin-left: -160px;
+		padding: 24px;
+	}
+
+	.trash-alert[hidden] {
+		display: none;
+	}
+
+	.trash-alert p {
+		margin: 0;
+		align-self: center;
+	}
+
+	.trash-alert .button {
+		grid-column: 2;
+		justify-self: end;
+	}
+
+	@media (max-width: 900px) {
+		.modes {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 700px) {
+		.desk-icons,
+		.trash {
+			display: none;
+		}
+
+		:global(.window.landing:not([style*='left']):not(.full)) {
+			left: 0;
+			width: 100vw;
+		}
+	}
+</style>

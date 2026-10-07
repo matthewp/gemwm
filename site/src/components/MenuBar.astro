@@ -1,0 +1,131 @@
+---
+/*
+ * GemWM's menu bar: the titles at the left drop their menus when the
+ * pointer rests on them (a tap, on a phone), and the right has the menu
+ * apps: here, the source and the clock.
+ */
+import { docSections, apps, docHref, appHref, REPO } from '../lib/nav';
+
+const here = Astro.url.pathname;
+const sections = await docSections();
+const all = await apps();
+const programs = all.filter((a) => a.data.kind === 'app');
+const utilities = all.filter((a) => a.data.kind === 'utility');
+
+type Item = { label: string; href?: string; shortcut?: string } | '-';
+const menus: { title: string; items: Item[] }[] = [
+	{
+		title: 'Desk',
+		items: [
+			{ label: 'About GemWM', href: '/' },
+			'-',
+			{ label: 'Install', href: '/docs/install/' },
+			{ label: 'Source Code', href: REPO },
+			{ label: 'Report a Bug', href: `${REPO}/issues` },
+		],
+	},
+	{
+		title: 'Docs',
+		items: sections.flatMap(({ pages }, i) => [
+			...(i > 0 ? ['-' as const] : []),
+			...pages.map((d) => ({ label: d.data.short ?? d.data.title, href: docHref(d) })),
+		]),
+	},
+	{
+		title: 'Apps',
+		items: [
+			...programs.map((a) => ({ label: a.data.title, href: appHref(a) })),
+			'-',
+			...utilities.map((a) => ({ label: a.data.title, href: appHref(a) })),
+		],
+	},
+];
+---
+<header class="menubar">
+	<nav aria-label="Menus">
+		<ul>
+			{menus.map((menu) => (
+				<li class="menu" data-menu>
+					<button class="menu-title" type="button" aria-expanded="false" aria-haspopup="true">
+						{menu.title}
+					</button>
+					<ul class="dropdown">
+						{menu.items.map((item) => item === '-'
+							? <li class="separator" role="separator" aria-hidden="true" />
+							: (
+								<li>
+									<a
+										href={item.href}
+										aria-current={item.href === here ? 'page' : undefined}
+									>{item.label}</a>
+								</li>
+							))}
+					</ul>
+				</li>
+			))}
+		</ul>
+	</nav>
+	<div class="right">
+		<a href={REPO}>GitHub</a>
+		<span data-clock aria-hidden="true"></span>
+	</div>
+</header>
+
+<script>
+	/* As in GEM, a menu drops when the pointer rests on its title, and then
+	 * moving along the bar drops the next; leaving it, or a click anywhere
+	 * else, closes it. Touch and the keyboard open menus by clicking. */
+	const menus = [...document.querySelectorAll<HTMLElement>('[data-menu]')];
+	let open: HTMLElement | null = null;
+
+	const show = (menu: HTMLElement | null) => {
+		if (open === menu) return;
+		open?.classList.remove('open');
+		open?.querySelector('.menu-title')?.setAttribute('aria-expanded', 'false');
+		open = menu;
+		open?.classList.add('open');
+		open?.querySelector('.menu-title')?.setAttribute('aria-expanded', 'true');
+	};
+
+	for (const menu of menus) {
+		const title = menu.querySelector<HTMLElement>('.menu-title')!;
+		title.addEventListener('pointerenter', (e) => {
+			if (e.pointerType === 'mouse') show(menu);
+		});
+		menu.addEventListener('pointerleave', (e) => {
+			if (e.pointerType === 'mouse') show(null);
+		});
+		title.addEventListener('click', () => show(open === menu ? null : menu));
+		menu.addEventListener('keydown', (e) => {
+			const items = [...menu.querySelectorAll<HTMLElement>('.dropdown a')];
+			const at = items.indexOf(document.activeElement as HTMLElement);
+			if (e.key === 'Escape') {
+				show(null);
+				title.focus();
+			} else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+				e.preventDefault();
+				show(menu);
+				const next = e.key === 'ArrowDown' ? at + 1 : at - 1;
+				items[(next + items.length) % items.length]?.focus();
+			} else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+				const i = menus.indexOf(menu) + (e.key === 'ArrowRight' ? 1 : -1);
+				const other = menus[(i + menus.length) % menus.length];
+				if (open) show(other);
+				other.querySelector<HTMLElement>('.menu-title')?.focus();
+			}
+		});
+	}
+	document.addEventListener('pointerdown', (e) => {
+		if (open && !open.contains(e.target as Node)) show(null);
+	});
+
+	// The clock, as gemwm-clock shows it: 24-hour, the minute.
+	const clock = document.querySelector<HTMLElement>('[data-clock]');
+	const tick = () => {
+		if (!clock) return;
+		const now = new Date();
+		clock.textContent = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`;
+		setTimeout(tick, (60 - now.getSeconds()) * 1000);
+	};
+	tick();
+</script>

@@ -1,0 +1,687 @@
+/*
+ * GemWM's look, for the web: the green colour-ST desktop, the GEM menu bar
+ * and black and white GEM windows, in the Atari ST's 8x16 system font.
+ * Sizes are GemWM's own (src/frame.c, menu/menu.c): 19px gadgets, a 20px
+ * menu bar, 18px menu rows, 1px lines shared by their neighbours.
+ */
+
+@font-face {
+	font-family: "Atari ST 8x16";
+	src: url("/fonts/AtariST8x16.ttf") format("truetype");
+	font-display: block;
+}
+
+:root {
+	--desk: #f0b040;      /* behind the picture, while it loads */
+	--ink: #000;
+	--paper: #fff;
+	--grey: #d8d8d8;
+	--gadget: 19px;
+	--bar: 20px;          /* 19px of bar and its 1px line */
+	--row: 18px;          /* a menu row */
+	--gutter: 16px;
+	--font: "Atari ST 8x16", ui-monospace, monospace;
+
+	/* GEM's fill patterns, 1-bit: the active title bar ("#.", "..", ".#",
+	 * ".."), and the scroll track and grey of disabled things (a checker). */
+	--title-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='4' shape-rendering='crispEdges'%3E%3Crect width='2' height='4' fill='%23fff'/%3E%3Crect width='1' height='1'/%3E%3Crect x='1' y='2' width='1' height='1'/%3E%3C/svg%3E");
+	--checker: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='2' shape-rendering='crispEdges'%3E%3Crect width='2' height='2' fill='%23fff'/%3E%3Crect width='1' height='1'/%3E%3Crect x='1' y='1' width='1' height='1'/%3E%3C/svg%3E");
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html {
+	background: var(--desk);
+	color: var(--ink);
+	font-family: var(--font);
+	font-size: 16px;
+	line-height: 24px;
+	-webkit-font-smoothing: none;
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+	text-rendering: optimizeSpeed;
+}
+
+/* The desktop picture: a sunburst, dithered by GemWM itself to 16 ST
+ * colours in its diffuse style, 640x360 ST pixels shown big and sharp. */
+body {
+	margin: 0;
+	min-height: 100vh;
+	background: var(--desk) url("/desktop.png") center / cover no-repeat fixed;
+	image-rendering: pixelated;
+}
+
+body * {
+	image-rendering: auto;
+}
+
+.pattern {
+	image-rendering: pixelated;
+	background-size: 2px 4px;
+}
+
+a {
+	color: inherit;
+}
+
+:focus-visible {
+	outline: 1px dotted var(--ink);
+	outline-offset: 1px;
+}
+
+::selection {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+/* ---- The menu bar ----------------------------------------------------- */
+
+.menubar {
+	position: fixed;
+	inset: 0 0 auto 0;
+	z-index: 100;
+	height: var(--bar);
+	display: flex;
+	align-items: stretch;
+	background: var(--paper);
+	border-bottom: 1px solid var(--ink);
+	line-height: 19px;
+	user-select: none;
+}
+
+.menubar nav > ul {
+	display: flex;
+	margin: 0;
+	padding: 0 0 0 8px;
+	list-style: none;
+}
+
+.menu {
+	position: relative;
+}
+
+.menu-title {
+	display: block;
+	height: 19px;
+	padding: 0 8px;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	line-height: 19px;
+	text-decoration: none;
+	cursor: default;
+}
+
+.menu.open > .menu-title,
+.menu-title[aria-current="page"]:hover {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+.dropdown {
+	position: absolute;
+	top: 19px;
+	left: 0;
+	display: none;
+	min-width: 100%;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	background: var(--paper);
+	border: 1px solid var(--ink);
+	white-space: nowrap;
+}
+
+.menu.open > .dropdown {
+	display: block;
+}
+
+.dropdown a,
+.dropdown .disabled {
+	display: flex;
+	justify-content: space-between;
+	gap: 16px;
+	height: var(--row);
+	padding: 0 16px;
+	line-height: var(--row);
+	text-decoration: none;
+}
+
+.dropdown .disabled {
+	color: #888;
+}
+
+.dropdown a:hover,
+.dropdown a:focus-visible {
+	background: var(--ink);
+	color: var(--paper);
+	outline: none;
+}
+
+/* The item for the page you're on: GEM's check mark in the indent. */
+.dropdown a[aria-current="page"] {
+	position: relative;
+}
+
+.dropdown a[aria-current="page"]::before {
+	content: "";
+	position: absolute;
+	left: 4px;
+	top: 4px;
+	width: 7px;
+	height: 4px;
+	border-left: 2px solid currentColor;
+	border-bottom: 2px solid currentColor;
+	transform: rotate(-50deg);
+	transform-origin: 3px 3px;
+}
+
+/* GEM uses a disabled row of dashes; a dotted rule reads the same. */
+.dropdown .separator {
+	height: var(--row);
+	background: var(--checker) 0 8px / 2px 2px repeat-x;
+	background-size: 2px 2px;
+	background-position: 0 8px;
+	image-rendering: pixelated;
+	clip-path: inset(8px 0 9px 0);
+}
+
+.menubar .right {
+	display: flex;
+	margin-left: auto;
+	padding-right: 8px;
+}
+
+.menubar .right a,
+.menubar .right span {
+	padding: 0 8px;
+	text-decoration: none;
+}
+
+.menubar .right a:hover {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+/* ---- Windows ---------------------------------------------------------- */
+
+.desktop {
+	position: relative;
+	min-height: 100vh;
+	padding: calc(var(--bar) + var(--gutter)) var(--gutter) var(--gutter);
+}
+
+.window {
+	display: flex;
+	flex-direction: column;
+	margin: 0 auto;
+	background: var(--paper);
+	border: 1px solid var(--ink);
+}
+
+/* Pages are windows the size of the desktop, scrolling inside, with the
+ * frame's own scroll bar. */
+.window.page {
+	position: fixed;
+	top: calc(var(--bar) + var(--gutter));
+	bottom: var(--gutter);
+	left: max(var(--gutter), calc((100vw - var(--window-w, 1000px)) / 2));
+	width: min(var(--window-w, 1000px), calc(100vw - 2 * var(--gutter)));
+	z-index: 10;
+}
+
+.window.page.full {
+	top: var(--bar);
+	bottom: 0;
+	left: 0;
+	width: 100vw;
+}
+
+.titlebar {
+	display: flex;
+	flex: none;
+	height: calc(var(--gadget) + 1px);
+	border-bottom: 1px solid var(--ink);
+	user-select: none;
+}
+
+.gadget {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: var(--gadget);
+	height: var(--gadget);
+	padding: 0;
+	border: 0;
+	background: var(--paper);
+	color: var(--ink);
+	cursor: default;
+}
+
+.gadget svg {
+	display: block;
+	width: var(--gadget);
+	height: var(--gadget);
+	shape-rendering: crispEdges;
+}
+
+.gadget:active svg {
+	filter: invert(1);
+}
+
+.closer {
+	border-right: 1px solid var(--ink);
+}
+
+.fuller {
+	border-left: 1px solid var(--ink);
+}
+
+.title {
+	display: flex;
+	flex: 1;
+	justify-content: center;
+	min-width: 0;
+	height: var(--gadget);
+	background: var(--title-pattern);
+	background-size: 2px 4px;
+	image-rendering: pixelated;
+	cursor: default;
+}
+
+.window:not(.active) .title {
+	background: var(--paper);
+}
+
+.title h1,
+.title span {
+	overflow: hidden;
+	margin: 0;
+	padding: 0 8px;
+	background: var(--paper);
+	font: inherit;
+	line-height: var(--gadget);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.window-body {
+	display: flex;
+	flex: 1;
+	min-height: 0;
+}
+
+.content {
+	flex: 1;
+	min-width: 0;
+}
+
+.page .content {
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	scrollbar-width: none;
+}
+
+.page .content::-webkit-scrollbar {
+	display: none;
+}
+
+.vscroll {
+	display: flex;
+	flex: none;
+	flex-direction: column;
+	width: calc(var(--gadget) + 1px);
+	border-left: 1px solid var(--ink);
+	user-select: none;
+	touch-action: none;
+}
+
+.vscroll .gadget + .track,
+.vscroll .track + .gadget {
+	border-top: 1px solid var(--ink);
+}
+
+.vscroll .down {
+	border-bottom: 1px solid var(--ink);
+}
+
+.track {
+	position: relative;
+	flex: 1;
+	background: var(--checker);
+	background-size: 2px 2px;
+	image-rendering: pixelated;
+}
+
+.slider {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 0;
+	height: 100%;
+	background: var(--paper);
+	border: 1px solid var(--ink);
+	border-left: 0;
+	border-right: 0;
+}
+
+.slider.at-top {
+	border-top: 0;
+}
+
+/* GEM's moving box: an outline follows the pointer while a window is
+ * dragged or sized, and the window moves on release. */
+.outline {
+	position: fixed;
+	z-index: 200;
+	border: 1px dotted var(--ink);
+	outline: 1px dotted var(--paper);
+	pointer-events: none;
+}
+
+/* A window that isn't a page: part of something on the desktop. */
+.window.inline .content {
+	padding: 16px;
+}
+
+/* ---- Desktop icons ---------------------------------------------------- */
+
+.icons {
+	display: flex;
+	flex-direction: column;
+	gap: 24px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.icon {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	width: 96px;
+	text-decoration: none;
+}
+
+.icon svg {
+	display: block;
+	width: 48px;
+	height: 48px;
+	margin-bottom: 2px;
+	shape-rendering: crispEdges;
+	image-rendering: pixelated;
+}
+
+.icon .label {
+	padding: 0 4px;
+	background: var(--paper);
+	line-height: 16px;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+
+.icon:hover svg,
+.icon:focus-visible svg {
+	filter: invert(1);
+}
+
+.icon:hover .label,
+.icon:focus-visible .label {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+.icon:focus-visible {
+	outline: none;
+}
+
+/* ---- Buttons ---------------------------------------------------------- */
+
+/* GEM's buttons: a 1px box, and the default one (Return) a thick one. */
+.button {
+	display: inline-block;
+	min-width: 96px;
+	padding: 0 16px;
+	border: 1px solid var(--ink);
+	background: var(--paper);
+	color: var(--ink);
+	font: inherit;
+	line-height: 20px;
+	text-align: center;
+	text-decoration: none;
+	cursor: default;
+}
+
+.button.default {
+	border-width: 3px;
+	line-height: 16px;
+}
+
+/* A GEM dialog's frame: a line, a gap, then a line again. */
+.dialog {
+	background: var(--paper);
+	border: 1px solid var(--ink);
+	box-shadow: inset 0 0 0 1px var(--paper), inset 0 0 0 2px var(--ink);
+}
+
+.button:hover {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+.buttons {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	margin: 24px 0;
+}
+
+/* ---- Prose ------------------------------------------------------------ */
+
+.prose {
+	max-width: 74ch;
+	padding: 16px 24px 48px;
+}
+
+.prose > :first-child {
+	margin-top: 0;
+}
+
+.prose h1 {
+	margin: 8px 0 24px;
+	font-size: 32px;
+	font-weight: normal;
+	line-height: 32px;
+}
+
+.prose h2 {
+	margin: 40px 0 16px;
+	padding-bottom: 4px;
+	border-bottom: 1px solid var(--ink);
+	font-size: 16px;
+	font-weight: normal;
+	line-height: 24px;
+	text-transform: uppercase;
+}
+
+.prose h3 {
+	margin: 32px 0 8px;
+	font-size: 16px;
+	font-weight: normal;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+.prose h2 a,
+.prose h3 a {
+	text-decoration: none;
+}
+
+.prose p,
+.prose ul,
+.prose ol,
+.prose table,
+.prose pre {
+	margin: 0 0 16px;
+}
+
+.prose ul {
+	padding-left: 24px;
+	list-style: none;
+}
+
+.prose ul > li {
+	position: relative;
+}
+
+/* The ST font's own bullet. */
+.prose ul > li::before {
+	content: "\2022";
+	position: absolute;
+	left: -16px;
+}
+
+.prose ol {
+	padding-left: 32px;
+}
+
+.prose li + li {
+	margin-top: 4px;
+}
+
+.prose a:hover {
+	background: var(--ink);
+	color: var(--paper);
+	text-decoration: none;
+}
+
+.prose strong {
+	font-weight: normal;
+	text-decoration: underline;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 3px;
+}
+
+.prose em {
+	font-style: normal;
+	text-decoration: underline dotted;
+	text-underline-offset: 3px;
+}
+
+.prose code {
+	padding: 0 2px;
+	background: var(--grey);
+	font: inherit;
+}
+
+.prose pre {
+	overflow-x: auto;
+	padding: 8px 16px;
+	border: 1px solid var(--ink);
+	background: var(--paper) !important;
+	color: var(--ink) !important;
+	font: inherit;
+	line-height: 20px;
+}
+
+.prose pre code {
+	padding: 0;
+	background: none;
+	color: inherit !important;
+}
+
+.prose pre span {
+	color: inherit !important;
+}
+
+.prose table {
+	border-collapse: collapse;
+	width: 100%;
+}
+
+.prose th,
+.prose td {
+	padding: 2px 8px;
+	border: 1px solid var(--ink);
+	text-align: left;
+	vertical-align: top;
+}
+
+.prose th {
+	background: var(--ink);
+	color: var(--paper);
+	font-weight: normal;
+}
+
+.prose kbd {
+	padding: 0 4px;
+	border: 1px solid var(--ink);
+	font: inherit;
+	white-space: nowrap;
+}
+
+.prose blockquote {
+	margin: 0 0 16px;
+	padding: 8px 16px;
+	border: 1px solid var(--ink);
+	box-shadow: 4px 4px 0 var(--ink);
+}
+
+.prose img {
+	max-width: 100%;
+	height: auto;
+	border: 1px solid var(--ink);
+}
+
+.prose figure {
+	margin: 0 0 24px;
+}
+
+.prose figcaption {
+	margin-top: 4px;
+	color: #444;
+}
+
+.prose hr {
+	height: 1px;
+	margin: 32px 0;
+	border: 0;
+	background: var(--checker);
+	background-size: 2px 2px;
+	image-rendering: pixelated;
+}
+
+/* ---- Small screens ---------------------------------------------------- */
+
+@media (max-width: 700px) {
+	:root {
+		--gutter: 0px;
+	}
+
+	.prose {
+		padding: 16px 16px 48px;
+	}
+
+	.prose h1 {
+		font-size: 24px;
+		line-height: 32px;
+	}
+
+	.prose table {
+		display: block;
+		overflow-x: auto;
+	}
+}

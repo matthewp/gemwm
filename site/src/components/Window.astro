@@ -1,0 +1,209 @@
+---
+/*
+ * A GEM window, as GemWM frames one (src/frame.c): the closer, the title
+ * on the dotted bar, the fuller, and for a page, the scroll bar and sizer.
+ * A page window fills the desktop and scrolls inside, under its own
+ * scroll bar; the closer goes up a level.
+ */
+interface Props {
+	title: string;
+	/* Where the closer goes; none, no closer. */
+	close?: string;
+	/* A page: the window the page is shown in. */
+	page?: boolean;
+	/* Its width on a wide screen, in px. */
+	width?: number;
+	/* The title is the page's heading (h1). */
+	heading?: boolean;
+	class?: string;
+}
+const { title, close, page = false, width = 1000, heading = true, class: extra } = Astro.props;
+const Title = heading ? 'h1' : 'span';
+---
+<section
+	class:list={['window', 'active', { page }, extra]}
+	style={page ? `--window-w: ${width}px` : undefined}
+	aria-label={heading ? undefined : title}
+	data-window
+>
+	<div class="titlebar">
+		{close ? (
+			<a class="gadget closer" href={close} aria-label="Close" title="Close">
+				<svg viewBox="0 0 19 19" aria-hidden="true">
+					<rect x="4.5" y="4.5" width="10" height="10" fill="none" stroke="currentColor" />
+					<path d="M4.5 4.5 L14.5 14.5 M14.5 4.5 L4.5 14.5" stroke="currentColor" />
+				</svg>
+			</a>
+		) : <span class="gadget closer" aria-hidden="true" />}
+		<div class="title" data-drag>
+			<Title>{title}</Title>
+		</div>
+		<button class="gadget fuller" type="button" aria-label="Full size" title="Full size" data-fuller>
+			<svg viewBox="0 0 19 19" aria-hidden="true">
+				<path d="M9.5 3.5 L15.5 9.5 L9.5 15.5 L3.5 9.5 Z" fill="none" stroke="currentColor" />
+			</svg>
+		</button>
+	</div>
+	<div class="window-body">
+		<div class="content" tabindex={page ? 0 : undefined} data-content>
+			<slot />
+		</div>
+		{page && (
+			<div class="vscroll" aria-hidden="true">
+				<button class="gadget up" type="button" tabindex="-1" data-step="-1">
+					<svg viewBox="0 0 19 19"><path d="M9.5 4 L15 14 L4 14 Z" /></svg>
+				</button>
+				<div class="track" data-track>
+					<div class="slider" data-slider />
+				</div>
+				<button class="gadget down" type="button" tabindex="-1" data-step="1">
+					<svg viewBox="0 0 19 19"><path d="M9.5 15 L15 5 L4 5 Z" /></svg>
+				</button>
+				<span class="gadget sizer" data-sizer>
+					<svg viewBox="0 0 19 19">
+						<rect x="3.5" y="3.5" width="12" height="12" fill="none" stroke="currentColor" />
+						<rect x="3.5" y="3.5" width="6" height="6" fill="none" stroke="currentColor" />
+					</svg>
+				</span>
+			</div>
+		)}
+	</div>
+</section>
+
+<script>
+	/* GEM's scroll bar, driving the window's content: the slider is the
+	 * share of the page in view; the arrows step, the track pages, and
+	 * the slider drags. The fuller toggles full size; the title bar and
+	 * the sizer move and size the window with GEM's outline. */
+	const STEP = 48;
+
+	for (const win of document.querySelectorAll<HTMLElement>('[data-window]')) {
+		const content = win.querySelector<HTMLElement>('[data-content]')!;
+		const track = win.querySelector<HTMLElement>('[data-track]');
+		const slider = win.querySelector<HTMLElement>('[data-slider]');
+
+		const sync = () => {
+			if (!track || !slider) return;
+			const len = track.clientHeight;
+			const { scrollTop, scrollHeight, clientHeight } = content;
+			let size = len, offset = 0;
+			if (scrollHeight > clientHeight && len > 0) {
+				size = Math.max(19, Math.round(len * clientHeight / scrollHeight));
+				size = Math.min(size, len);
+				const range = scrollHeight - clientHeight;
+				offset = Math.round((len - size) * Math.min(scrollTop, range) / range);
+			}
+			slider.style.top = `${offset}px`;
+			slider.style.height = `${size}px`;
+			slider.classList.toggle('at-top', offset === 0);
+		};
+
+		if (track && slider) {
+			content.addEventListener('scroll', sync, { passive: true });
+			new ResizeObserver(sync).observe(content);
+			for (const child of content.children) {
+				new ResizeObserver(sync).observe(child);
+			}
+			sync();
+
+			// The arrows step, and keep stepping while held.
+			for (const arrow of win.querySelectorAll<HTMLElement>('[data-step]')) {
+				let timer: number | undefined;
+				const dir = Number(arrow.dataset.step);
+				const stop = () => { clearTimeout(timer); clearInterval(timer); };
+				arrow.addEventListener('pointerdown', (e) => {
+					e.preventDefault();
+					content.scrollBy({ top: dir * STEP });
+					timer = window.setTimeout(() => {
+						timer = window.setInterval(() => content.scrollBy({ top: dir * STEP }), 60);
+					}, 350);
+				});
+				arrow.addEventListener('pointerup', stop);
+				arrow.addEventListener('pointerleave', stop);
+			}
+
+			// The track pages towards the click.
+			track.addEventListener('pointerdown', (e) => {
+				if (e.target !== track) return;
+				const above = e.clientY < slider.getBoundingClientRect().top;
+				content.scrollBy({ top: (above ? -1 : 1) * (content.clientHeight - STEP) });
+			});
+
+			// The slider drags.
+			slider.addEventListener('pointerdown', (e) => {
+				e.preventDefault();
+				slider.setPointerCapture(e.pointerId);
+				const startY = e.clientY, startTop = content.scrollTop;
+				const travel = track.clientHeight - slider.offsetHeight;
+				const range = content.scrollHeight - content.clientHeight;
+				const move = (ev: PointerEvent) => {
+					if (travel > 0) {
+						content.scrollTop = startTop + (ev.clientY - startY) * range / travel;
+					}
+				};
+				const up = () => {
+					slider.removeEventListener('pointermove', move);
+					slider.removeEventListener('pointerup', up);
+				};
+				slider.addEventListener('pointermove', move);
+				slider.addEventListener('pointerup', up);
+			});
+		}
+
+		// The fuller: full size and back.
+		win.querySelector('[data-fuller]')?.addEventListener('click', () => {
+			if (win.style.top || win.style.width) {
+				win.removeAttribute('style');
+				win.classList.remove('full');
+			} else {
+				win.classList.toggle('full');
+			}
+			sync();
+		});
+
+		// Moving and sizing, as in GEM: an outline follows the pointer and
+		// the window takes its place on release. Only with a mouse.
+		const outlineDrag = (handle: Element | null, sizing: boolean) => {
+			handle?.addEventListener('pointerdown', (event) => {
+				const e = event as PointerEvent;
+				if (e.pointerType !== 'mouse' || e.button !== 0 || !win.classList.contains('page')) return;
+				e.preventDefault();
+				const r = win.getBoundingClientRect();
+				const outline = document.createElement('div');
+				outline.className = 'outline';
+				const place = (x: number, y: number, w: number, h: number) =>
+					Object.assign(outline.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+				place(r.left, r.top, r.width, r.height);
+				document.body.append(outline);
+				let box = { x: r.left, y: r.top, w: r.width, h: r.height };
+				const move = (ev: PointerEvent) => {
+					const dx = ev.clientX - e.clientX, dy = ev.clientY - e.clientY;
+					box = sizing
+						? { x: r.left, y: r.top, w: Math.max(240, r.width + dx), h: Math.max(160, r.height + dy) }
+						: { x: r.left + dx, y: Math.max(20, r.top + dy), w: r.width, h: r.height };
+					place(box.x, box.y, box.w, box.h);
+				};
+				const up = () => {
+					window.removeEventListener('pointermove', move);
+					window.removeEventListener('pointerup', up);
+					outline.remove();
+					win.classList.remove('full');
+					Object.assign(win.style, {
+						left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`,
+						height: `${box.h}px`, bottom: 'auto',
+					});
+					sync();
+				};
+				window.addEventListener('pointermove', move);
+				window.addEventListener('pointerup', up);
+			});
+		};
+		outlineDrag(win.querySelector('[data-drag]'), false);
+		outlineDrag(win.querySelector('[data-sizer]'), true);
+
+		// The page scrolls with the keyboard from the start.
+		if (win.classList.contains('page')) {
+			content.focus({ preventScroll: true });
+		}
+	}
+</script>
