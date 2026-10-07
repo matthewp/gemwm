@@ -1,6 +1,7 @@
 /*
  * Messages with GMime: see message.h.
  */
+#include <gio/gio.h>
 #include <gmime/gmime.h>
 #include <string.h>
 #include "message.h"
@@ -478,7 +479,51 @@ GBytes *draft_build(struct draft *d, const char *from, char ***recipients,
 		GMIME_ENCODING_CONSTRAINT_7BIT));
 	g_object_unref(wrapper);
 	g_object_unref(text_stream);
-	g_mime_message_set_mime_part(msg, GMIME_OBJECT(body));
+	if (d->files == NULL || d->files->len == 0) {
+		g_mime_message_set_mime_part(msg, GMIME_OBJECT(body));
+	} else {
+		/* The text, then each file: multipart/mixed. */
+		GMimeMultipart *mixed = g_mime_multipart_new_with_subtype("mixed");
+		g_mime_multipart_add(mixed, GMIME_OBJECT(body));
+		for (guint i = 0; i < d->files->len; i++) {
+			const char *path = d->files->pdata[i];
+			char *data = NULL;
+			gsize len = 0;
+			GError *e = NULL;
+			if (!g_file_get_contents(path, &data, &len, &e)) {
+				*error = g_strdup_printf("Couldn't attach %s: %s", path, e->message);
+				g_error_free(e);
+				g_object_unref(mixed);
+				g_object_unref(body);
+				g_object_unref(msg);
+				goto out;
+			}
+			char *guess = g_content_type_guess(path, (const guchar *)data, len,
+				NULL);
+			char *type = g_content_type_get_mime_type(guess);
+			char *slash = type != NULL ? strchr(type, '/') : NULL;
+			GMimePart *part = slash != NULL ?
+				g_mime_part_new_with_type((*slash = '\0', type), slash + 1) :
+				g_mime_part_new_with_type("application", "octet-stream");
+			GMimeStream *stream = g_mime_stream_mem_new_with_buffer(data, len);
+			GMimeDataWrapper *content = g_mime_data_wrapper_new_with_stream(stream,
+				GMIME_CONTENT_ENCODING_DEFAULT);
+			g_mime_part_set_content(part, content);
+			char *name = g_path_get_basename(path);
+			g_mime_part_set_filename(part, name);
+			g_mime_part_set_content_encoding(part, GMIME_CONTENT_ENCODING_BASE64);
+			g_mime_multipart_add(mixed, GMIME_OBJECT(part));
+			g_free(name);
+			g_object_unref(content);
+			g_object_unref(stream);
+			g_object_unref(part);
+			g_free(type);
+			g_free(guess);
+			g_free(data);
+		}
+		g_mime_message_set_mime_part(msg, GMIME_OBJECT(mixed));
+		g_object_unref(mixed);
+	}
 	g_object_unref(body);
 
 	/* As mail travels: CRLF line ends. */

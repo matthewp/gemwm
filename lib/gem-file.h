@@ -14,14 +14,33 @@
 #include <gtk/gtk.h>
 #include <stdbool.h>
 
-/* path is the file chosen, or NULL if it was cancelled. */
+/* path is the file (or folder) chosen, or NULL if it was cancelled. */
 typedef void (*gem_file_fn)(const char *path, void *data);
+
+/* Choosing a file to open, a name to save as, or a folder (the list
+ * shows only folders, and OK takes the one selected, or the one it's in). */
+enum gem_file_mode { GEM_FILE_OPEN, GEM_FILE_SAVE, GEM_FILE_FOLDER };
 
 /* folder NULL is the last folder chosen from, else the Documents folder;
  * name is the selection to start with (may be NULL). pattern is a glob
- * (several separated by commas), e.g. "*.odt,*.txt". */
+ * (several separated by commas), e.g. "*.odt,*.txt"; NULL is "*". ok is
+ * the OK button's label (NULL: "OK"). */
+void gem_file_choose(GtkOverlay *host, const char *title,
+	enum gem_file_mode mode, const char *folder, const char *name,
+	const char *pattern, const char *ok, gem_file_fn done, void *data);
+
+/* How big the selector's box is: for a window that's only that. */
+void gem_file_size(int *w, int *h);
+
+/* gem_file_choose to open (save false) or save, with an OK button. */
 void gem_file_select(GtkOverlay *host, const char *title, bool save,
 	const char *folder, const char *name, const char *pattern,
 	gem_file_fn done, void *data);
+
+/* MIME types (image/png, text/plain, or a whole kind like image/ and a
+ * star) as the globs their files
+ * have, from the system's MIME database, for a pattern: "*.png,*.jpg".
+ * NULL if none of them has any. */
+char *gem_file_pattern_for_types(const char *const *types);
 
 #endif

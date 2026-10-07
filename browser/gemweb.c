@@ -28,7 +28,10 @@
 #include <webkit/webkit.h>
 #include "adblock.h"
 #include "app-menu.h"
+#include "gem-alert.h"
+#include "gem-file.h"
 #include "gem-print.h"
+#include "gem-ui.h"
 #include "gemwm-scroll-v1-client-protocol.h"
 #include "cookies.h"
 #include "history.h"
@@ -200,6 +203,8 @@ static gboolean on_script_dialog(WebKitWebView *view, WebKitScriptDialog *d,
 	struct tab *t);
 static char *site_of(const char *uri);
 static void zoom_apply(struct tab *t);
+static gboolean on_file_chooser(WebKitWebView *view,
+	WebKitFileChooserRequest *request, struct tab *t);
 static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
 	WebKitHitTestResult *hit, struct tab *t);
 static bool app_owns(struct browser *b, const char *uri);
@@ -906,6 +911,59 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 	}
 }
 
+/* A page's file input (Choose File, Upload): GEM's item selector, showing
+ * the files the page takes (its accept: types, or extensions). */
+static void file_chosen(const char *path, void *data) {
+	WebKitFileChooserRequest *request = data;
+	if (path != NULL) {
+		const char *files[] = { path, NULL };
+		webkit_file_chooser_request_select_files(request, files);
+	} else {
+		webkit_file_chooser_request_cancel(request);
+	}
+	g_object_unref(request);
+}
+
+static gboolean on_file_chooser(WebKitWebView *view,
+		WebKitFileChooserRequest *request, struct tab *t) {
+	/* The page's accept, as WebKit gives it: MIME types (it drops
+	 * extensions like .pdf), and globs if it ever gives those. */
+	GtkFileFilter *filter = webkit_file_chooser_request_get_mime_types_filter(
+		request);
+	GPtrArray *types = g_ptr_array_new_with_free_func(g_free);
+	GString *pattern = g_string_new(NULL);
+	if (filter != NULL) {
+		GVariant *v = gtk_file_filter_to_gvariant(filter);
+		GVariantIter *rules;
+		guint32 kind;
+		const char *what;
+		g_variant_get(v, "(&sa(us))", NULL, &rules);
+		while (g_variant_iter_next(rules, "(u&s)", &kind, &what)) {
+			if (kind == 0) {
+				g_string_append_printf(pattern, "%s%s", pattern->len ? "," : "",
+					what);
+			} else {
+				g_ptr_array_add(types, g_strdup(what));
+			}
+		}
+		g_variant_iter_free(rules);
+		g_variant_unref(v);
+	}
+	g_ptr_array_add(types, NULL);
+	char *globs = types->len > 1 ?
+		gem_file_pattern_for_types((const char *const *)types->pdata) : NULL;
+	if (globs != NULL) {
+		g_string_append_printf(pattern, "%s%s", pattern->len ? "," : "", globs);
+		g_free(globs);
+	}
+	g_ptr_array_unref(types);
+	gem_file_choose(GTK_OVERLAY(t->browser->overlay), "Choose a File to Upload",
+		GEM_FILE_OPEN, NULL, NULL, pattern->len ? pattern->str : NULL, "Upload",
+		file_chosen, g_object_ref(request));
+	g_string_free(pattern, TRUE);
+	return TRUE;
+}
+
 /* A page that didn't load (a mistyped address) isn't worth suggesting. */
 static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event,
 		const char *uri, GError *error, struct tab *t) {
@@ -1390,6 +1448,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "close", G_CALLBACK(on_close), t);
 	g_signal_connect(t->view, "decide-policy", G_CALLBACK(on_decide_policy), t);
 	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
+	g_signal_connect(t->view, "run-file-chooser", G_CALLBACK(on_file_chooser), t);
 	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
 	g_signal_connect(t->view, "script-dialog", G_CALLBACK(on_script_dialog), t);
 	g_signal_connect(t->view, "context-menu", G_CALLBACK(on_context_menu), t);
@@ -1886,7 +1945,8 @@ static void draw_dialog(GtkDrawingArea *area, cairo_t *cr, int w, int h,
 }
 
 static bool dialog_up(struct browser *b) {
-	return b->dialog != DIALOG_NONE;
+	/* GemWeb's own dialogs, or the GEM item selector (a page's file). */
+	return b->dialog != DIALOG_NONE || gem_alert_up(GTK_OVERLAY(b->overlay));
 }
 
 /* Shows (or, for DIALOG_NONE, takes away) the dialog set up in b. It holds
@@ -3961,6 +4021,7 @@ static GtkWidget *pixel_area(struct browser *b, int height,
 }
 
 static void load_css(void) {
+	gem_ui_load_css(); /* the shared GEM look (the item selector); ours on top */
 	char *css = g_strdup_printf(
 		"window.gemweb { background: #fff; }"
 		".gem-toolbar { background: #fff; border-bottom: 1px solid #000; }"

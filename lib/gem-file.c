@@ -20,8 +20,8 @@ struct selector {
 	GtkOverlay *host;
 	GtkWidget *box, *area, *dir_field, *name_field, *scroll;
 	GtkAdjustment *adj;  /* the first row shown */
-	char *title, *folder, *pattern;
-	bool save;
+	char *title, *folder, *pattern, *ok_label;
+	enum gem_file_mode mode;
 	GArray *entries;     /* struct entry: folders, then files */
 	int selected;        /* in entries, or -1 */
 	GArray *hits;
@@ -41,6 +41,11 @@ static int list_h(void) { return rows_y() - list_y() + ROWS * GEM_ROW_H + 1; }
 static int right_x(void) { return INNER + LIST_W + 2 * GEM_PAD; }
 static int right_w(void) { return BOX_W - INNER - right_x(); }
 static int box_h(void) { return list_y() + list_h() + INNER; }
+
+void gem_file_size(int *w, int *h) {
+	*w = BOX_W;
+	*h = box_h();
+}
 
 /* ---- The folder ---------------------------------------------------------- */
 
@@ -104,7 +109,7 @@ static void read_folder(struct selector *s) {
 		char *path = g_build_filename(s->folder, name, NULL);
 		bool folder = g_file_test(path, G_FILE_TEST_IS_DIR);
 		g_free(path);
-		if (folder || matches(s->pattern, name)) {
+		if (folder || (s->mode != GEM_FILE_FOLDER && matches(s->pattern, name))) {
 			struct entry e = { g_strdup(name), folder };
 			g_array_append_val(s->entries, e);
 		}
@@ -183,7 +188,8 @@ static void paint(cairo_t *cr, int w, int h, void *data) {
 	gem_text(cr, s->title, (w - (int)gem_text_width(cr, s->title)) / 2, INNER,
 		GEM_ROW_H);
 	gem_text(cr, "Directory:", INNER, dir_label_y(), GEM_ROW_H);
-	gem_text(cr, "Selection:", right_x(), list_y(), GEM_ROW_H);
+	gem_text(cr, s->mode == GEM_FILE_FOLDER ? "Folder:" : "Selection:", right_x(),
+		list_y(), GEM_ROW_H);
 
 	/* The list: a window of its own, with a close box and the folder's
 	 * name in its title bar. */
@@ -232,10 +238,11 @@ static void paint(cairo_t *cr, int w, int h, void *data) {
 		gem_grey_out(cr, lx + 1, rows_y(), rows_w - 1, GEM_ROW_H);
 	}
 
-	int bw = MAX(gem_button_width("Cancel"), gem_button_width("OK")) + GEM_PAD;
+	int bw = MIN(MAX(gem_button_width("Cancel"), gem_button_width(s->ok_label)) +
+		GEM_PAD, right_w());
 	int bx = right_x() + (right_w() - bw) / 2;
 	int by = ly + lh - 2 * GEM_BUTTON_H - GEM_PAD;
-	gem_button(cr, s->hits, bx, by, bw, "OK", HIT_OK, true);
+	gem_button(cr, s->hits, bx, by, bw, s->ok_label, HIT_OK, true);
 	gem_button(cr, s->hits, bx, by + GEM_BUTTON_H + GEM_PAD, bw, "Cancel",
 		HIT_CANCEL, false);
 }
@@ -257,6 +264,7 @@ static void finish(struct selector *s, const char *path) {
 	g_free(s->title);
 	g_free(s->folder);
 	g_free(s->pattern);
+	g_free(s->ok_label);
 	g_free(s);
 }
 
@@ -276,7 +284,31 @@ static void replace_answered(int button, void *data) {
 	g_free(r);
 }
 
+/* A folder chosen: the one named (or selected), else the one we're in. */
+static void ok_folder(struct selector *s) {
+	const char *name = gtk_editable_get_text(GTK_EDITABLE(s->name_field));
+	char *path = name[0] == '\0' ? g_strdup(s->folder) :
+		name[0] == '/' ? g_strdup(name) : name[0] == '~' ?
+		g_strconcat(g_get_home_dir(), name + 1, NULL) :
+		g_build_filename(s->folder, name, NULL);
+	if (!g_file_test(path, G_FILE_TEST_IS_DIR)) {
+		char *msg = g_strdup_printf("There's no folder called \"%s\" here.", name);
+		static const char *const buttons[] = { "OK", NULL };
+		gem_alert(s->host, GEM_ALERT_NOTE, msg, buttons, 0, 0, NULL, NULL);
+		g_free(msg);
+	} else {
+		char *canon = g_canonicalize_filename(path, NULL);
+		finish(s, canon);
+		g_free(canon);
+	}
+	g_free(path);
+}
+
 static void ok(struct selector *s) {
+	if (s->mode == GEM_FILE_FOLDER) {
+		ok_folder(s);
+		return;
+	}
 	const char *name = gtk_editable_get_text(GTK_EDITABLE(s->name_field));
 	if (name[0] == '\0') {
 		if (s->selected >= 0) {
@@ -301,7 +333,8 @@ static void ok(struct selector *s) {
 		return;
 	}
 	bool exists = g_file_test(path, G_FILE_TEST_EXISTS);
-	if (!s->save && !exists) {
+	bool save = s->mode == GEM_FILE_SAVE;
+	if (!save && !exists) {
 		char *msg = g_strdup_printf("There's no file called \"%s\" here.", name);
 		static const char *const buttons[] = { "OK", NULL };
 		gem_alert(s->host, GEM_ALERT_NOTE, msg, buttons, 0, 0, NULL, NULL);
@@ -309,7 +342,7 @@ static void ok(struct selector *s) {
 		g_free(path);
 		return;
 	}
-	if (s->save && exists) {
+	if (save && exists) {
 		char *base = g_path_get_basename(path);
 		char *msg = g_strdup_printf("\"%s\" is already there.\nReplace it?", base);
 		struct replacing *r = g_new(struct replacing, 1);
@@ -332,7 +365,7 @@ static void select_entry(struct selector *s, int i) {
 	}
 	s->selected = i;
 	struct entry *e = &g_array_index(s->entries, struct entry, i);
-	if (!e->folder) {
+	if (!e->folder || s->mode == GEM_FILE_FOLDER) {
 		gtk_editable_set_text(GTK_EDITABLE(s->name_field), e->name);
 	}
 	int top = (int)gtk_adjustment_get_value(s->adj);
@@ -360,6 +393,9 @@ static void pressed(GtkGestureClick *g, int n, double x, double y,
 			char *path = g_build_filename(s->folder, e->name, NULL);
 			go_to(s, path);
 			g_free(path);
+			if (s->mode == GEM_FILE_FOLDER) { /* in it now: it's the choice */
+				gtk_editable_set_text(GTK_EDITABLE(s->name_field), "");
+			}
 		} else if (n == 2) {
 			ok(s);
 		}
@@ -419,7 +455,7 @@ static gboolean key(GtkEventControllerKey *c, guint keyval, guint keycode,
 static void name_activated(GtkEntry *e, gpointer data) {
 	struct selector *s = data;
 	const char *name = gtk_editable_get_text(GTK_EDITABLE(s->name_field));
-	if (name[0] == '\0' && s->selected >= 0) {
+	if (name[0] == '\0' && s->selected >= 0 && s->mode != GEM_FILE_FOLDER) {
 		struct entry *en = &g_array_index(s->entries, struct entry, s->selected);
 		if (en->folder) {
 			char *path = g_build_filename(s->folder, en->name, NULL);
@@ -440,10 +476,58 @@ static void dir_activated(GtkEntry *e, gpointer data) {
 void gem_file_select(GtkOverlay *host, const char *title, bool save,
 		const char *folder, const char *name, const char *pattern,
 		gem_file_fn done, void *data) {
+	gem_file_choose(host, title, save ? GEM_FILE_SAVE : GEM_FILE_OPEN, folder,
+		name, pattern, NULL, done, data);
+}
+
+/* The MIME database's globs: "weight:type:glob[:flags]" a line. A type
+ * ending in a star ("image/" and a star) is the whole kind. */
+char *gem_file_pattern_for_types(const char *const *types) {
+	GPtrArray *globs = g_ptr_array_new_with_free_func(g_free);
+	GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
+	const char *files[] = { "/usr/local/share/mime/globs2",
+		"/usr/share/mime/globs2" };
+	for (guint d = 0; d < G_N_ELEMENTS(files); d++) {
+		char *text = NULL;
+		if (!g_file_get_contents(files[d], &text, NULL, NULL)) {
+			continue;
+		}
+		char **lines = g_strsplit(text, "\n", -1);
+		for (int i = 0; lines[i] != NULL; i++) {
+			char **f = g_strsplit(lines[i], ":", 4);
+			for (int t = 0; lines[i][0] != '#' && g_strv_length(f) >= 3 &&
+					types[t] != NULL; t++) {
+				bool kind = g_str_has_suffix(types[t], "/*");
+				bool match = kind ? strncmp(f[1], types[t],
+					strlen(types[t]) - 1) == 0 : strcmp(f[1], types[t]) == 0;
+				char *glob = g_ascii_strdown(f[2], -1);
+				if (match && !g_hash_table_contains(seen, glob)) {
+					g_ptr_array_add(globs, glob);
+					g_hash_table_add(seen, glob);
+				} else {
+					g_free(glob);
+				}
+			}
+			g_strfreev(f);
+		}
+		g_strfreev(lines);
+		g_free(text);
+	}
+	g_ptr_array_add(globs, NULL);
+	char *pattern = globs->len > 1 ? g_strjoinv(",", (char **)globs->pdata) : NULL;
+	g_hash_table_destroy(seen);
+	g_ptr_array_unref(globs);
+	return pattern;
+}
+
+void gem_file_choose(GtkOverlay *host, const char *title,
+		enum gem_file_mode mode, const char *folder, const char *name,
+		const char *pattern, const char *ok, gem_file_fn done, void *data) {
 	struct selector *s = g_new0(struct selector, 1);
 	s->host = host;
 	s->title = g_strdup(title);
-	s->save = save;
+	s->mode = mode;
+	s->ok_label = g_strdup(ok != NULL && ok[0] != '\0' ? ok : "OK");
 	s->pattern = g_strdup(pattern != NULL ? pattern : "*");
 	s->done = done;
 	s->data = data;

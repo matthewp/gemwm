@@ -39,6 +39,7 @@ char *message_body_text(struct message *m);
 struct draft {
 	char *to, *cc, *subject, *body;
 	char *in_reply_to, *references;
+	GPtrArray *files;  /* paths of files to attach, or NULL (not owned) */
 };
 
 /* A reply to m, to its sender (or with all, everyone but me too), the

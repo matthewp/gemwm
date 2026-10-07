@@ -598,7 +598,10 @@ it's remembered: its pages open that way from then on (the sites are in
 
 Middle-click or Ctrl+click opens a link in a background tab; middle-click a
 tab to close it. Text that isn't an address is searched. Downloads go to
-`~/Downloads`; cookies and site data live in `~/.local/share/gemweb`.
+`~/Downloads`; cookies and site data live in `~/.local/share/gemweb`. A
+page's Choose File (an upload) opens GEM's item selector, showing the
+kinds of file the page takes (edit the directory line's pattern to `*`
+for any).
 
 The home page and search engine are set in `~/.config/gemweb/settings`
 (changes apply to the next page loaded, no restart needed):
@@ -726,7 +729,10 @@ Archive (A) moves a message to the folder the server flags as the archive
 the first time it's needed; Delete moves it to Trash (and out of Trash,
 deletes it for good). Either way, reading, the next message opens.
 **File > Empty Trash...** deletes everything in Trash for good, on the
-server too, once you've said so.
+server too, once you've said so. A message's attachments are saved where
+you choose, in GEM's item selector (Downloads, and its own name, to
+start: Return saves it there); **Attach...** in a new message adds files,
+listed under the subject, each with a cross to take it off.
 In the list, Shift-click (or Shift+Up/Down) selects a run of messages,
 Ctrl-click adds or removes one, and Ctrl+A selects them all; Archive,
 Delete and Mark as Read (^U: read, or unread if they all are) then act on

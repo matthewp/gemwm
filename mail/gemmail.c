@@ -14,6 +14,7 @@
  * own (imap.c); messages are taken apart and put together with GMime
  * (message.c). The account is in ~/.config/gemmail/settings (account.h).
  */
+#include <glib/gstdio.h>
 #include <gmime/gmime.h>
 #include <gtk/gtk.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #include "cache.h"
 #include "categories.h"
 #include "gem-alert.h"
+#include "gem-file.h"
 #include "gem-draw.h"
 #include "gem-scrollbar.h"
 #include "imap.h"
@@ -65,6 +67,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
+	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
 
@@ -2307,38 +2310,40 @@ static struct summary *selected_summary(void) {
 		ui.selected < message_count() ? ui.messages->pdata[ui.selected] : NULL;
 }
 
+/* An attachment saved where you choose: GEM's item selector, starting in
+ * Downloads with its own name, so Return saves it there. */
+static void attachment_chosen(const char *path, void *data) {
+	GBytes *bytes = data;
+	if (path != NULL) {
+		GError *e = NULL;
+		if (g_file_set_contents(path, g_bytes_get_data(bytes, NULL),
+				g_bytes_get_size(bytes), &e)) {
+			char *shown = g_str_has_prefix(path, g_get_home_dir()) ?
+				g_strconcat("~", path + strlen(g_get_home_dir()), NULL) :
+				g_strdup(path);
+			set_status("Saved %s", shown);
+			g_free(shown);
+		} else {
+			set_status("Couldn't save it: %s", e->message);
+			g_error_free(e);
+		}
+	}
+	g_bytes_unref(bytes);
+}
+
 static void save_attachment(int index) {
 	struct attachment *a = ui.open != NULL &&
 		index < (int)ui.open->attachments->len ?
 		ui.open->attachments->pdata[index] : NULL;
-	if (a == NULL) {
+	if (a == NULL || gem_alert_up(ui.host)) {
 		return;
 	}
 	const char *dir = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
-	char *folder = g_strdup(dir != NULL ? dir :
-		g_build_filename(g_get_home_dir(), "Downloads", NULL));
+	char *folder = dir != NULL ? g_strdup(dir) :
+		g_build_filename(g_get_home_dir(), "Downloads", NULL);
 	g_mkdir_with_parents(folder, 0755);
-	char *path = NULL;
-	for (int n = 1; path == NULL; n++) {
-		char *name = n == 1 ? g_strdup(a->filename) :
-			g_strdup_printf("%d-%s", n, a->filename);
-		path = g_build_filename(folder, name, NULL);
-		g_free(name);
-		if (g_file_test(path, G_FILE_TEST_EXISTS)) {
-			g_clear_pointer(&path, g_free);
-		}
-	}
-	GError *e = NULL;
-	if (g_file_set_contents(path, g_bytes_get_data(a->data, NULL),
-			g_bytes_get_size(a->data), &e)) {
-		char *base = g_path_get_basename(path);
-		set_status("Saved Downloads/%s", base);
-		g_free(base);
-	} else {
-		set_status("Couldn't save it: %s", e->message);
-		g_error_free(e);
-	}
-	g_free(path);
+	gem_file_choose(ui.host, "Save Attachment", GEM_FILE_SAVE, folder,
+		a->filename, NULL, "Save", attachment_chosen, g_bytes_ref(a->data));
 	g_free(folder);
 }
 
@@ -3795,6 +3800,10 @@ static void ask_password(const char *why, void *data) {
 
 struct compose {
 	GtkWidget *window, *bar, *to, *cc, *subject, *body, *info;
+	GtkOverlay *host;       /* over the window's content: the item selector */
+	GtkWidget *files_row;   /* what's attached, shown when anything is */
+	GPtrArray *files;       /* their paths */
+	GArray *file_hits;
 	char *in_reply_to, *references;
 	char *status;
 	bool sending;
@@ -3804,6 +3813,8 @@ struct compose {
 };
 
 static void compose_free(struct compose *c) {
+	g_ptr_array_unref(c->files);
+	g_array_unref(c->file_hits);
 	g_free(c->in_reply_to);
 	g_free(c->references);
 	g_free(c->status);
@@ -3822,7 +3833,8 @@ static void paint_bar(cairo_t *cr, int w, int h, void *data) {
 	g_array_set_size(c->hits, 0);
 	int x = PAD;
 	x += button(cr, c->hits, x, PAD, "Send", ACT_SEND, 0, true) + PAD;
-	button(cr, c->hits, x, PAD, "Cancel", ACT_CANCEL, 0, false);
+	x += button(cr, c->hits, x, PAD, "Cancel", ACT_CANCEL, 0, false) + 2 * PAD;
+	button(cr, c->hits, x, PAD, "Attach...", ACT_ATTACH, 0, false);
 	if (c->sending) {
 		gem_grey_out(cr, 0, 0, w, h);
 	}
@@ -3830,6 +3842,74 @@ static void paint_bar(cairo_t *cr, int w, int h, void *data) {
 
 static void draw_bar(GtkDrawingArea *a, cairo_t *cr, int w, int h, gpointer d) {
 	gem_draw_pixelated(cr, w, h, paint_bar, d);
+}
+
+/* What's attached: each file, its size, and a cross to take it off. */
+static void paint_files(cairo_t *cr, int w, int h, void *data) {
+	struct compose *c = data;
+	g_array_set_size(c->file_hits, 0);
+	gem_black(cr);
+	gem_text(cr, "Attached:", PAD, (h - ROW_H) / 2, ROW_H);
+	int x = PAD + 84;
+	for (guint i = 0; i < c->files->len; i++) {
+		const char *path = c->files->pdata[i];
+		char *base = g_path_get_basename(path);
+		GStatBuf st;
+		char *size = g_stat(path, &st) == 0 ? g_format_size(st.st_size) :
+			g_strdup("gone");
+		char *label = g_strdup_printf("%s (%s)", base, size);
+		int tw = (int)gem_text_width(cr, label) + PAD + ROW_H;
+		if (x + tw > w - PAD) {
+			gem_text(cr, "...", x, (h - ROW_H) / 2, ROW_H);
+			g_free(label);
+			g_free(size);
+			g_free(base);
+			break;
+		}
+		int y = (h - ROW_H) / 2;
+		gem_frame(cr, x, y, tw, ROW_H, 1);
+		gem_text(cr, label, x + PAD / 2, y, ROW_H);
+		/* The cross, as GEM's close box. */
+		int bx = x + tw - ROW_H + 4, by = y + 4, bs = ROW_H - 8;
+		for (int k = 0; k < bs; k++) {
+			gem_fill(cr, bx + k, by + k, 1, 1);
+			gem_fill(cr, bx + bs - 1 - k, by + k, 1, 1);
+		}
+		add_hit(c->file_hits, x + tw - ROW_H, y, ROW_H, ROW_H, ACT_UNATTACH, i);
+		x += tw + PAD;
+		g_free(label);
+		g_free(size);
+		g_free(base);
+	}
+}
+
+static void draw_files(GtkDrawingArea *a, cairo_t *cr, int w, int h,
+		gpointer d) {
+	gem_draw_pixelated(cr, w, h, paint_files, d);
+}
+
+static void files_changed(struct compose *c) {
+	gtk_widget_set_visible(c->files_row, c->files->len > 0);
+	gtk_widget_queue_draw(c->files_row);
+}
+
+static void attach_chosen(const char *path, void *data) {
+	struct compose *c = data;
+	if (path != NULL) {
+		g_ptr_array_add(c->files, g_strdup(path));
+		files_changed(c);
+	}
+	gtk_widget_grab_focus(c->body);
+}
+
+static void files_pressed(GtkGestureClick *g, int n, double x, double y,
+		struct compose *c) {
+	const struct hit *h = hit_at(c->file_hits, x, y);
+	if (h != NULL && h->action == ACT_UNATTACH && !c->sending &&
+			h->index < (int)c->files->len) {
+		g_ptr_array_remove_index(c->files, h->index);
+		files_changed(c);
+	}
 }
 
 static void paint_compose_info(cairo_t *cr, int w, int h, void *data) {
@@ -3892,6 +3972,7 @@ static void send_message(struct compose *c) {
 	d.body = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
 	d.in_reply_to = c->in_reply_to;
 	d.references = c->references;
+	d.files = c->files;
 	char **recipients = NULL, *error = NULL;
 	GBytes *message = draft_build(&d, ui.account->from, &recipients, &error);
 	g_free(d.body);
@@ -3911,7 +3992,13 @@ static void send_message(struct compose *c) {
 }
 
 static void compose_run(struct compose *c, enum action action) {
-	if (action == ACT_SEND) {
+	if (gem_alert_up(c->host)) {
+		return; /* the item selector's up */
+	}
+	if (action == ACT_ATTACH && !c->sending) {
+		gem_file_choose(c->host, "Attach a File", GEM_FILE_OPEN, NULL, NULL, NULL,
+			"Attach", attach_chosen, c);
+	} else if (action == ACT_SEND) {
 		send_message(c);
 	} else if (action == ACT_CANCEL && !c->sending) {
 		gtk_window_destroy(GTK_WINDOW(c->window));
@@ -3929,6 +4016,8 @@ static void bar_pressed(GtkGestureClick *g, int n, double x, double y,
 static void compose_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "Message");
 	app_menu_add_item(m, ACT_SEND, "Send", "^Return", 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_ATTACH, "Attach File...", NULL, 0);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_CANCEL, "Discard", "^W", 0);
 }
@@ -3974,6 +4063,8 @@ static GtkWidget *field_row(const char *label, GtkWidget **entry,
 static void compose(struct draft *d) {
 	struct compose *c = g_new0(struct compose, 1);
 	c->hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
+	c->file_hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
+	c->files = g_ptr_array_new_with_free_func(g_free);
 	c->in_reply_to = g_strdup(d->in_reply_to);
 	c->references = g_strdup(d->references);
 	c->window = gtk_window_new();
@@ -3996,6 +4087,16 @@ static void compose(struct draft *d) {
 	gtk_box_append(GTK_BOX(box), field_row("To:", &c->to, d->to));
 	gtk_box_append(GTK_BOX(box), field_row("Cc:", &c->cc, d->cc));
 	gtk_box_append(GTK_BOX(box), field_row("Subject:", &c->subject, d->subject));
+	c->files_row = gtk_drawing_area_new();
+	gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(c->files_row),
+		ROW_H + PAD);
+	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(c->files_row), draw_files, c,
+		NULL);
+	GtkGesture *unattach = gtk_gesture_click_new();
+	g_signal_connect(unattach, "pressed", G_CALLBACK(files_pressed), c);
+	gtk_widget_add_controller(c->files_row, GTK_EVENT_CONTROLLER(unattach));
+	gtk_widget_set_visible(c->files_row, FALSE);
+	gtk_box_append(GTK_BOX(box), c->files_row);
 
 	GtkWidget *scrolled = gtk_scrolled_window_new();
 	gtk_widget_add_css_class(scrolled, "gem-body-frame");
@@ -4019,7 +4120,10 @@ static void compose(struct draft *d) {
 	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(c->info), draw_compose_info,
 		c, NULL);
 	gtk_box_append(GTK_BOX(box), c->info);
-	gtk_window_set_child(GTK_WINDOW(c->window), box);
+	GtkWidget *overlay = gtk_overlay_new();
+	gtk_overlay_set_child(GTK_OVERLAY(overlay), box);
+	c->host = GTK_OVERLAY(overlay);
+	gtk_window_set_child(GTK_WINDOW(c->window), overlay);
 
 	GtkEventController *keys = gtk_shortcut_controller_new();
 	gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
