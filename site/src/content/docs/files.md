@@ -32,5 +32,7 @@ you write only what you change.
 | `~/.local/share/gemweb/` | GemWeb's cookies, site data, history and ad-block rules |
 | `~/.local/state/gemweb/zoom` | zoom remembered per site |
 | `~/.cache/gemmail/` | GemMail's mail, for offline reading and a quick start |
+| `~/.local/state/gemwm/gemview` | where each PDF was left, and its zoom |
+| `~/.local/state/gemwm/solitaire` | Solitaire's draw option and statistics |
 | `~/.local/share/gemwm/crossword/` | [crossword](/apps/crossword/) puzzles and progress |
 | `~/Pictures/Screenshots/` | [screenshots](/apps/screenshots/) (or `$GEMWM_SCREENSHOT_DIR`) |

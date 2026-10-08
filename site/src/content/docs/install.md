@@ -33,6 +33,7 @@ needs is installed, and left out when it isn't:
 | [GemWeb](/apps/gemweb/) | webkitgtk-6.0 (and GStreamer's plugins, for video and sound) |
 | [GemMail](/apps/gemmail/) | libetpan, GMime 3, webkitgtk-6.0 |
 | [GemWrite](/apps/gemwrite/) | GTK 4, libxml2, libarchive, enchant |
+| [GemView](/apps/gemview/) | GTK 4, poppler-glib |
 | [Crossword](/apps/crossword/) | GTK 4, libsoup 3 |
 | [Printing](/apps/printing/) | GTK 4, libcups |
 | [Volume](/apps/volume/) | GTK 4, libpulse |

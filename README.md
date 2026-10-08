@@ -163,6 +163,7 @@ The defaults are the TOS 1.0 desktop menus, plus some working items under
 Desk: **Internet > Web Browser** opens GemWeb (or your default browser if
 GemWeb isn't installed), **Internet > GemMail** opens GemMail (see
 GemMail), **Office > GemWrite** opens GemWrite (see GemWrite),
+**Office > GemView** opens GemView, the PDF viewer (see GemView),
 **Tools > Terminal** opens `$TERMINAL` (foot
 if unset), and **Tools > Printing** opens the printing window (see
 Printing). The menu bar reads
@@ -907,6 +908,36 @@ self-signed one, `certificate = ~/server.pem` trusts that one. Sent and
 Trash are found by the flags servers give them, or by name, or `sent =`
 `trash =` and `archive =`.
 
+## GemView
+
+GemView (`gemview`, Desk > Office) reads PDFs. The pages stand on GEM's
+grey, one under another, each outlined with a shadow, beside GEM's scroll
+bars, over an info line with the page you're on and the zoom. Poppler, the
+engine Evince uses, reads and draws them; a page is drawn at the screen's
+real resolution, so text is sharp at any zoom.
+
+- **File**: Open... (^O, in GEM's item selector), Print... (^P, GemWM's
+  print dialog), Close.
+- **Edit**: Find... (^F): a line over the info line; every match on the
+  pages showing is boxed and the current one inverted, Return and
+  Shift+Return (or ^G and ^Shift+G) go to the next and previous, Escape
+  closes it.
+- **View**: Thumbnails (F9), a list of the pages down the left, small, the
+  one you're reading framed and its number inverted, following as you read;
+  click one to go there (shown or not is kept). Fit Width (the default), Fit
+  Page, Actual Size (^0), Zoom In and Out (^+, ^-, or Ctrl and the wheel).
+- **Go**: the previous and next page (Page Up, Page Down, Space), the first
+  and last (Home, End).
+
+Links work: to the web, in your browser; within the document, there. A file
+that changes on disk (a LaTeX run) is read again where you were, and each
+file opens at the page and zoom it was left at (kept in
+`~/.local/state/gemwm/gemview`). To make it the PDF viewer for everything
+else: `xdg-mime default org.gemwm.GemView.desktop application/pdf`.
+
+It's built when poppler-glib is installed (`pacman -S poppler-glib`).
+Poppler is GPL, so a built `gemview` is too; GemWM's own code stays BSD.
+
 ## GemWrite
 
 GemWrite (`gemwrite`, Desk > Office) is a word processor. Pages show as
@@ -1046,6 +1077,8 @@ their own licenses:
 
 - `protocols/wlr-layer-shell-unstable-v1.xml`, vendored from wlroots
   (license in the file)
+- `gemview`, the PDF viewer, links with Poppler (GPL), so a built
+  `gemview` is under the GPL too; its source is GemWM's, BSD
 - `extras/fonts/`, the Atari ST font, built from EmuTOS and so under the
   GPL, version 2 or later (see `extras/fonts/README.md`). It is installed
   as a font file for the terminal and is not part of the GemWM programs.

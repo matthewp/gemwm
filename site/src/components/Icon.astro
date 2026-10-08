@@ -65,6 +65,13 @@ const icons: Record<string, string> = {
 		hl(9, 6, 9), hl(9, 12, 15), hl(9, 15, 15), hl(9, 18, 15), hl(9, 21, 15),
 		hl(9, 24, 10),
 	].join(''),
+	viewer: [
+		path('M5.5 2.5 H19.5 L24.5 7.5 V29.5 H5.5 Z'),
+		path('M19.5 2.5 V7.5 H24.5', 'none'),
+		hl(8, 6, 9), hl(8, 10, 13), hl(8, 13, 13), hl(8, 16, 7),
+		circle(20, 20, 5.5),
+		`<path d="M24 24 L29 29" stroke="#000" stroke-width="3"/>`,
+	].join(''),
 	terminal: [
 		box(3, 3, 26, 20), fill(5, 5, 22, 16),
 		path('M8 9 L12 12 L8 15', 'none'),

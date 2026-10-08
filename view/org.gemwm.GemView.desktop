@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GemView
+GenericName=PDF Viewer
+Comment=Read PDFs, drawn as GEM would have
+Exec=gemview %F
+MimeType=application/pdf;
+Categories=Office;Viewer;
+StartupNotify=false

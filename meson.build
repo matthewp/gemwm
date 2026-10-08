@@ -350,6 +350,26 @@ if gtk4.found()
 	install_data('solitaire/org.gemwm.Solitaire.desktop',
 		install_dir: get_option('datadir') / 'applications')
 
+	# gemview: a PDF viewer. Built when poppler-glib is there; Poppler is
+	# GPL, so a gemview binary is too (GemWM's own code stays BSD).
+	poppler = dependency('poppler-glib', required: false)
+	if poppler.found()
+		executable(
+			'gemview',
+			['view/gemview.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+				'lib/gem-draw.c', 'lib/gem-file.c', 'lib/gem-popup.c',
+				'lib/gem-print.c', 'lib/gem-scrollbar.c', 'lib/gem-ui.c',
+				client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gtk4-unix-print'), poppler, wayland_client, cairo,
+				libm],
+			include_directories: 'lib',
+			install: true,
+		)
+		install_data('view/org.gemwm.GemView.desktop',
+			install_dir: get_option('datadir') / 'applications')
+	endif
+
 	# gemwm-printing: the printing menu app and window. Also needs libcups,
 	# which it asks about the jobs and printers.
 	cups = dependency('cups', required: false)
