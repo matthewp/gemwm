@@ -128,6 +128,7 @@ static const char default_config[] =
 	"\n"
 	"[Desk > Games]\n"
 	"Crossword Puzzle = gemwm-crossword\n"
+	"Solitaire = gemwm-solitaire\n"
 	"\n"
 	"[Desk > Tools]\n"
 	"Terminal = ${TERMINAL:-gemwm-terminal}\n"

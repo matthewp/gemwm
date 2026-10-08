@@ -422,6 +422,23 @@ on to a second page if they need to). The print dialog has "Include my
 answers" to print what you've filled in. To make a PDF without the dialog: `gemwm-crossword --pdf OUT.pdf [--blank] FILE.puz` (with your
 saved answers, unless `--blank`).
 
+## Solitaire
+
+Desk > Games > Solitaire (`gemwm-solitaire`): Klondike, drawn as GEM would
+have drawn it, white cards on the ST palette's dark green. Drag cards as
+GEM moved windows, an outline following the pointer, or double-click one to
+send it to its foundation. A card a move uncovers turns over by itself, and
+once every card is face up the rest go home on their own; winning ends in
+the cascade. Click the stock (or press Space) to draw, and its empty place
+to turn the waste back over.
+
+**Game** has New Game (^N or F2; a game under way counts as lost, so it
+asks), Undo (^Z, as far back as you like) and Statistics..., and
+**Options** Draw One or Draw Three. The info line has the moves and the
+time. The option and the statistics (games played and won, the winning
+streak and the longest) are kept in `~/.local/state/gemwm/solitaire`. It
+needs GTK 4.
+
 ## Desktop
 
 Out of the box the desktop is GemWM's sunburst

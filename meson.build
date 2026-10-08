@@ -337,6 +337,19 @@ if gtk4.found()
 			install_dir: get_option('datadir') / 'applications')
 	endif
 
+	# gemwm-solitaire: Klondike, drawn as GEM would have.
+	executable(
+		'gemwm-solitaire',
+		['solitaire/gemwm-solitaire.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+			'lib/gem-draw.c', 'lib/gem-ui.c', client_protocols],
+		dependencies: [gtk4, dependency('gtk4-wayland'), wayland_client, cairo,
+			libm],
+		include_directories: 'lib',
+		install: true,
+	)
+	install_data('solitaire/org.gemwm.Solitaire.desktop',
+		install_dir: get_option('datadir') / 'applications')
+
 	# gemwm-printing: the printing menu app and window. Also needs libcups,
 	# which it asks about the jobs and printers.
 	cups = dependency('cups', required: false)

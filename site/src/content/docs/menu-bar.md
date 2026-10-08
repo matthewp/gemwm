@@ -40,7 +40,8 @@ The defaults are the TOS 1.0 desktop menus, plus working items under Desk:
 **Internet > Web Browser** opens [GemWeb](/apps/gemweb/) (or your default
 browser if GemWeb isn't installed), **Internet > GemMail**, **Office >
 GemWrite**, **Tools > Terminal** (`$TERMINAL`, foot if unset), **Tools >
-Printing**, **Tools > Notifications** and **Games > Crossword Puzzle**.
+Printing**, **Tools > Notifications**, and **Games > Crossword Puzzle** and
+**Solitaire**.
 
 The menu bar reads its config at startup; restart it with:
 

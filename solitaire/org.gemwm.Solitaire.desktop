@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Solitaire
+Comment=Klondike, the patience game, drawn as GEM would have
+Exec=gemwm-solitaire
+Categories=Game;CardGame;
+StartupNotify=false
