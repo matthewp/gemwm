@@ -15,6 +15,7 @@
  *
  * Puzzles and saves live in ~/.local/share/gemwm/crossword/.
  */
+#include <errno.h>
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <libsoup/soup.h>
@@ -22,6 +23,8 @@
 #include <string.h>
 #include "app-menu.h"
 #include "gem-draw.h"
+#include "gem-popup.h"
+#include "gem-ui.h"
 #include "gem-print.h"
 #include "print.h"
 #include "puz.h"
@@ -233,7 +236,13 @@ enum action {
 	ACT_CLOSE,
 	ACT_SHOW_DOWNLOADS,
 	ACT_PRINT,
+	ACT_DELETE,      /* hit.id: a library entry's id; none, the open one */
+	ACT_ROW_MENU,    /* hit.id: a library entry's id, for its menu */
+	ACT_ROW,         /* hit.id: the library row, for a right-click */
 };
+
+/* A library row's menu (gem-popup ids). */
+enum { ROW_OPEN = 1, ROW_DELETE };
 
 struct hit {
 	int x, y, w, h;
@@ -271,7 +280,14 @@ static struct {
 	int panel_top, panel_h, panel_content[2];
 	int panel_w;
 
-	bool asking_clear;     /* the Clear alert is up */
+	char *path;            /* the open puzzle's file */
+
+	/* The alert that's up, if any, and for Delete, which puzzle. */
+	enum { ASK_NONE, ASK_CLEAR, ASK_DELETE } asking;
+	char *asking_id, *asking_title;
+
+	struct gem_popup *popup; /* a library row's menu */
+	char *popup_id;          /* whose */
 } ui;
 
 static void set_message(const char *format, ...) G_GNUC_PRINTF(1, 2);
@@ -497,7 +513,9 @@ static void open_puzzle(const char *path) {
 	}
 	puz_free(ui.puz);
 	g_free(ui.id);
+	g_free(ui.path);
 	ui.puz = p;
+	ui.path = g_strdup(path);
 	char *base = g_path_get_basename(path);
 	ui.id = g_str_has_suffix(base, ".puz") ?
 		g_strndup(base, strlen(base) - 4) : g_strdup(base);
@@ -537,11 +555,77 @@ static void show_library(void) {
 		save();
 	}
 	ui.playing = false;
-	ui.asking_clear = false;
+	ui.asking = ASK_NONE;
 	g_clear_pointer(&ui.library, g_ptr_array_unref);
 	ui.library = library_scan();
 	gtk_window_set_title(GTK_WINDOW(ui.window), "Crossword Puzzle");
 	changed();
+}
+
+/* Only the library's own puzzles can be deleted: one opened from
+ * elsewhere (gemwm-crossword FILE.puz) is the user's file, not ours. */
+static char *library_path(const char *id) {
+	char *dir = data_dir();
+	char *name = g_strconcat(id, ".puz", NULL);
+	char *path = g_build_filename(dir, name, NULL);
+	g_free(dir);
+	g_free(name);
+	return path;
+}
+
+static bool deletable(void) {
+	if (!ui.playing || ui.path == NULL) {
+		return false;
+	}
+	char *ours = library_path(ui.id);
+	bool yes = strcmp(ours, ui.path) == 0;
+	g_free(ours);
+	return yes;
+}
+
+/* Asks before deleting a puzzle: id, or the open one for NULL. */
+static void ask_delete(const char *id) {
+	const char *title = NULL;
+	if (id == NULL) {
+		if (!deletable()) {
+			return;
+		}
+		id = ui.id;
+		title = ui.puz->title;
+	}
+	for (guint i = 0; title == NULL && ui.library != NULL &&
+			i < ui.library->len; i++) {
+		struct entry *e = ui.library->pdata[i];
+		if (strcmp(e->id, id) == 0) {
+			title = e->title;
+		}
+	}
+	g_free(ui.asking_id);
+	g_free(ui.asking_title);
+	ui.asking_id = g_strdup(id);
+	ui.asking_title = g_strdup(title != NULL && title[0] ? title : id);
+	ui.asking = ASK_DELETE;
+}
+
+/* The puzzle and its saved letters, gone; back to the library. A recent
+ * one can be downloaded again. */
+static void delete_puzzle(const char *id) {
+	char *path = library_path(id), *saved = save_path(id);
+	bool open = ui.playing && g_strcmp0(ui.id, id) == 0;
+	if (g_unlink(path) != 0 && errno != ENOENT) {
+		set_message("Can't delete %s: %s", path, g_strerror(errno));
+	} else {
+		g_unlink(saved);
+		if (open) {
+			/* Not saved again on the way out. */
+			g_clear_pointer(&ui.puz, puz_free);
+			ui.playing = false;
+		}
+		set_message("Deleted %s.", ui.asking_title ? ui.asking_title : id);
+	}
+	g_free(path);
+	g_free(saved);
+	show_library();
 }
 
 /* ---- Downloads ---------------------------------------------------------- */
@@ -678,22 +762,50 @@ static void clipped(cairo_t *cr, const char *s, int x, int y, int w, int h) {
 	cairo_restore(cr);
 }
 
+/* A row's menu: a small box with GEM's down arrow, inverted while held. */
+static void menu_gadget(cairo_t *cr, int x, int y, const char *id) {
+	int s = BUTTON_H;
+	bool held = ui.pressed == ACT_ROW_MENU && g_strcmp0(ui.pressed_id, id) == 0;
+	gem_black(cr);
+	if (held) {
+		gem_fill(cr, x, y, s, s);
+		gem_white(cr);
+	} else {
+		gem_frame(cr, x, y, s, s, 1);
+	}
+	/* The arrow, row by row: 7 wide narrowing to 1. */
+	for (int i = 0; i < 4; i++) {
+		gem_fill(cr, x + s / 2 - 3 + i, y + s / 2 - 2 + i, 7 - 2 * i, 1);
+	}
+	add_hit(x, y, s, s, ACT_ROW_MENU, id, 0, 0);
+}
+
 static int row_line(cairo_t *cr, const char *title, const char *detail,
 		const char *status, const char *label, enum action action,
 		const char *id, bool enabled, int y, int w) {
 	int bw = button_width(cr, label);
 	int bx = w - PAD - bw;
+	/* A library puzzle has a menu (Open, Delete...) at the left. */
+	int tx = 2 * PAD;
+	if (action == ACT_OPEN) {
+		menu_gadget(cr, PAD, y + (ROW_H - BUTTON_H) / 2, id);
+		tx = 2 * PAD + BUTTON_H;
+	}
 	int sw = status ? (int)gem_text_width(cr, status) : 0;
 	gem_black(cr);
 	if (status != NULL) {
 		gem_text(cr, status, bx - PAD - sw, y, ROW_H);
 	}
-	int text_w = bx - 2 * PAD - sw - 2 * PAD;
+	int text_w = bx - tx - sw - 2 * PAD;
 	char *line = detail && detail[0] ? g_strdup_printf("%s  (%s)", title, detail) :
 		g_strdup(title);
-	clipped(cr, line, 2 * PAD, y, text_w, ROW_H);
+	clipped(cr, line, tx, y, text_w, ROW_H);
 	g_free(line);
 	button(cr, bx, y + (ROW_H - BUTTON_H) / 2, label, action, id, enabled);
+	if (action == ACT_OPEN) {
+		/* After the buttons, so they're found first. */
+		add_hit(0, y, w, ROW_H, ACT_ROW, id, 0, 0);
+	}
 	return y + ROW_H;
 }
 
@@ -1082,11 +1194,16 @@ static void paint_game(cairo_t *cr, int w, int h) {
 }
 
 static void paint_alert(cairo_t *cr, int w, int h) {
-	static const char *const lines[] = { "Clear the whole puzzle?",
-		"Your letters will be lost." };
+	char *question = ui.asking == ASK_DELETE ?
+		g_strdup_printf("Delete %s?", ui.asking_title) :
+		g_strdup("Clear the whole puzzle?");
+	const char *lines[] = { question, ui.asking == ASK_DELETE ?
+		"It and your letters will be gone." : "Your letters will be lost." };
+	const char *yes = ui.asking == ASK_DELETE ? "Delete" : "Clear";
 	int tw = MAX((int)gem_text_width(cr, lines[0]),
 		(int)gem_text_width(cr, lines[1]));
-	int bw = MAX(button_width(cr, "Clear"), button_width(cr, "Cancel"));
+	tw = MIN(tw, w - 12 * PAD);
+	int bw = MAX(button_width(cr, yes), button_width(cr, "Cancel"));
 	int aw = MAX(tw, 2 * bw + PAD) + 4 * PAD, ah = 2 * 18 + BUTTON_H + 5 * PAD;
 	int ax = (w - aw) / 2, ay = (h - ah) / 2;
 	gem_white(cr);
@@ -1095,11 +1212,12 @@ static void paint_alert(cairo_t *cr, int w, int h) {
 	gem_frame(cr, ax - 3, ay - 3, aw + 6, ah + 6, 1);
 	gem_frame(cr, ax, ay, aw, ah, 2);
 	for (int i = 0; i < 2; i++) {
-		gem_text(cr, lines[i], ax + 2 * PAD, ay + 2 * PAD + i * 18, 18);
+		clipped(cr, lines[i], ax + 2 * PAD, ay + 2 * PAD + i * 18, tw, 18);
 	}
+	g_free(question);
 	int by = ay + ah - 2 * PAD - BUTTON_H;
 	int bx = ax + aw - 2 * PAD - 2 * bw - PAD;
-	button(cr, bx, by, "Clear", ACT_ALERT_YES, NULL, true);
+	button(cr, bx, by, yes, ACT_ALERT_YES, NULL, true);
 	/* The safe answer is the default: a thicker border. */
 	button(cr, bx + bw + PAD, by, "Cancel", ACT_ALERT_NO, NULL, true);
 	gem_black(cr);
@@ -1116,7 +1234,7 @@ static void paint(cairo_t *cr, int w, int h, void *data) {
 	} else {
 		paint_library(cr, w, h);
 	}
-	if (ui.asking_clear) {
+	if (ui.asking != ASK_NONE) {
 		for (guint i = 0; i < ui.hits->len; i++) {
 			g_free(g_array_index(ui.hits, struct hit, i).id);
 		}
@@ -1162,6 +1280,34 @@ static char *subtitle(const char *id, const struct puzzle *p) {
 
 static void printed(const char *message, void *data) {
 	set_message("%s", message);
+}
+
+static void act(enum action action, const struct hit *hit);
+
+static void row_chosen(int id, void *data) {
+	if (ui.popup_id == NULL) {
+		return;
+	}
+	struct hit hit = { .id = ui.popup_id };
+	if (id == ROW_OPEN) {
+		act(ACT_OPEN, &hit);
+	} else if (id == ROW_DELETE) {
+		act(ACT_DELETE, &hit);
+	}
+}
+
+/* A library row's menu, at x, y: Open, and Delete... */
+static void row_menu(const char *id, double x, double y) {
+	if (ui.popup == NULL) {
+		ui.popup = gem_popup_new(ui.area, row_chosen, NULL);
+	}
+	g_free(ui.popup_id);
+	ui.popup_id = g_strdup(id);
+	gem_popup_clear(ui.popup);
+	gem_popup_add(ui.popup, ROW_OPEN, "Open", NULL, 0);
+	gem_popup_add_separator(ui.popup);
+	gem_popup_add(ui.popup, ROW_DELETE, "Delete...", NULL, 0);
+	gem_popup_show(ui.popup, x, y);
 }
 
 static void act(enum action action, const struct hit *hit) {
@@ -1221,14 +1367,25 @@ static void act(enum action action, const struct hit *hit) {
 		reveal(action == ACT_REVEAL_WORD);
 		break;
 	case ACT_CLEAR:
-		ui.asking_clear = true;
+		ui.asking = ASK_CLEAR;
+		break;
+	case ACT_DELETE:
+		ask_delete(hit != NULL ? hit->id : NULL);
+		break;
+	case ACT_ROW_MENU:
+		row_menu(hit->id, hit->x, hit->y + hit->h);
 		break;
 	case ACT_ALERT_YES:
-		ui.asking_clear = false;
-		clear();
+		if (ui.asking == ASK_DELETE) {
+			ui.asking = ASK_NONE;
+			delete_puzzle(ui.asking_id);
+		} else {
+			ui.asking = ASK_NONE;
+			clear();
+		}
 		break;
 	case ACT_ALERT_NO:
-		ui.asking_clear = false;
+		ui.asking = ASK_NONE;
 		break;
 	case ACT_PRINT:
 		if (ui.playing) {
@@ -1279,6 +1436,22 @@ static void released(GtkGestureClick *gesture, int n, double x, double y,
 	gtk_widget_queue_draw(ui.area);
 }
 
+/* A right-click on a library row: its menu, at the pointer. */
+static void right_pressed(GtkGestureClick *gesture, int n, double x, double y,
+		void *data) {
+	if (ui.playing || ui.asking != ASK_NONE) {
+		return;
+	}
+	for (guint i = 0; i < ui.hits->len; i++) {
+		struct hit *hit = &g_array_index(ui.hits, struct hit, i);
+		if (hit->action == ACT_ROW && x >= hit->x && x < hit->x + hit->w &&
+				y >= hit->y && y < hit->y + hit->h) {
+			row_menu(hit->id, x, y);
+			return;
+		}
+	}
+}
+
 static void motion(GtkEventControllerMotion *controller, double x, double y,
 		void *data) {
 	ui.pointer_x = x;
@@ -1315,7 +1488,7 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
 		act(ACT_LIBRARY, NULL);
 		return TRUE;
 	}
-	if (ui.asking_clear) {
+	if (ui.asking != ASK_NONE) {
 		if (keyval == GDK_KEY_Escape || keyval == GDK_KEY_Return) {
 			act(ACT_ALERT_NO, NULL);
 		}
@@ -1381,6 +1554,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_REVEAL_LETTER, "Reveal Letter", "", checkable);
 	app_menu_add_item(m, ACT_REVEAL_WORD, "Reveal Word", "", checkable);
 	app_menu_add_item(m, ACT_CLEAR, "Clear Puzzle...", "", game);
+	app_menu_add_item(m, ACT_DELETE, "Delete Puzzle...", "",
+		deletable() ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_PRINT, "Print...", "^P", game);
 	app_menu_add_separator(m);
@@ -1388,7 +1563,7 @@ static void build_menus(struct app_menu *m, void *data) {
 }
 
 static void menu_activate(uint32_t id, void *data) {
-	if (!ui.asking_clear) {
+	if (ui.asking == ASK_NONE) {
 		act((enum action)id, NULL);
 	}
 }
@@ -1398,6 +1573,7 @@ static void window_destroyed(GtkWidget *window, void *data) {
 }
 
 static void setup(GtkApplication *app) {
+	gem_ui_load_css(); /* the GEM look, for the rows' pop-up menus */
 	ui.hits = g_array_new(FALSE, TRUE, sizeof(struct hit));
 	ui.fetching = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	ui.soup = soup_session_new_with_options("user-agent",
@@ -1412,6 +1588,10 @@ static void setup(GtkApplication *app) {
 	g_signal_connect(click, "pressed", G_CALLBACK(pressed), NULL);
 	g_signal_connect(click, "released", G_CALLBACK(released), NULL);
 	gtk_widget_add_controller(ui.area, GTK_EVENT_CONTROLLER(click));
+	GtkGesture *right = gtk_gesture_click_new();
+	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right), GDK_BUTTON_SECONDARY);
+	g_signal_connect(right, "pressed", G_CALLBACK(right_pressed), NULL);
+	gtk_widget_add_controller(ui.area, GTK_EVENT_CONTROLLER(right));
 	GtkEventController *move = gtk_event_controller_motion_new();
 	g_signal_connect(move, "motion", G_CALLBACK(motion), NULL);
 	gtk_widget_add_controller(ui.area, move);

@@ -18,6 +18,11 @@ Tab jumps to the next clue. **Check Puzzle** turns the border green or red,
 and filling it in right turns it green by itself. Progress is saved as you
 type.
 
+Each puzzle in the library has a menu, the arrow at the start of its row (or
+right-click the row), with **Open** and **Delete...**. Delete, or **File >
+Delete Puzzle...** while it's open, deletes the puzzle and your letters, once
+you've said so. A puzzle from the last week can be downloaded again.
+
 **File > Print...** (Ctrl+P) prints the open puzzle the way a newspaper would:
 the title and byline, the grid, and the clues in columns around it. The print
 dialog has "Include my answers". To make a PDF without the dialog:

@@ -407,7 +407,12 @@ herbach.dnsalias.com. A puzzle opens between its Across and Down clues:
 type to fill, arrows move (and turn), Space or clicking the current square
 switches direction, Tab jumps to the next clue. Check Puzzle turns the
 border green or red, and filling it in right turns it green by itself.
-Progress is saved as you type. Puzzles and saves are in
+Progress is saved as you type. Each puzzle in the library has a menu,
+the arrow at the start of its row (or right-click the row), with Open and
+Delete...; Delete, or File > Delete Puzzle... while it's open, deletes it
+and your letters, once you've said so (a recent one can be downloaded
+again).
+Puzzles and saves are in
 `~/.local/share/gemwm/crossword/`; `gemwm-crossword FILE.puz` opens any
 `.puz`. It needs GTK 4 and libsoup 3 to build.
 
