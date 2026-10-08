@@ -29,8 +29,12 @@ gemview FILE.pdf...     # each in a window of its own
   closes it.
 - **View**: Thumbnails (F9) shows the pages down the left, small, the one
   you're reading framed with its number inverted, following along as you read;
-  click one to go to it. Then Fit Width (the default), Fit Page, Actual Size
-  (^0), and Zoom In and Out (^+ and ^-, or Ctrl and the wheel).
+  click one to go to it. **Two Pages** shows facing pages side by side,
+  meeting at the spine, as a magazine opens; with **Cover Alone** (on unless
+  you turn it off), page 1 sits by itself on the right, so the spreads pair as
+  they would in print. Next and Previous go a spread at a time. Then Fit
+  Width (the default), Fit Page, Actual Size (^0), and Zoom In and Out (^+ and
+  ^-, or Ctrl and the wheel).
 - **Go**: the previous and next page (Page Up, Page Down, Space), and the
   first and last (Home, End).
 
@@ -39,7 +43,8 @@ gemview FILE.pdf...     # each in a window of its own
 - **Links** work: to the web, in your browser; within the document, there.
 - **A file that changes on disk** (a LaTeX run, say) is read again, where you
   were.
-- **Each file opens where you left it**, at the same page and zoom.
+- **Each file opens where you left it**, at the same page and zoom, one page
+  or two.
 
 To make it the PDF viewer for everything else, GemMail's attachments and
 GemWeb's downloads included:

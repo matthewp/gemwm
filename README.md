@@ -924,8 +924,12 @@ real resolution, so text is sharp at any zoom.
   closes it.
 - **View**: Thumbnails (F9), a list of the pages down the left, small, the
   one you're reading framed and its number inverted, following as you read;
-  click one to go there (shown or not is kept). Fit Width (the default), Fit
-  Page, Actual Size (^0), Zoom In and Out (^+, ^-, or Ctrl and the wheel).
+  click one to go there (shown or not is kept). Two Pages: facing pages side
+  by side, meeting at the spine, as a magazine opens, with Cover Alone (on
+  unless you turn it off) putting page 1 by itself on the right so the
+  spreads pair as in print; Next and Previous go a spread at a time, and
+  both are kept for each file. Fit Width (the default), Fit Page, Actual
+  Size (^0), Zoom In and Out (^+, ^-, or Ctrl and the wheel).
 - **Go**: the previous and next page (Page Up, Page Down, Space), the first
   and last (Home, End).
 

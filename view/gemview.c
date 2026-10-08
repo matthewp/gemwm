@@ -68,6 +68,11 @@ struct view {
 	int n;
 	double *pw, *ph;   /* page sizes, in points */
 	double *top;       /* where each page starts, in pixels */
+	double *px;        /* and its left edge, before scrolling sideways */
+	/* View > Two Pages: facing pages side by side, as a magazine opens;
+	 * with the cover alone, page 1 by itself on the right, so the
+	 * spreads after it pair as in print. */
+	bool two, cover;
 	double doc_w, doc_h;
 	double scale;      /* pixels a point at this zoom */
 	enum fit fit;
@@ -170,6 +175,8 @@ static void remember(struct view *v) {
 	g_key_file_set_string(kf, v->path, "zoom", v->fit == FIT_WIDTH ? "width" :
 		v->fit == FIT_PAGE ? "page" : "percent");
 	g_key_file_set_integer(kf, v->path, "percent", v->zoom);
+	g_key_file_set_boolean(kf, v->path, "two", v->two);
+	g_key_file_set_boolean(kf, v->path, "cover", v->cover);
 	g_key_file_set_int64(kf, v->path, "when", g_get_real_time() / G_USEC_PER_SEC);
 	gsize n = 0;
 	char **groups = g_key_file_get_groups(kf, &n);
@@ -197,6 +204,36 @@ static void remember(struct view *v) {
 }
 
 /* ---- Layout ------------------------------------------------------------- */
+
+/* In Two Pages, which side of its spread a page is on. */
+static bool on_left(struct view *v, int p) {
+	if (!v->two || (v->cover && p == 0)) {
+		return false;
+	}
+	return v->cover ? p % 2 == 1 : p % 2 == 0;
+}
+
+/* The page facing p in its spread, or -1. */
+static int partner(struct view *v, int p) {
+	if (!v->two) {
+		return -1;
+	}
+	if (on_left(v, p)) {
+		return p + 1 < v->n ? p + 1 : -1;
+	}
+	return p > 0 && on_left(v, p - 1) ? p - 1 : -1;
+}
+
+/* The first page of p's row, and the one after its last. */
+static int row_start(struct view *v, int p) {
+	int q = partner(v, p);
+	return q >= 0 && q < p ? q : p;
+}
+
+static int row_end(struct view *v, int p) {
+	int q = partner(v, p);
+	return (q > p ? q : p) + 1;
+}
 
 static double max_width(struct view *v) {
 	double w = 0;
@@ -252,10 +289,27 @@ static void relayout(struct view *v) {
 	double room_w = v->area_w - 2 * MARGIN - SHADOW;
 	double room_h = v->area_h - 2 * MARGIN - SHADOW;
 	double widest = max_width(v);
+	/* Two Pages: the widest left page and the widest right one, meeting
+	 * at the spine. */
+	double max_l = 0, max_r = 0;
+	if (v->two) {
+		for (int p = 0; p < v->n; p++) {
+			if (on_left(v, p)) {
+				max_l = MAX(max_l, v->pw[p]);
+			} else {
+				max_r = MAX(max_r, v->pw[p]);
+			}
+		}
+		max_l = max_l > 0 ? max_l : max_r;
+		max_r = max_r > 0 ? max_r : max_l;
+	}
+	double content = v->two ? max_l + max_r : widest;
+	int partner_keep = partner(v, keep);
+	double row_h = MAX(v->ph[keep], partner_keep >= 0 ? v->ph[partner_keep] : 0);
 	if (v->fit == FIT_WIDTH) {
-		v->scale = room_w / widest;
+		v->scale = room_w / content;
 	} else if (v->fit == FIT_PAGE) {
-		v->scale = MIN(room_w / widest, room_h / v->ph[keep]);
+		v->scale = MIN(room_w / content, room_h / row_h);
 	} else {
 		v->scale = v->zoom / 100.0 * PT_PX;
 	}
@@ -263,13 +317,24 @@ static void relayout(struct view *v) {
 	if (fabs(old - v->scale) > 1e-9) {
 		cache_clear(v);
 	}
-	double y = MARGIN;
-	for (int i = 0; i < v->n; i++) {
-		v->top[i] = y;
-		y += v->ph[i] * v->scale + GAP;
+	/* Row by row: a page, or a spread's two, tops level. */
+	double y = MARGIN, spine = MARGIN + max_l * v->scale;
+	for (int p = 0; p < v->n; p = row_end(v, p)) {
+		int q = partner(v, p);
+		double h = v->ph[p];
+		v->top[p] = y;
+		if (q >= 0) {
+			v->top[q] = y;
+			h = MAX(h, v->ph[q]);
+		}
+		y += h * v->scale + GAP;
+	}
+	for (int p = 0; p < v->n; p++) {
+		v->px[p] = !v->two ? MARGIN + (widest - v->pw[p]) * v->scale / 2 :
+			on_left(v, p) ? spine - v->pw[p] * v->scale : spine;
 	}
 	v->doc_h = y - GAP + MARGIN + SHADOW;
-	v->doc_w = widest * v->scale + 2 * MARGIN + SHADOW;
+	v->doc_w = content * v->scale + 2 * MARGIN + SHADOW;
 
 	gtk_adjustment_configure(v->vadj, 0, 0, MAX(v->doc_h, v->area_h), STEP,
 		MAX(STEP, v->area_h - STEP), v->area_h);
@@ -283,10 +348,10 @@ static void relayout(struct view *v) {
 	gtk_widget_queue_draw(v->info);
 }
 
-/* A page's left edge, in the window. */
+/* A page's left edge, in the window: the pages in the middle when the
+ * window's wider than they are. */
 static double page_x(struct view *v, int p) {
-	double width = MAX(v->doc_w, v->area_w);
-	return (width - SHADOW - v->pw[p] * v->scale) / 2 -
+	return v->px[p] + MAX(0, (v->area_w - v->doc_w) / 2) -
 		gtk_adjustment_get_value(v->hadj);
 }
 
@@ -460,9 +525,18 @@ static void paint_info(cairo_t *cr, int w, int h, void *data) {
 	struct view *v = data;
 	gem_black(cr);
 	gem_fill(cr, 0, 0, w, 1);
-	char *left = v->message != NULL ? g_strdup(v->message) :
-		v->doc != NULL ? g_strdup_printf("Page %d of %d", current_page(v) + 1,
-			v->n) : g_strdup("");
+	char *left;
+	int cur = current_page(v), other = v->doc != NULL ? partner(v, cur) : -1;
+	if (v->message != NULL) {
+		left = g_strdup(v->message);
+	} else if (v->doc == NULL) {
+		left = g_strdup("");
+	} else if (other >= 0) {
+		left = g_strdup_printf("Pages %d-%d of %d", MIN(cur, other) + 1,
+			MAX(cur, other) + 1, v->n);
+	} else {
+		left = g_strdup_printf("Page %d of %d", cur + 1, v->n);
+	}
 	gem_text(cr, left, GEM_PAD, 1, h - 1);
 	char *right = v->fit == FIT_WIDTH ? g_strdup("Fit Width") :
 		v->fit == FIT_PAGE ? g_strdup("Fit Page") :
@@ -584,6 +658,9 @@ static PopplerLinkMapping *link_at(struct view *v, double x, double y) {
 			continue;
 		}
 		double px = page_x(v, p);
+		if (x < px || x >= px + v->pw[p] * v->scale) {
+			continue; /* the other page of a spread */
+		}
 		double ptx = (x - px) / v->scale, pty = (y - py) / v->scale;
 		for (GList *i = page_links(v, p); i != NULL; i = i->next) {
 			PopplerLinkMapping *m = i->data;
@@ -946,6 +1023,7 @@ static void close_doc(struct view *v) {
 	g_clear_pointer(&v->pw, g_free);
 	g_clear_pointer(&v->ph, g_free);
 	g_clear_pointer(&v->top, g_free);
+	g_clear_pointer(&v->px, g_free);
 	g_clear_object(&v->doc);
 	v->n = 0;
 }
@@ -966,6 +1044,7 @@ static bool load(struct view *v, const char *path, GError **error) {
 	v->pw = g_new0(double, MAX(v->n, 1));
 	v->ph = g_new0(double, MAX(v->n, 1));
 	v->top = g_new0(double, MAX(v->n, 1));
+	v->px = g_new0(double, MAX(v->n, 1));
 	v->links = g_new0(GList *, MAX(v->n, 1));
 	v->thumb = g_new0(cairo_surface_t *, MAX(v->n, 1));
 	v->thumb_top = g_new0(double, MAX(v->n, 1));
@@ -1026,6 +1105,8 @@ static void open_path(struct view *v, const char *path) {
 	double into = 0;
 	v->fit = FIT_WIDTH;
 	v->zoom = 100;
+	v->two = false;
+	v->cover = true;
 	if (g_key_file_has_group(kf, path)) {
 		page = g_key_file_get_integer(kf, path, "page", NULL);
 		into = g_key_file_get_double(kf, path, "into", NULL);
@@ -1035,6 +1116,13 @@ static void open_path(struct view *v, const char *path) {
 		g_free(zoom);
 		int pct = g_key_file_get_integer(kf, path, "percent", NULL);
 		v->zoom = pct >= 25 && pct <= 800 ? pct : 100;
+		v->two = g_key_file_get_boolean(kf, path, "two", NULL);
+		GError *e = NULL;
+		v->cover = g_key_file_get_boolean(kf, path, "cover", &e);
+		if (e != NULL) {
+			v->cover = true;
+			g_error_free(e);
+		}
 	}
 	g_key_file_unref(kf);
 	v->side_current = -1;
@@ -1155,7 +1243,7 @@ static void print(struct view *v) {
 enum {
 	ACT_OPEN = 1, ACT_PRINT, ACT_CLOSE, ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
 	ACT_FIT_WIDTH, ACT_FIT_PAGE, ACT_ACTUAL, ACT_ZOOM_IN, ACT_ZOOM_OUT,
-	ACT_NEXT, ACT_PREV, ACT_FIRST, ACT_LAST, ACT_THUMBS,
+	ACT_NEXT, ACT_PREV, ACT_FIRST, ACT_LAST, ACT_THUMBS, ACT_TWO, ACT_COVER,
 };
 
 static void build_menus(struct app_menu *m, void *data) {
@@ -1176,6 +1264,12 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "View");
 	app_menu_add_item(m, ACT_THUMBS, "Thumbnails", "F9",
 		gtk_widget_get_visible(v->side) ? APP_MENU_CHECKED : 0);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_TWO, "Two Pages", NULL,
+		doc | (v->two ? APP_MENU_CHECKED : 0));
+	app_menu_add_item(m, ACT_COVER, "Cover Alone", NULL,
+		(v->doc != NULL && v->two ? 0 : APP_MENU_DISABLED) |
+		(v->cover ? APP_MENU_CHECKED : 0));
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_FIT_WIDTH, "Fit Width", NULL,
 		doc | (v->fit == FIT_WIDTH ? APP_MENU_CHECKED : 0));
@@ -1236,14 +1330,28 @@ static void act(struct view *v, int id) {
 		zoom_step(v, id == ACT_ZOOM_IN ? 1 : -1);
 		break;
 	case ACT_NEXT:
-	case ACT_PREV:
-		go_page(v, current_page(v) + (id == ACT_NEXT ? 1 : -1));
+	case ACT_PREV: {
+		/* A page, or in Two Pages, a spread. */
+		int start = row_start(v, current_page(v));
+		go_page(v, id == ACT_NEXT ? row_end(v, start) :
+			start > 0 ? row_start(v, start - 1) : 0);
 		break;
+	}
 	case ACT_FIRST:
 		go_page(v, 0);
 		break;
 	case ACT_LAST:
 		go_page(v, v->n - 1);
+		break;
+	case ACT_TWO:
+	case ACT_COVER:
+		if (id == ACT_TWO) {
+			v->two = !v->two;
+		} else if (v->two) {
+			v->cover = !v->cover;
+		}
+		relayout(v);
+		app_menu_update(v->menu);
 		break;
 	case ACT_THUMBS: {
 		bool on = !gtk_widget_get_visible(v->side);
