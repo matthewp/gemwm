@@ -12,7 +12,7 @@ order: 6
 **Desk > Games > Solitaire**: Klondike, the patience game of every desktop,
 drawn as GEM would have drawn it. White cards with black outlines on the ST
 palette's dark green, hearts and diamonds in red, and the court cards' letters
-in the ST's own font, three times over.
+in the ST's own font, five times over.
 
 ## Playing
 

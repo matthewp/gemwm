@@ -2,7 +2,7 @@
  * gemwm-solitaire: Klondike, the solitaire of every desktop, drawn as GEM
  * would have drawn it: white cards with black outlines on the ST palette's
  * dark green, hearts and diamonds in red, and the court cards' letters in
- * the ST's own font, three times over. Cards are moved as GEM moved
+ * the ST's own font, five times over. Cards are moved as GEM moved
  * windows: an outline follows the pointer, and the cards go there when you
  * let go. A double-click sends a card home to its foundation; a card a move
  * leaves face down turns over by itself; and once every card is face up,
@@ -21,15 +21,15 @@
 #include "gem-draw.h"
 #include "gem-ui.h"
 
-#define CW 71          /* a card, as Windows' were */
-#define CH 96
-#define GAP 11         /* between columns */
+#define CW 106         /* a card: half as big again as Windows' 71 x 96 */
+#define CH 144
+#define GAP 15         /* between columns */
 #define MARGIN 12
-#define ROW2 16        /* between the top row and the tableau */
-#define DOWN_FAN 5     /* a face-down card's edge showing */
-#define UP_FAN 18      /* a face-up card's index showing */
-#define MIN_FAN 9      /* squeezed, in a tall column */
-#define WASTE_FAN 14   /* Draw Three's fanned waste */
+#define ROW2 22        /* between the top row and the tableau */
+#define DOWN_FAN 7     /* a face-down card's edge showing */
+#define UP_FAN 25      /* a face-up card's index showing */
+#define MIN_FAN 12     /* squeezed, in a tall column */
+#define WASTE_FAN 20   /* Draw Three's fanned waste */
 #define INFO_H 20      /* the info line */
 #define DRAG_START 3   /* pixels the pointer moves before it's a drag */
 
@@ -591,7 +591,7 @@ static void corner_index(cairo_t *cr, int c, int x, int y) {
 	const char *r = rank_name(c);
 	double rw = gem_text_width(cr, r);
 	gem_text(cr, r, x + 4 + (16 - rw) / 2, y + 2, 16);
-	suit_shape(cr, SUIT(c), x + 12, y + 25, 10, false);
+	suit_shape(cr, SUIT(c), x + 12, y + 28, 13, false);
 }
 
 /* Where the pips of 2 to 10 go: columns (0 left, 1 middle, 2 right), and
@@ -614,33 +614,33 @@ static void paint_face(cairo_t *cr, int c, int x, int y) {
 	int rank = RANK(c), suit = SUIT(c);
 	ink(cr, c);
 	if (rank == 1) {
-		suit_shape(cr, suit, x + CW / 2.0, y + CH / 2.0, suit == 3 ? 40 : 32,
+		suit_shape(cr, suit, x + CW / 2.0, y + CH / 2.0, suit == 3 ? 60 : 48,
 			false);
 	} else if (rank <= 10) {
-		const double colx[] = { x + 22, x + CW / 2.0, x + CW - 22 };
-		const double top = y + 17, span = CH - 34;
+		const double colx[] = { x + 33, x + CW / 2.0, x + CW - 33 };
+		const double top = y + 26, span = CH - 52;
 		for (int i = 0; i < pips[rank - 2].n; i++) {
 			float r = pips[rank - 2].row[i];
 			suit_shape(cr, suit, colx[(int)pips[rank - 2].col[i]], top + r * span,
-				14, r > .5f);
+				20, r > .5f);
 		}
 	} else {
-		/* A court card: a frame, and its letter in the ST font, three
+		/* A court card: a frame, and its letter in the ST font, five
 		 * times over, between two pips. */
-		int fx = x + 15, fy = y + 13, fw = CW - 30, fh = CH - 26;
+		int fx = x + 22, fy = y + 19, fw = CW - 44, fh = CH - 38;
 		gem_black(cr);
 		gem_frame(cr, fx, fy, fw, fh, 1);
 		gem_frame(cr, fx + 2, fy + 2, fw - 4, fh - 4, 1);
 		ink(cr, c);
 		const char *r = rank_name(c);
 		cairo_save(cr);
-		cairo_translate(cr, fx + (fw - 3 * gem_text_width(cr, r)) / 2.0,
-			fy + (fh - 48) / 2.0);
-		cairo_scale(cr, 3, 3);
+		cairo_translate(cr, fx + (fw - 5 * gem_text_width(cr, r)) / 2.0,
+			fy + (fh - 80) / 2.0);
+		cairo_scale(cr, 5, 5);
 		gem_text(cr, r, 0, 0, 16);
 		cairo_restore(cr);
-		suit_shape(cr, suit, fx + 10, fy + 11, 10, false);
-		suit_shape(cr, suit, fx + fw - 10, fy + fh - 11, 10, true);
+		suit_shape(cr, suit, fx + 12, fy + 15, 14, false);
+		suit_shape(cr, suit, fx + fw - 12, fy + fh - 15, 14, true);
 	}
 }
 
@@ -703,7 +703,7 @@ static void paint_slot(cairo_t *cr, int p) {
 	if (p == STOCK && ui.s.pile[WASTE].n > 0) {
 		/* Click to turn the waste back over: a ring. */
 		cairo_set_line_width(cr, 3);
-		cairo_arc(cr, x + CW / 2.0, y + CH / 2.0, 14, 0, 2 * G_PI);
+		cairo_arc(cr, x + CW / 2.0, y + CH / 2.0, 22, 0, 2 * G_PI);
 		cairo_stroke(cr);
 	} else if (IS_FOUND(p)) {
 		double w = gem_text_width(cr, "A");
@@ -1146,7 +1146,7 @@ static void activate(GtkApplication *app, void *data) {
 
 	ui.window = gtk_application_window_new(app);
 	gtk_window_set_title(GTK_WINDOW(ui.window), "Solitaire");
-	gtk_window_set_default_size(GTK_WINDOW(ui.window), 620, 560);
+	gtk_window_set_default_size(GTK_WINDOW(ui.window), 880, 760);
 	ui.host = GTK_OVERLAY(gtk_overlay_new());
 	ui.area = gtk_drawing_area_new();
 	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(ui.area), draw, NULL, NULL);
