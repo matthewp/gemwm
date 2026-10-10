@@ -30,6 +30,7 @@ static const char default_config[] =
 	"Super+B = exec gtk-launch \"$(xdg-settings get default-web-browser)\"\n"
 	"Print = exec gemwm-screenshot screen\n"
 	"Shift+Print = exec gemwm-screenshot area\n"
+	"Ctrl+Print = exec gemwm-screenshot select\n"
 	"Alt+Print = exec gemwm-screenshot window\n"
 	"XF86AudioRaiseVolume = exec gemwm-volume up\n"
 	"XF86AudioLowerVolume = exec gemwm-volume down\n"

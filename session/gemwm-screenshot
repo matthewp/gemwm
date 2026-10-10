@@ -3,6 +3,8 @@
 #
 #   gemwm-screenshot [screen]   the whole screen (Print)
 #   gemwm-screenshot area       drag out an area (Shift+Print)
+#   gemwm-screenshot select     drag out an area, or click a window for it
+#                               (Ctrl+Print)
 #   gemwm-screenshot window     the focused window, frame and all (Alt+Print)
 #
 # Each is saved to ~/Pictures/Screenshots (or $GEMWM_SCREENSHOT_DIR), put
@@ -24,7 +26,7 @@ need() {
 }
 
 need grim
-[ "${1:-screen}" = area ] && need slurp
+case "${1:-screen}" in area | select) need slurp ;; esac
 
 case "${1:-screen}" in
 screen)
@@ -33,6 +35,24 @@ screen)
 area)
 	# Escape or a click without dragging cancels.
 	geometry=$(slurp) || exit 0
+	;;
+select)
+	# The windows on this workspace, frames and all, as slurp's boxes: a
+	# click on one takes it (slurp takes the last box under the pointer,
+	# so they go bottom first, topmost last), a drag takes an area, and
+	# Escape cancels. (Ctrl+Print, for keyboards that let go of Shift
+	# before they send Print, as many laptops' do.)
+	ws=$(gemwm msg workspaces | grep -oE '"active":[0-9]+' | head -n 1 |
+		cut -d: -f2)
+	boxes=$(gemwm msg windows | grep -oE \
+		'"workspace":[0-9]+,"focused":[a-z]+,"tiled":[a-z]+,"maximized":[a-z]+,"x":-?[0-9]+,"y":-?[0-9]+,"width":[0-9]+,"height":[0-9]+' |
+		sed -nE "s/^\"workspace\":$ws,.*\"x\":(-?[0-9]+),\"y\":(-?[0-9]+),\"width\":([0-9]+),\"height\":([0-9]+)\$/\1,\2 \3x\4/p" |
+		sed -n '1!G;h;$p')
+	if [ -n "$boxes" ]; then
+		geometry=$(printf '%s\n' "$boxes" | slurp) || exit 0
+	else
+		geometry=$(slurp < /dev/null) || exit 0
+	fi
 	;;
 window)
 	# The focused window's frame, from the control socket's window list.

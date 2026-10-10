@@ -80,6 +80,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+B             | open the default browser                 |
 | Print               | screenshot of the whole screen           |
 | Shift+Print         | screenshot of an area you drag out       |
+| Ctrl+Print          | drag out an area, or click a window      |
 | Alt+Print           | screenshot of the focused window         |
 | Volume keys         | volume up, down, mute; mic mute          |
 | Super+Q             | close the focused window                 |
@@ -100,7 +101,10 @@ stay crisp); `-S 2` forces pixel doubling.
 While Super is held, the focused window gets a thick pink border.
 
 Screenshots (also Options > Print Screen) are taken by `gemwm-screenshot
-[screen|area|window]`, which needs `grim`, and `slurp` for areas. They're
+[screen|area|select|window]`, which needs `grim`, and `slurp` for areas.
+Ctrl+Print is for keyboards that let go of Shift before they send Print, as
+many laptops' do (so Shift+Print takes the whole screen): drag out an area,
+or click a window to take it, frame and all, or Escape. They're
 saved to `~/Pictures/Screenshots` (or `$GEMWM_SCREENSHOT_DIR`), copied to
 the clipboard if `wl-copy` is installed, and announced by your notification
 daemon if one is running.

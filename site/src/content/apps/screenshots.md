@@ -11,9 +11,15 @@ order: 7
 |---|---|
 | Print | the whole screen |
 | Shift+Print | an area you drag out |
+| Ctrl+Print | an area you drag out, or a window you click |
 | Alt+Print | the focused window |
 
-**Options > Print Screen** takes one too. Screenshots are taken by
+**Options > Print Screen** takes one too.
+
+Many laptops (a Framework's PrtSc is Fn+F11) let go of Shift before they send
+Print, so Shift+Print takes the whole screen there. **Ctrl+Print** works
+everywhere: drag out an area, or click a window to take it, frame and all;
+Escape cancels. Screenshots are taken by
 `gemwm-screenshot [screen|area|window]`, which needs `grim`, and `slurp` for
 areas.
 

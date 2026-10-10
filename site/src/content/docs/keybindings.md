@@ -13,6 +13,7 @@ order: 2
 | Super+B | open the default browser |
 | Print | screenshot of the whole screen |
 | Shift+Print | screenshot of an area you drag out |
+| Ctrl+Print | drag out an area, or click a window to take it |
 | Alt+Print | screenshot of the focused window |
 | Volume keys | volume up, down, mute; mic mute |
 | Super+Q | close the focused window |
