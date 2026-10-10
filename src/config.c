@@ -31,6 +31,7 @@ static const char default_config[] =
 	"Print = exec gemwm-screenshot screen\n"
 	"Shift+Print = exec gemwm-screenshot area\n"
 	"Ctrl+Print = exec gemwm-screenshot select\n"
+	"Super+L = lock\n"
 	"Alt+Print = exec gemwm-screenshot window\n"
 	"XF86AudioRaiseVolume = exec gemwm-volume up\n"
 	"XF86AudioLowerVolume = exec gemwm-volume down\n"
@@ -114,7 +115,12 @@ static const char default_config[] =
 	"\n"
 	"[animation]\n"
 	"mode = slide\n"
-	"duration = 200\n";
+	"duration = 200\n"
+	"\n"
+	"[idle]\n"
+	"lock = 10\n"
+	"screen-off = 15\n"
+	"locker = gemwm-lock\n";
 
 static char *trim(char *s) {
 	while (*s == ' ' || *s == '\t') {
@@ -306,6 +312,18 @@ static void parse(struct server *server, FILE *f, const char *name) {
 				strcmp(key, "column-width") == 0) {
 			double w = strtod(value, NULL);
 			server->column_width = w < 0.1 ? 0.1 : w > 1 ? 1 : w;
+		} else if (strcmp(section, "idle") == 0 &&
+				(strcmp(key, "lock") == 0 || strcmp(key, "screen-off") == 0)) {
+			/* Minutes; 0, off or never: not at all. */
+			int min = strcmp(value, "off") == 0 || strcmp(value, "never") == 0 ?
+				0 : atoi(value);
+			min = min < 0 ? 0 : min > 1440 ? 1440 : min;
+			*(strcmp(key, "lock") == 0 ? &server->idle_lock_min :
+				&server->idle_off_min) = min;
+		} else if (strcmp(section, "idle") == 0 &&
+				strcmp(key, "locker") == 0) {
+			free(server->lock_command);
+			server->lock_command = value[0] != '\0' ? strdup(value) : NULL;
 		} else if (strcmp(section, "desktop") == 0 &&
 				strcmp(key, "color") == 0) {
 			if (!desktop_parse_color(value, &server->desktop_color,
@@ -451,6 +469,7 @@ void config_load(struct server *server) {
 	tile_arrange(server); /* the gap may have changed */
 	desktop_configure(server);
 	font_configure(server);
+	idle_configure(server);
 }
 
 /* The ST's own system font, installed with GemWM (extras/fonts). It's
@@ -497,6 +516,8 @@ void config_finish(struct server *server) {
 	server->desktop_image = NULL;
 	free(server->font_family);
 	server->font_family = NULL;
+	free(server->lock_command);
+	server->lock_command = NULL;
 	server->font_size = 0;
 	server->n_bindings = 0;
 }

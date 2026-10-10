@@ -33,6 +33,8 @@ gemwm msg column-width 0.33       # scrolling: or "cycle"
 gemwm msg exec foot               # run a program
 gemwm msg reload-config           # re-read ~/.config/gemwm/config
 gemwm msg quit
+gemwm msg lock                    # lock the screen, as Super+L
+gemwm msg lock-status             # {"locked":..., "shown":...}
 gemwm msg subscribe               # stream workspaces/windows/mode events
 ```
 

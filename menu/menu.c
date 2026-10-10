@@ -114,6 +114,7 @@ static const char default_config[] =
 	"Games >\n"
 	"Control Panel\n"
 	"-\n"
+	"Lock Screen = gemwm msg lock\n"
 	"Logout... = [End this GemWM session?] gemwm msg quit\n"
 	"Restart... = [Restart the computer?] systemctl reboot\n"
 	"Shutdown... = [Shut down the computer?] systemctl poweroff\n"

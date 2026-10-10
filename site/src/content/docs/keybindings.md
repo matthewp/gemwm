@@ -28,6 +28,7 @@ order: 2
 | Super+R | scrolling: column width ⅓, ½, ⅔ |
 | Super+1..9, Alt+1..9 | switch workspace |
 | Super+Shift+1..9, Alt+Shift+1..9 | move the focused window to a workspace |
+| Super+L | [lock the screen](/docs/locking/) |
 | Alt+Escape | quit GemWM |
 
 While Super is held, the focused window gets a thick pink border (see

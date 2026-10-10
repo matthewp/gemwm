@@ -65,7 +65,8 @@ static void layer_map(struct wl_listener *listener, void *data) {
 	}
 	cursor_rebase(ls->server);
 	if (wlr->current.keyboard_interactive ==
-			ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE) {
+			ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE &&
+			!lock_active(ls->server)) {
 		struct wlr_keyboard *kb = wlr_seat_get_keyboard(ls->server->seat);
 		if (kb != NULL) {
 			wlr_seat_keyboard_notify_enter(ls->server->seat, wlr->surface,

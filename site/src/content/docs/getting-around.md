@@ -25,8 +25,8 @@ menus: Desk, File, View and Options.
 
 **Desk** is where programs start: **Internet** (the web browser, mail),
 **Office** (GemWrite), **Tools** (a terminal, printing, notifications),
-**Games**. Log Out, Restart and Shut Down are at the bottom of Desk, so
-they're always there. All of it can be changed: see [the menu bar](/docs/menu-bar/).
+**Games**. Lock Screen, Log Out, Restart and Shut Down are at the bottom of
+Desk, so they're always there. All of it can be changed: see [the menu bar](/docs/menu-bar/).
 
 In the middle, `1 | 2 | +` are the [workspaces](/docs/workspaces/); at the
 right are the menu apps: Wi-Fi, Bluetooth, volume, the battery and the clock.

@@ -1,0 +1,3 @@
+#%PAM-1.0
+# gemwm-lock, GemWM's screen lock: the password, as logging in checks it.
+auth include login

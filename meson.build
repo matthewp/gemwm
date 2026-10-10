@@ -87,6 +87,7 @@ executable(
 		'src/view.c',
 		'src/layer.c',
 		'src/workspace.c',
+		'src/lock.c',
 		'src/tile.c',
 		'src/scroll.c',
 		'src/scrollbar.c',
@@ -316,6 +317,23 @@ if gtk4.found()
 		install_data('greeter/gemwm-greeter.tmpfiles',
 			rename: 'gemwm-greeter.conf',
 			install_dir: get_option('prefix') / 'lib' / 'tmpfiles.d')
+	endif
+
+	# gemwm-lock: the screen lock (ext-session-lock, through gtk4-layer-shell
+	# 1.1's session lock), checking the password with PAM. Its PAM service
+	# goes in /etc/pam.d, where PAM looks, whatever the prefix.
+	pam = meson.get_compiler('c').find_library('pam', required: false)
+	if layer_shell.found() and layer_shell.version().version_compare('>=1.1') and pam.found()
+		executable(
+			'gemwm-lock',
+			['lock/gemwm-lock.c', 'lib/gem-alert.c', 'lib/gem-draw.c',
+				'lib/gem-ui.c'],
+			dependencies: [layer_shell, gtk4, wayland_client, pam],
+			include_directories: 'lib',
+			install: true,
+		)
+		install_data('lock/gemwm-lock.pam', rename: 'gemwm-lock',
+			install_dir: '/etc/pam.d')
 	endif
 
 	# gemwm-crossword: crossword puzzles, after MPOS's. Also needs libsoup

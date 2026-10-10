@@ -101,24 +101,33 @@ static void spawn_greeter(struct server *server, const char *cmd) {
 		WL_EVENT_READABLE, greeter_exited, server);
 }
 
-/* Starts the menu bar: the gemwm-menu next to our own binary (so it works
- * straight from the build directory), or else the one in $PATH. */
-static void spawn_menu(void) {
+/* Starts one of our own programs: the one next to our own binary (so it
+ * works straight from the build directory), or else the one in $PATH;
+ * args after it. */
+static void spawn_own(const char *name, const char *args) {
 	char path[PATH_MAX];
 	ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
 	if (n > 0) {
 		path[n] = '\0';
 		char *slash = strrchr(path, '/');
-		if (slash != NULL && (size_t)(slash - path) + sizeof("/gemwm-menu") <=
+		if (slash != NULL && (size_t)(slash - path) + strlen(name) + 2 <=
 				sizeof(path)) {
-			strcpy(slash, "/gemwm-menu");
+			strcpy(slash + 1, name);
 			if (access(path, X_OK) == 0) {
-				spawn(path);
+				char cmd[PATH_MAX + 64];
+				snprintf(cmd, sizeof(cmd), "%s%s", path, args);
+				spawn(cmd);
 				return;
 			}
 		}
 	}
-	spawn("gemwm-menu");
+	char cmd[256];
+	snprintf(cmd, sizeof(cmd), "%s%s", name, args);
+	spawn(cmd);
+}
+
+static void spawn_menu(void) {
+	spawn_own("gemwm-menu", "");
 }
 
 /* SIGTERM/SIGINT end the session cleanly, like Alt+Escape. */
@@ -156,7 +165,10 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	uint32_t code = event->keycode;
 
 	bool handled = false;
-	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+	idle_activity(server);
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && lock_active(server)) {
+		/* Locked: every key is the locker's; no bindings. */
+	} else if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		uint32_t keycode = code + 8;
 		struct xkb_state *state = keyboard->wlr_keyboard->xkb_state;
 		const xkb_keysym_t *syms, *base;
@@ -224,8 +236,9 @@ static void server_new_keyboard(struct server *server,
 	/* A keyboard that appears later (plugged in, or virtual) still has to
 	 * reach whoever should have focus: an exclusive layer surface such as
 	 * an alert box first, otherwise the focused window. */
-	struct wlr_surface *target = layers_exclusive_focus(server);
-	if (target == NULL && server->focused_view != NULL) {
+	struct wlr_surface *target = lock_active(server) ?
+		lock_focus_surface(server) : layers_exclusive_focus(server);
+	if (target == NULL && !lock_active(server) && server->focused_view != NULL) {
 		target = server->focused_view->xdg_toplevel->base->surface;
 	}
 	if (target != NULL) {
@@ -296,6 +309,20 @@ static void seat_request_set_selection(struct wl_listener *listener,
 /* ---- Pointer ------------------------------------------------------------ */
 
 static void process_cursor_motion(struct server *server, uint32_t time) {
+	if (lock_active(server)) {
+		/* Locked: only the locker's surfaces are there to point at. */
+		double lsx, lsy;
+		struct wlr_surface *s = lock_surface_at(server, server->cursor->x,
+			server->cursor->y, &lsx, &lsy);
+		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+		if (s != NULL) {
+			wlr_seat_pointer_notify_enter(server->seat, s, lsx, lsy);
+			wlr_seat_pointer_notify_motion(server->seat, time, lsx, lsy);
+		} else {
+			wlr_seat_pointer_clear_focus(server->seat);
+		}
+		return;
+	}
 	if (server->cursor_mode != CURSOR_PASSTHROUGH) {
 		process_interactive_motion(server);
 		return;
@@ -338,6 +365,7 @@ void cursor_rebase(struct server *server) {
 static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
+	idle_activity(server);
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 		event->delta_x, event->delta_y);
 	process_cursor_motion(server, event->time_msec);
@@ -348,6 +376,7 @@ static void server_cursor_motion_absolute(struct wl_listener *listener,
 	struct server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
+	idle_activity(server);
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
 		event->x, event->y);
 	process_cursor_motion(server, event->time_msec);
@@ -356,6 +385,24 @@ static void server_cursor_motion_absolute(struct wl_listener *listener,
 static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
+	idle_activity(server);
+
+	/* Locked: the button is the locker's, and a click on a screen gives
+	 * that screen's lock surface the keyboard. */
+	if (lock_active(server)) {
+		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+			event->button, event->state);
+		double lsx, lsy;
+		struct wlr_surface *s = lock_surface_at(server, server->cursor->x,
+			server->cursor->y, &lsx, &lsy);
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+		if (s != NULL && kb != NULL &&
+				event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+			wlr_seat_keyboard_notify_enter(server->seat, s, kb->keycodes,
+				kb->num_keycodes, &kb->modifiers);
+		}
+		return;
+	}
 
 	/* During an outline drag the button belongs to us, not the client. */
 	if (server->cursor_mode != CURSOR_PASSTHROUGH) {
@@ -416,9 +463,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 static void server_cursor_axis(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, cursor_axis);
 	struct wlr_pointer_axis_event *event = data;
+	idle_activity(server);
 	/* Super+wheel scrolls the strip a column at a time, as in niri. */
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	if (server->mode == MODE_SCROLLING && kb != NULL &&
+	if (!lock_active(server) && server->mode == MODE_SCROLLING && kb != NULL &&
 			(wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO) &&
 			event->source == WL_POINTER_AXIS_SOURCE_WHEEL &&
 			event->delta_discrete != 0) {
@@ -448,6 +496,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		wlr_output_schedule_frame(output->wlr_output);
 	}
 	wlr_scene_output_commit(scene_output, NULL);
+	lock_output_frame(output);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -461,6 +510,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	wlr_output_commit_state(output->wlr_output, event->state);
 	desktop_update_output(output);
 	layers_arrange(output);
+	lock_outputs_changed(output->server);
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
@@ -529,6 +579,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
 	desktop_update_output(output);
 	layers_arrange(output);
+	lock_outputs_changed(server);
 }
 
 /* ---- Main --------------------------------------------------------------- */
@@ -634,6 +685,7 @@ int main(int argc, char *argv[]) {
 	server.layer_fullscreen = wlr_scene_tree_create(root);
 	server.layers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY] = wlr_scene_tree_create(root);
 	server.layer_drag = wlr_scene_tree_create(root);
+	lock_init(&server); /* its layer over all the rest */
 
 	view_init_shell(&server);
 	scrollbars_init(&server);
@@ -712,6 +764,10 @@ int main(int argc, char *argv[]) {
 	if (start_menu) {
 		spawn_menu();
 	}
+	if (!server.greeter) {
+		/* Locks the screen when the computer goes to sleep. */
+		spawn_own("gemwm-lock", " --watch");
+	}
 	if (startup_cmd && server.greeter) {
 		spawn_greeter(&server, startup_cmd);
 	} else if (startup_cmd) {
@@ -723,6 +779,7 @@ int main(int argc, char *argv[]) {
 	wl_event_source_remove(sigterm);
 	wl_event_source_remove(sigint);
 	ipc_finish(&server);
+	lock_finish(&server);
 	config_finish(&server);
 	wl_display_destroy_clients(server.wl_display);
 	wl_list_remove(&server.new_xdg_toplevel.link);

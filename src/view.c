@@ -260,7 +260,8 @@ void focus_view(struct view *view) {
 	/* An exclusive layer surface (an alert box) keeps the keyboard until
 	 * it goes away; unmapping it gives the keyboard back to this window. */
 	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
-	if (keyboard != NULL && layers_exclusive_focus(server) == NULL) {
+	if (keyboard != NULL && layers_exclusive_focus(server) == NULL &&
+			!lock_active(server)) {
 		wlr_seat_keyboard_notify_enter(seat, surface,
 			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 	}

@@ -16,6 +16,7 @@ you write only what you change.
 | `~/.config/gemwm/config` | GemWM: [desktop](/docs/desktop/), [keys](/docs/keybindings/), layout, highlight, animation, font, clock, battery, AI |
 | `~/.config/gemwm/menu` | [the menus and menu apps](/docs/menu-bar/) |
 | `~/.config/gemwm/env` | environment variables for the session (`TERMINAL=...`) |
+| `/etc/pam.d/gemwm-lock` | how the [lock screen](/docs/locking/) checks your password |
 | `/etc/gemwm/greeter.conf` | the [login screen](/docs/login-screen/)'s desktop |
 | `~/.config/gemweb/settings` | [GemWeb](/apps/gemweb/): home page, search, ad blocking, passwords, zoom |
 | `~/.config/gemmail/settings` | [GemMail](/apps/gemmail/): the account |

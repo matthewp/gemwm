@@ -35,6 +35,9 @@
  *   exec <shell command>          run a program
  *   reload-config                 re-read ~/.config/gemwm/config
  *   quit                          end the session
+ *   lock                          lock the screen (start the locker)
+ *   lock-status                   {"locked":..., "shown":...}: shown once
+ *                                 the screens show only the locker
  *   menu-activate <id> <item>     pick an item of the window's own menus
  *                                 (gemwm-app-menu-v1; for the menu bar)
  *   subscribe                     stream "workspaces", "windows", "focus"
@@ -556,6 +559,21 @@ static char *execute(struct server *server, struct ipc_client *client,
 	if (strcmp(cmd, "quit") == 0) {
 		wl_display_terminate(server->wl_display);
 		return strdup(ok);
+	}
+	if (strcmp(cmd, "lock") == 0) {
+		lock_request(server);
+		return strdup(ok);
+	}
+	if (strcmp(cmd, "lock-status") == 0) {
+		/* locked: the session is; shown: the screens show only the
+		 * locker now (what waiting for sleep needs). */
+		char *reply = NULL;
+		if (asprintf(&reply, "{\"locked\":%s,\"shown\":%s}",
+				lock_active(server) ? "true" : "false",
+				lock_shown(server) ? "true" : "false") < 0) {
+			return NULL;
+		}
+		return reply;
 	}
 	if (strcmp(cmd, "subscribe") == 0) {
 		if (client == NULL) {

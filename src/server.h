@@ -152,6 +152,23 @@ struct server {
 	struct wl_listener new_output;
 	float output_scale;
 	bool greeter; /* gemwm -G: the login screen (see main.c) */
+
+	/* Locking and idle (lock.c). */
+	struct wlr_scene_tree *layer_lock; /* the locker's surfaces, over all */
+	struct wlr_session_lock_manager_v1 *lock_manager;
+	struct wl_listener new_lock;
+	struct session_lock *lock; /* the locker's lock, while it's here */
+	bool locked;               /* locked, even if the locker has gone */
+	int64_t lock_requested;    /* when the locker was last started, ms */
+	char *lock_command;        /* [idle] locker */
+	struct wl_event_source *relock_timer;
+	struct wlr_idle_notifier_v1 *idle_notifier;
+	struct wl_listener new_inhibitor;
+	int inhibitors;            /* programs holding idleness off */
+	struct wl_event_source *idle_lock_timer, *idle_off_timer;
+	int idle_lock_min, idle_off_min; /* [idle] lock, screen-off; 0: never */
+	int64_t idle_last_rearm;
+	bool screens_off;
 };
 
 struct output {
@@ -160,6 +177,7 @@ struct output {
 	struct wlr_output *wlr_output;
 	struct wlr_scene_buffer *desktop; /* the background (desktop.c) */
 	struct wlr_box usable_area; /* layout coords, minus panels like the menu bar */
+	bool lock_rendered; /* drawn since the session locked (lock.c) */
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
@@ -390,6 +408,20 @@ void layers_output_destroyed(struct output *output);
 struct wlr_surface *layers_exclusive_focus(struct server *server);
 bool output_usable_area_at(struct server *server, double lx, double ly,
 	struct wlr_box *box);
+
+/* lock.c */
+void lock_init(struct server *server);
+void lock_finish(struct server *server);
+bool lock_active(struct server *server);
+bool lock_shown(struct server *server);
+void lock_request(struct server *server);
+void lock_output_frame(struct output *output);
+void lock_outputs_changed(struct server *server);
+struct wlr_surface *lock_focus_surface(struct server *server);
+struct wlr_surface *lock_surface_at(struct server *server, double lx,
+	double ly, double *sx, double *sy);
+void idle_activity(struct server *server);
+void idle_configure(struct server *server);
 
 /* desktop.c */
 void desktop_update_output(struct output *output);

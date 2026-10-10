@@ -96,6 +96,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Super+R             | scrolling: column width ⅓ → ½ → ⅔        |
 | Super+1..9, Alt+1..9 | switch workspace                        |
 | Super+Shift+1..9, Alt+Shift+1..9 | move the focused window to a workspace |
+| Super+L             | lock the screen (see Locking)            |
 | Alt+Escape          | quit                                     |
 
 While Super is held, the focused window gets a thick pink border.
@@ -134,8 +135,8 @@ applications add their menus after it: GemWeb's File, View and Go, and
 Bluetooth's File, with its On/Off merged into the top of Options. Any
 application can do the same with the `gemwm-app-menu-v1` Wayland protocol
 (`protocols/gemwm-app-menu-v1.xml`), submenus included (since version 2). With no window focused, the bar shows the desktop's menus: Desk, File, View and
-Options. Logout, Restart and Shutdown are at the bottom of Desk, so they're
-always there.
+Options. Lock Screen, Logout, Restart and Shutdown are at the bottom of
+Desk, so they're always there.
 
 The menus are built in, and `~/.config/gemwm/menu` changes them. You only
 write what you want to change: a section replaces the built-in menu with the
@@ -276,6 +277,11 @@ each line adds or replaces one binding, and `none` removes one.
     mode = slide                         # outline (GEM's moving boxes), off
     duration = 200                       # ms; see Animation
 
+    [idle]                               # see Locking
+    lock = 10                            # minutes idle until it locks; 0: never
+    screen-off = 15                      # until the screens go off; 0: never
+    locker = gemwm-lock
+
     [font]                               # see Font
     family = Atari ST 8x16
     size = 16
@@ -348,6 +354,37 @@ in `/usr/share/xdg-desktop-portal`, where xdg-desktop-portal looks; the
 `portal_dir` build option says where else); log in again for the portal
 to pick it up. One file is chosen at a time, even where several may be,
 as GEM's selector chose one.
+
+## Locking
+
+Super+L, or Desk > Lock Screen, locks the screen: every window and the menu
+bar are hidden, the desktop stays, and `gemwm-lock` puts a GEM dialog over
+it, with you, by name and icon, asking for your password, and a bar of its
+own across the top saying it's locked, with the time. Return or Unlock
+checks the password with PAM (`/etc/pam.d/gemwm-lock`, installed with
+GemWM, which checks it as logging in does); a wrong one is a GEM alert,
+and anything else PAM says (a fingerprint reader asking for a finger) is
+shown in the dialog. Nothing reaches the windows behind it: not the keys,
+not the pointer, not the key bindings.
+
+It also locks by itself:
+
+- after `lock` minutes with no input, and the screens go off after
+  `screen-off` minutes (and a minute after locking); any key or the pointer
+  brings them back. A program that asks, a video player say, holds both
+  off while it plays.
+- before the computer sleeps (closing the lid): `gemwm-lock --watch`, which
+  GemWM starts, has logind wait while it locks, so it wakes up locked.
+  `loginctl lock-session` locks too.
+
+    [idle]
+    lock = 10              # minutes; 0 never
+    screen-off = 15        # minutes; 0 never
+
+If the locker dies while the screen's locked, the screen stays locked and
+GemWM starts it again. GemWM speaks the screen locking protocol
+(`ext-session-lock-v1`), so other lockers work too (`locker = swaylock`),
+and the idle one (`ext-idle-notify-v1`), for tools like swayidle.
 
 ## Notifications
 
@@ -583,6 +620,8 @@ starts). `gemwm msg` sends one command and prints the JSON reply:
     gemwm msg exec foot               # run a program
     gemwm msg reload-config           # re-read ~/.config/gemwm/config
     gemwm msg quit
+    gemwm msg lock                    # lock the screen, as Super+L
+    gemwm msg lock-status             # {"locked":..., "shown":...}
     gemwm msg subscribe               # stream workspaces/windows/mode events
 
 Window ids never change while a window is open; workspace numbers are
