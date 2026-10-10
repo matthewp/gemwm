@@ -32,6 +32,25 @@
 	box-sizing: border-box;
 }
 
+/* Going from page to page, the browser's own view transition: the menu
+ * bar stays put, as GemWM's does, and the window and the desktop under it
+ * crossfade quickly, a window redrawn rather than a slide. */
+@view-transition {
+	navigation: auto;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+	animation-duration: 140ms;
+	animation-timing-function: linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	@view-transition {
+		navigation: none;
+	}
+}
+
 html {
 	background: var(--desk);
 	color: var(--ink);
@@ -88,6 +107,7 @@ a {
 /* ---- The menu bar ----------------------------------------------------- */
 
 .menubar {
+	view-transition-name: menubar;
 	position: fixed;
 	inset: 0 0 auto 0;
 	z-index: 100;
