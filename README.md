@@ -917,6 +917,15 @@ not be theirs: neither DMARC nor a DKIM signature from their domain passed.
 Its links open in the browser, and `mailto:` ones start a new message. Messages are written as
 plain text, and sent copies are kept in Sent.
 
+GemMail remembers the people you write to. Typing in To or Cc drops down
+the addresses that start that way, by address or by any word of the name,
+those you write to most and latest first; Up and Down choose, Return or
+Tab (or a click) puts it in with a comma for the next, Escape closes the
+list, and Shift+Delete forgets one until you send to it again. It learns
+every address you send to, and starts out knowing everyone in the To and
+Cc of the Sent mail already downloaded, and who sent what you've
+answered. They're kept in `~/.local/share/gemmail/addresses.sqlite`.
+
 It's built when libetpan (IMAP and SMTP), GMime 3 and WebKit are
 installed (`pacman -S libetpan gmime3 webkitgtk-6.0`). The account goes in
 `~/.config/gemmail/settings`:

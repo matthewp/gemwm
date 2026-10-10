@@ -39,6 +39,17 @@ the message may not be theirs (neither DMARC nor DKIM passed).
 
 Messages are written as plain text; **Attach...** adds files.
 
+## People you write to
+
+GemMail remembers who you write to. Typing in **To** or **Cc** drops down the
+addresses that start that way, by address or any word of the name, the people
+you write to most and latest first. Up and Down choose, Return or Tab (or a
+click) puts one in with a comma for the next, Escape closes the list, and
+Shift+Delete forgets one until you send to it again.
+
+It learns every address you send to, and starts out knowing everyone in the To
+and Cc of your downloaded Sent mail, and who sent what you've answered.
+
 ## AI categories
 
 With [AI](/docs/ai/) set up, GemMail can sort your mail into categories, like

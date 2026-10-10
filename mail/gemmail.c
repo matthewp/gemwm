@@ -20,6 +20,7 @@
 #include <string.h>
 #include <webkit/webkit.h>
 #include "account.h"
+#include "addresses.h"
 #include "app-menu.h"
 #include "augur.h"
 #include "cache.h"
@@ -3810,9 +3811,20 @@ struct compose {
 	bool closed; /* its window's gone, while a send finishes */
 	GArray *hits;
 	struct app_menu *menu;
+	/* Addresses suggested as you type in To or Cc (addresses.h): the
+	 * list under the field, which field, and where the address being
+	 * typed starts in it. */
+	GtkWidget *suggest, *completing;
+	GPtrArray *suggestions; /* struct known_address */
+	int selected, token_start;
+	bool editing;           /* our own change to the field */
+	char *sent_to, *sent_cc; /* what was sent, to learn once it's gone */
 };
 
 static void compose_free(struct compose *c) {
+	g_clear_pointer(&c->suggestions, g_ptr_array_unref);
+	g_free(c->sent_to);
+	g_free(c->sent_cc);
 	g_ptr_array_unref(c->files);
 	g_array_unref(c->file_hits);
 	g_free(c->in_reply_to);
@@ -3941,6 +3953,10 @@ static void sent(const char *error, void *data) {
 	c->sending = false;
 	if (c->closed) {
 		set_status("%s", error != NULL ? error : "Sent.");
+		if (error == NULL || g_str_has_prefix(error, "Sent, but")) {
+			addresses_learn(c->sent_to);
+			addresses_learn(c->sent_cc);
+		}
 		compose_free(c);
 		return;
 	}
@@ -3951,6 +3967,8 @@ static void sent(const char *error, void *data) {
 		return;
 	}
 	set_status("%s", error != NULL ? error : "Sent.");
+	addresses_learn(c->sent_to);
+	addresses_learn(c->sent_cc);
 	gtk_window_destroy(GTK_WINDOW(c->window));
 	struct folder *f = current_folder();
 	if (f != NULL && f->role == ROLE_SENT) {
@@ -3982,6 +4000,10 @@ static void send_message(struct compose *c) {
 		return;
 	}
 	struct folder *sent_folder = folder_with_role(ROLE_SENT);
+	g_free(c->sent_to);
+	g_free(c->sent_cc);
+	c->sent_to = g_strdup(d.to);
+	c->sent_cc = g_strdup(d.cc);
 	c->sending = true;
 	gtk_widget_queue_draw(c->bar);
 	compose_status(c, "Sending...");
@@ -4060,6 +4082,211 @@ static GtkWidget *field_row(const char *label, GtkWidget **entry,
 	return row;
 }
 
+/* ---- Suggesting addresses ------------------------------------------- */
+
+#define SUGGEST_ROWS 6
+
+static void suggest_hide(struct compose *c) {
+	g_clear_pointer(&c->suggestions, g_ptr_array_unref);
+	c->completing = NULL;
+	gtk_widget_set_visible(c->suggest, FALSE);
+}
+
+/* The addresses already in a field, lower case, comma separated: not
+ * suggested again. */
+static char *field_addresses(const char *text) {
+	GString *out = g_string_new(NULL);
+	InternetAddressList *list = internet_address_list_parse(NULL, text);
+	int n = list != NULL ? internet_address_list_length(list) : 0;
+	for (int i = 0; i < n; i++) {
+		InternetAddress *a = internet_address_list_get_address(list, i);
+		if (INTERNET_ADDRESS_IS_MAILBOX(a)) {
+			char *lower = g_ascii_strdown(internet_address_mailbox_get_addr(
+				INTERNET_ADDRESS_MAILBOX(a)), -1);
+			g_string_append_printf(out, "%s%s", out->len ? "," : "", lower);
+			g_free(lower);
+		}
+	}
+	if (list != NULL) {
+		g_object_unref(list);
+	}
+	return g_string_free(out, FALSE);
+}
+
+/* The address being typed: from after the last comma before the cursor
+ * to the cursor (character offsets), its text stripped. */
+static char *typed_address(GtkWidget *field, int *start) {
+	const char *text = gtk_editable_get_text(GTK_EDITABLE(field));
+	int cursor = gtk_editable_get_position(GTK_EDITABLE(field));
+	const char *end = g_utf8_offset_to_pointer(text, cursor);
+	const char *from = text;
+	for (const char *p = text; p < end; p = g_utf8_next_char(p)) {
+		if (*p == ',' || *p == ';') {
+			from = p + 1;
+		}
+	}
+	while (from < end && *from == ' ') {
+		from++;
+	}
+	*start = (int)g_utf8_pointer_to_offset(text, from);
+	return g_strstrip(g_strndup(from, end - from));
+}
+
+static void suggest_show(struct compose *c, GtkWidget *field) {
+	int start;
+	char *typed = typed_address(field, &start);
+	if (typed[0] == '\0') {
+		g_free(typed);
+		suggest_hide(c);
+		return;
+	}
+	char *skip = field_addresses(gtk_editable_get_text(GTK_EDITABLE(field)));
+	GPtrArray *found = addresses_suggest(typed, skip, SUGGEST_ROWS);
+	g_free(skip);
+	g_free(typed);
+	/* Nothing to add if the one found is what's typed already. */
+	if (found->len == 0) {
+		g_ptr_array_unref(found);
+		suggest_hide(c);
+		return;
+	}
+	g_clear_pointer(&c->suggestions, g_ptr_array_unref);
+	c->suggestions = found;
+	c->completing = field;
+	c->token_start = start;
+	c->selected = 0;
+	/* Under the field, as wide as it. */
+	graphene_rect_t box;
+	int width = gtk_widget_get_width(field);
+	if (gtk_widget_compute_bounds(field, GTK_WIDGET(c->host), &box)) {
+		gtk_widget_set_margin_start(c->suggest, (int)box.origin.x);
+		gtk_widget_set_margin_top(c->suggest,
+			(int)(box.origin.y + box.size.height) - 1);
+		width = (int)box.size.width;
+	}
+	gtk_widget_set_size_request(c->suggest, width,
+		(int)found->len * ROW_H + 2);
+	gtk_widget_set_visible(c->suggest, TRUE);
+	gtk_widget_queue_draw(c->suggest);
+}
+
+/* The one chosen, in place of what was typed, and a comma for the next. */
+static void suggest_pick(struct compose *c, int i) {
+	if (c->suggestions == NULL || i < 0 || i >= (int)c->suggestions->len) {
+		return;
+	}
+	GtkEditable *e = GTK_EDITABLE(c->completing);
+	char *text = known_address_format(c->suggestions->pdata[i]);
+	char *with = g_strconcat(text, ", ", NULL);
+	int cursor = gtk_editable_get_position(e);
+	c->editing = true;
+	gtk_editable_delete_text(e, c->token_start, cursor);
+	int pos = c->token_start;
+	gtk_editable_insert_text(e, with, -1, &pos);
+	gtk_editable_set_position(e, pos);
+	c->editing = false;
+	g_free(with);
+	g_free(text);
+	suggest_hide(c);
+}
+
+static void paint_suggest(cairo_t *cr, int w, int h, void *data) {
+	struct compose *c = data;
+	gem_black(cr);
+	gem_frame(cr, 0, 0, w, h, 1);
+	for (guint i = 0; c->suggestions != NULL && i < c->suggestions->len; i++) {
+		struct known_address *a = c->suggestions->pdata[i];
+		int y = 1 + (int)i * ROW_H;
+		bool on = (int)i == c->selected;
+		if (on) {
+			gem_fill(cr, 1, y, w - 2, ROW_H);
+			gem_white(cr);
+		}
+		char *line = known_address_format(a);
+		cairo_save(cr);
+		cairo_rectangle(cr, 1, y, w - 2, ROW_H);
+		cairo_clip(cr);
+		gem_text(cr, line, PAD, y, ROW_H);
+		cairo_restore(cr);
+		g_free(line);
+		gem_black(cr);
+	}
+}
+
+static void draw_suggest(GtkDrawingArea *a, cairo_t *cr, int w, int h,
+		gpointer data) {
+	gem_draw_pixelated(cr, w, h, paint_suggest, data);
+}
+
+static void suggest_pressed(GtkGestureClick *g, int n, double x, double y,
+		struct compose *c) {
+	GtkWidget *field = c->completing != NULL ? c->completing : c->to;
+	suggest_pick(c, (int)(y - 1) / ROW_H);
+	/* Back to typing after it, not with the whole field selected. */
+	gtk_entry_grab_focus_without_selecting(GTK_ENTRY(field));
+}
+
+static void address_changed(GtkEditable *e, struct compose *c) {
+	if (!c->editing) {
+		suggest_show(c, GTK_WIDGET(e));
+	}
+}
+
+/* Up and Down choose; Return or Tab takes it; Escape closes the list;
+ * Shift+Delete forgets the one chosen. */
+static gboolean address_key(GtkEventControllerKey *k, guint key, guint code,
+		GdkModifierType mods, struct compose *c) {
+	if (c->suggestions == NULL || c->completing == NULL) {
+		return FALSE;
+	}
+	int n = (int)c->suggestions->len;
+	switch (key) {
+	case GDK_KEY_Down:
+		c->selected = (c->selected + 1) % n;
+		gtk_widget_queue_draw(c->suggest);
+		return TRUE;
+	case GDK_KEY_Up:
+		c->selected = (c->selected + n - 1) % n;
+		gtk_widget_queue_draw(c->suggest);
+		return TRUE;
+	case GDK_KEY_Return:
+	case GDK_KEY_KP_Enter:
+	case GDK_KEY_Tab:
+		if (mods & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
+			return FALSE; /* ^Return sends; Shift+Tab goes back */
+		}
+		suggest_pick(c, c->selected);
+		return TRUE;
+	case GDK_KEY_Escape:
+		suggest_hide(c);
+		return TRUE;
+	case GDK_KEY_Delete:
+		if (mods & GDK_SHIFT_MASK) {
+			struct known_address *a = c->suggestions->pdata[c->selected];
+			addresses_forget(a->address);
+			suggest_show(c, c->completing);
+			return TRUE;
+		}
+		return FALSE;
+	}
+	return FALSE;
+}
+
+static void address_left(GtkEventControllerFocus *f, struct compose *c) {
+	suggest_hide(c);
+}
+
+static void suggest_for(struct compose *c, GtkWidget *field) {
+	g_signal_connect(field, "changed", G_CALLBACK(address_changed), c);
+	GtkEventController *keys = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+	g_signal_connect(keys, "key-pressed", G_CALLBACK(address_key), c);
+	gtk_widget_add_controller(field, keys);
+	GtkEventController *focus = gtk_event_controller_focus_new();
+	g_signal_connect(focus, "leave", G_CALLBACK(address_left), c);
+	gtk_widget_add_controller(field, focus);
+}
+
 static void compose(struct draft *d) {
 	struct compose *c = g_new0(struct compose, 1);
 	c->hits = g_array_new(FALSE, FALSE, sizeof(struct hit));
@@ -4124,6 +4351,18 @@ static void compose(struct draft *d) {
 	gtk_overlay_set_child(GTK_OVERLAY(overlay), box);
 	c->host = GTK_OVERLAY(overlay);
 	gtk_window_set_child(GTK_WINDOW(c->window), overlay);
+	c->suggest = gtk_drawing_area_new();
+	gtk_widget_set_halign(c->suggest, GTK_ALIGN_START);
+	gtk_widget_set_valign(c->suggest, GTK_ALIGN_START);
+	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(c->suggest), draw_suggest,
+		c, NULL);
+	GtkGesture *pick = gtk_gesture_click_new();
+	g_signal_connect(pick, "pressed", G_CALLBACK(suggest_pressed), c);
+	gtk_widget_add_controller(c->suggest, GTK_EVENT_CONTROLLER(pick));
+	gtk_widget_set_visible(c->suggest, FALSE);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), c->suggest);
+	suggest_for(c, c->to);
+	suggest_for(c, c->cc);
 
 	GtkEventController *keys = gtk_shortcut_controller_new();
 	gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
@@ -4309,6 +4548,8 @@ static void activate(GtkApplication *app, gpointer data) {
 	}
 	ui.mail = mail_new(ui.account, ask_password, NULL);
 	ui.cache = cache_open();
+	addresses_open();
+	addresses_seed(ui.account->address);
 	GPtrArray *cached = cache_folders(ui.cache);
 	if (cached != NULL) {
 		show_folders(cached); /* and the Inbox, as it was */

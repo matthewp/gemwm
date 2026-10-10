@@ -181,7 +181,7 @@ if etpan.found() and gmime.found() and webkit.found()
 	rsvg = dependency('librsvg-2.0', required: false)
 	executable(
 		'gemmail',
-		['mail/gemmail.c', 'mail/account.c', 'mail/cache.c',
+		['mail/gemmail.c', 'mail/account.c', 'mail/addresses.c', 'mail/cache.c',
 			'mail/bills.c', 'mail/categories.c', 'mail/ledger.c', 'mail/logos.c',
 			'mail/magazine.c', 'mail/net.c',
 			'mail/imap.c', 'mail/message.c',
