@@ -26,6 +26,9 @@
 #include "gem-print.h"
 #include "gem-scrollbar.h"
 #include "gem-ui.h"
+#include "recent.h"
+
+#define RECENT_APP "gemview"
 
 #define MARGIN 16        /* around the pages */
 #define GAP 14           /* between them */
@@ -63,6 +66,7 @@ struct view {
 	struct app_menu *menu;
 
 	char *path;
+	char **recent;           /* in File > Open Recent, in order */
 	GFileMonitor *monitor;
 	PopplerDocument *doc;
 	int n;
@@ -1098,6 +1102,10 @@ static void open_path(struct view *v, const char *path) {
 	v->path = g_strdup(path);
 	watch(v);
 	title_from_doc(v);
+	recent_add(RECENT_APP, path);
+	for (GList *l = views; l != NULL; l = l->next) {
+		app_menu_update(((struct view *)l->data)->menu);
+	}
 
 	/* Where it was left. */
 	GKeyFile *kf = state_load();
@@ -1187,6 +1195,19 @@ static void chose_file(const char *path, void *data) {
 	}
 }
 
+/* From File > Open Recent: its window forward if it's open, else here, as
+ * the item selector would. */
+static void open_recent(struct view *v, const char *path) {
+	for (GList *l = views; l != NULL; l = l->next) {
+		struct view *other = l->data;
+		if (g_strcmp0(other->path, path) == 0) {
+			gtk_window_present(GTK_WINDOW(other->window));
+			return;
+		}
+	}
+	open_path(v, path);
+}
+
 static void ask_open(struct view *v) {
 	char *folder = v->path != NULL ? g_path_get_dirname(v->path) : NULL;
 	gem_file_choose(v->host, "Open a PDF", GEM_FILE_OPEN, folder, NULL,
@@ -1244,6 +1265,8 @@ enum {
 	ACT_OPEN = 1, ACT_PRINT, ACT_CLOSE, ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
 	ACT_FIT_WIDTH, ACT_FIT_PAGE, ACT_ACTUAL, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_NEXT, ACT_PREV, ACT_FIRST, ACT_LAST, ACT_THUMBS, ACT_TWO, ACT_COVER,
+	ACT_RECENT_CLEAR,
+	ACT_RECENT = 1000, /* File > Open Recent's first; the rest follow */
 };
 
 static void build_menus(struct app_menu *m, void *data) {
@@ -1253,6 +1276,8 @@ static void build_menus(struct app_menu *m, void *data) {
 		v->find_text[0] != '\0' ? 0 : APP_MENU_DISABLED;
 	app_menu_add_menu(m, "File");
 	app_menu_add_item(m, ACT_OPEN, "Open...", "^O", 0);
+	g_strfreev(v->recent);
+	v->recent = recent_submenu(m, RECENT_APP, ACT_RECENT, ACT_RECENT_CLEAR);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_PRINT, "Print...", "^P", doc);
 	app_menu_add_separator(m);
@@ -1366,7 +1391,24 @@ static void act(struct view *v, int id) {
 }
 
 static void menu_activate(uint32_t id, void *data) {
-	act(data, (int)id);
+	struct view *v = data;
+	if (gem_alert_up(v->host)) {
+		return;
+	}
+	if (id >= ACT_RECENT && id < ACT_RECENT + RECENT_SHOWN && v->recent != NULL &&
+			id - ACT_RECENT < g_strv_length(v->recent)) {
+		/* Copied: opening it rebuilds the menus, and this list. */
+		char *path = g_strdup(v->recent[id - ACT_RECENT]);
+		open_recent(v, path);
+		g_free(path);
+	} else if (id == ACT_RECENT_CLEAR) {
+		recent_clear(RECENT_APP);
+		for (GList *l = views; l != NULL; l = l->next) {
+			app_menu_update(((struct view *)l->data)->menu);
+		}
+	} else {
+		act(v, (int)id);
+	}
 }
 
 static gboolean key_pressed(GtkEventControllerKey *c, guint key, guint code,
@@ -1515,6 +1557,7 @@ static void view_free(void *data, GObject *gone) {
 	g_free(v->find_text);
 	g_free(v->message);
 	g_free(v->path);
+	g_strfreev(v->recent);
 	g_free(v);
 }
 

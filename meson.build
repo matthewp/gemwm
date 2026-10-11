@@ -374,7 +374,7 @@ if gtk4.found()
 	if poppler.found()
 		executable(
 			'gemview',
-			['view/gemview.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+			['view/gemview.c', 'lib/app-menu.c', 'lib/gem-alert.c', 'lib/recent.c',
 				'lib/gem-draw.c', 'lib/gem-file.c', 'lib/gem-popup.c',
 				'lib/gem-print.c', 'lib/gem-scrollbar.c', 'lib/gem-ui.c',
 				client_protocols],
@@ -466,7 +466,7 @@ if write_found
 		'gemwrite',
 		['write/gemwrite.c', 'write/page.c', 'write/ruler.c',
 			'write/comments.c', 'write/find.c', 'write/fonts.c',
-			'write/print.c', 'write/settings.c', 'lib/app-menu.c',
+			'write/print.c', 'write/settings.c', 'lib/app-menu.c', 'lib/recent.c',
 			'lib/gem-draw.c', 'lib/gem-ui.c', 'lib/gem-alert.c',
 			'lib/gem-file.c', 'lib/gem-popup.c', 'lib/gem-scrollbar.c',
 			'lib/gem-print.c', client_protocols],

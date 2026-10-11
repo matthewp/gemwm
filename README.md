@@ -977,8 +977,9 @@ bars, over an info line with the page you're on and the zoom. Poppler, the
 engine Evince uses, reads and draws them; a page is drawn at the screen's
 real resolution, so text is sharp at any zoom.
 
-- **File**: Open... (^O, in GEM's item selector), Print... (^P, GemWM's
-  print dialog), Close.
+- **File**: Open... (^O, in GEM's item selector), Open Recent (the last
+  five opened, and Clear Menu), Print... (^P, GemWM's print dialog),
+  Close.
 - **Edit**: Find... (^F): a line over the info line; every match on the
   pages showing is boxed and the current one inverted, Return and
   Shift+Return (or ^G and ^Shift+G) go to the next and previous, Escape
@@ -1012,7 +1013,8 @@ an info line with the word count and the zoom. Documents are OpenDocument
 Text (`.odt`, as LibreOffice and Word read) or plain `.txt`. Its core, the
 document, layout, file formats and commands, is forked from Ream.
 
-- **File**: New (another window), Open..., Save, Save As..., Revert to
+- **File**: New (another window), Open..., Open Recent (the last five
+  opened or saved as, and Clear Menu), Save, Save As..., Revert to
   Saved, Export as Markdown... or PDF..., Print... (GemWM's print dialog,
   or a PDF in Documents). Files are picked in GEM's item selector: edit
   the directory line to go elsewhere or change its pattern, double-click

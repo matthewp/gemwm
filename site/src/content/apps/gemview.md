@@ -22,7 +22,8 @@ gemview FILE.pdf...     # each in a window of its own
 
 ## Its menus
 
-- **File**: Open... (^O), Print... (^P, GemWM's print dialog), Close.
+- **File**: Open... (^O), Open Recent (the last five opened, and Clear Menu),
+  Print... (^P, GemWM's print dialog), Close.
 - **Edit**: Find... (^F) opens a line over the info line. Every match on the
   pages showing is boxed and the current one inverted; Return and
   Shift+Return (or ^G and ^Shift+G) go to the next and previous, and Escape

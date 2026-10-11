@@ -26,6 +26,7 @@
 #include "gem-print.h"
 #include "gem-scrollbar.h"
 #include "gem-ui.h"
+#include "recent.h"
 #include "layout/layout_pango.h"
 #include "page.h"
 #include "print.h"
@@ -52,10 +53,13 @@ enum action {
 	ACT_SINGLE, ACT_115, ACT_ONE_HALF, ACT_DOUBLE,
 	ACT_INDENT, ACT_OUTDENT, ACT_BULLETS, ACT_NUMBERS, ACT_CLEAR_TABS,
 	ACT_RULER, ACT_COMMENTS, ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_FIT,
-	ACT_SPELLING, ACT_AUTOSAVE, ACT_SYNC,
+	ACT_SPELLING, ACT_AUTOSAVE, ACT_SYNC, ACT_RECENT_CLEAR,
 	ACT_SPELL_ADD, ACT_SPELL_IGNORE,
 	ACT_SUGGESTION, /* the first spelling suggestion; the rest follow */
 };
+
+#define RECENT_APP "gemwrite"
+#define ACT_RECENT 1000 /* File > Open Recent's first; the rest follow */
 
 /* An action's keys, and the command-table command it runs, if it's one.
  * NULL keys take the command's own. */
@@ -128,6 +132,7 @@ struct win {
 	struct gem_popup *popup;
 	struct app_menu *menu;
 	char **suggestions;        /* on the right-click menu */
+	char **recent;             /* in File > Open Recent, in order */
 
 	GArray *info_hits;
 	char *message;             /* on the info line for a while */
@@ -382,6 +387,14 @@ static char *with_extension(const char *path, const char *ext) {
 	return has ? g_strdup(path) : g_strconcat(path, ext, NULL);
 }
 
+/* In File > Open Recent, every window's. */
+static void remember(const char *path) {
+	recent_add(RECENT_APP, path);
+	for (GList *l = app.windows; l != NULL; l = l->next) {
+		app_menu_update(((struct win *)l->data)->menu);
+	}
+}
+
 static bool save_to(struct win *w, const char *path) {
 	char *msg = NULL;
 	if (!wp_editor_save(w->ed, path, &msg)) {
@@ -390,6 +403,9 @@ static bool save_to(struct win *w, const char *path) {
 		return false;
 	}
 	w->changed_on_disk = false; /* ours is the one on disk now */
+	if (path != NULL) {
+		remember(path); /* saved as: somewhere new */
+	}
 	update(w);
 	return true;
 }
@@ -550,6 +566,7 @@ static bool load(struct win *w, const char *path) {
 		free(msg);
 		return false;
 	}
+	remember(path);
 	focus_page(w);
 	return true;
 }
@@ -740,6 +757,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "File");
 	item(m, ACT_NEW, "New", true, false);
 	item(m, ACT_OPEN, "Open...", true, false);
+	g_strfreev(w->recent);
+	w->recent = recent_submenu(m, RECENT_APP, ACT_RECENT, ACT_RECENT_CLEAR);
 	app_menu_add_separator(m);
 	item(m, ACT_SAVE, "Save", true, false);
 	item(m, ACT_SAVE_AS, "Save As...", true, false);
@@ -821,7 +840,32 @@ static void build_menus(struct app_menu *m, void *data) {
 
 static void menu_activate(uint32_t id, void *data) {
 	struct win *w = data;
-	if (!held(w)) {
+	if (held(w)) {
+		return;
+	}
+	if (id >= ACT_RECENT && id < ACT_RECENT + RECENT_SHOWN && w->recent != NULL &&
+			id - ACT_RECENT < g_strv_length(w->recent)) {
+		/* Copied: opening it rebuilds the menus, and this list. */
+		char *path = g_strdup(w->recent[id - ACT_RECENT]);
+		struct win *open = NULL;
+		for (GList *l = app.windows; l != NULL; l = l->next) {
+			struct win *other = l->data;
+			if (g_strcmp0(wp_editor_path(other->ed), path) == 0) {
+				open = other;
+			}
+		}
+		if (open != NULL) {
+			gtk_window_present(GTK_WINDOW(open->window)); /* open already */
+		} else {
+			open_path(w, path);
+		}
+		g_free(path);
+	} else if (id == ACT_RECENT_CLEAR) {
+		recent_clear(RECENT_APP);
+		for (GList *l = app.windows; l != NULL; l = l->next) {
+			app_menu_update(((struct win *)l->data)->menu);
+		}
+	} else {
 		run(w, id);
 	}
 }
@@ -1109,6 +1153,7 @@ static void win_free(gpointer data, GObject *where_the_window_was) {
 	g_free(w->monitor_path);
 	g_free(w->message);
 	g_strfreev(w->suggestions);
+	g_strfreev(w->recent);
 	g_array_unref(w->info_hits);
 	wp_editor_free(w->ed);
 	g_free(w);

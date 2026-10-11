@@ -17,7 +17,8 @@ and Word read) or plain `.txt`.
 
 ## Its menus
 
-- **File**: New, Open..., Save, Save As..., Revert to Saved, Export as
+- **File**: New, Open..., Open Recent (the last five opened or saved as, and
+  Clear Menu), Save, Save As..., Revert to Saved, Export as
   Markdown... or PDF..., Print...
 - **Edit**: Undo, Redo, the clipboard, Find... (^F) and Replace... (^H) in a
   box that stays up while you work, Find Next (^G), and Add Comment (^Alt+M).
