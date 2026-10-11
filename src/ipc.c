@@ -468,7 +468,10 @@ static char *execute(struct server *server, struct ipc_client *client,
 		return strdup(ok);
 	}
 	if (strcmp(cmd, "close-window") == 0) {
-		struct view *view = view_by_id(server, argv[1]);
+		/* In the overview, "focused" is the one selected. */
+		struct view *view = argv[1] != NULL && strcmp(argv[1], "focused") == 0 &&
+			overview_selected(server) != NULL ? overview_selected(server) :
+			view_by_id(server, argv[1]);
 		if (view == NULL) {
 			return reply_error("no such window");
 		}

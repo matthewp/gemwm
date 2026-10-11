@@ -1124,7 +1124,8 @@ every program that asks. It takes effect at the next login.
   selected one is drawn as the active window: Super+Tab (Shift: back), the
   arrow keys or the pointer move the selection; Return or a click brings it
   forward, and Escape, Super+W again or a click on the desktop leaves
-  everything as it was.
+  everything as it was. Super+Q closes the selected window and the
+  overview stays, the others gliding into their new places.
 - Fullscreen (a video, a browser's F11, a game, or Super+F) covers the
   whole screen, menu bar and all, without a frame. Focusing another window
   on that workspace brings it back out, into its old place.

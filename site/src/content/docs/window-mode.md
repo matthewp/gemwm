@@ -36,7 +36,8 @@ the Mac's Mission Control does.
 The selected one is drawn as the active window: Super+Tab (Shift: back), the
 arrow keys or the pointer move the selection; Return or a click brings it
 forward, and Escape, Super+W again or a click on the desktop leaves everything
-as it was.
+as it was. Super+Q closes the selected window and the overview stays, the
+others gliding into their new places.
 
 ## Fullscreen
 

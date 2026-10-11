@@ -12,9 +12,15 @@
  * (and those are told to keep drawing, as they would be if they showed),
  * so a video plays on. Opening, they glide from their places into the
  * grid, and back again when it closes, as long as animations are on.
+ *
+ * Super+Q closes the selected window, and the overview stays: the others
+ * glide into the grid as it is without it, the selection on the one that
+ * took its place. (If closing it brings up a window, say to save first,
+ * the overview gets out of the way.)
  */
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
@@ -42,6 +48,7 @@ struct thumb {
 	struct wlr_scene_rect *highlight_rects[4];
 	struct wlr_box from, to;   /* its window's frame box, its place in the grid */
 	struct wlr_box now;        /* where it's drawn */
+	struct wlr_box src, dst;   /* the glide under way: from where, to where */
 	bool drawn_selected;
 	int drawn_w, drawn_h;
 };
@@ -266,12 +273,9 @@ bool overview_tick(struct server *server) {
 		}
 	}
 	double e = ease_out(t);
-	if (o.closing) {
-		e = 1 - e;
-	}
 	for (int i = 0; i < o.count; i++) {
 		struct thumb *t2 = &o.thumbs[i];
-		lerp(&t2->from, &t2->to, e, &t2->now);
+		lerp(&t2->src, &t2->dst, e, &t2->now);
 		draw_thumb(server, t2, i == o.selected && !o.closing);
 	}
 	if (o.closing && o.start == 0) {
@@ -282,6 +286,18 @@ bool overview_tick(struct server *server) {
 }
 
 /* ---- Opening and closing ------------------------------------------------- */
+
+/* Every thumbnail off from where it's drawn now to dst (true: its place in
+ * the grid; false: its window's), so a glide can start mid-glide. */
+static void glide(struct server *server, bool into_grid) {
+	for (int i = 0; i < o.count; i++) {
+		struct thumb *t = &o.thumbs[i];
+		t->src = t->now;
+		t->dst = into_grid ? t->to : t->from;
+	}
+	o.start = server->anim_ms > 0 ? now_ms() : 0;
+	schedule_frames(server);
+}
 
 static void free_thumbs(void) {
 	free(o.thumbs);
@@ -334,7 +350,7 @@ void overview_open(struct server *server) {
 	o.selected = 0;
 	o.closing = false;
 	o.chosen = NULL;
-	o.start = server->anim_ms > 0 ? now_ms() : 0;
+	glide(server, true);
 	wlr_scene_node_set_enabled(&server->active_workspace->tree->node, false);
 	highlight_update(server);
 	schedule_frames(server);
@@ -372,11 +388,9 @@ void overview_close(struct server *server, struct view *chosen) {
 			wlr_scene_node_raise_to_top(&o.thumbs[i].tree->node);
 		}
 	}
-	o.start = server->anim_ms > 0 ? now_ms() : 0;
+	glide(server, false);
 	if (o.start == 0) {
 		finish_close(server);
-	} else {
-		schedule_frames(server);
 	}
 }
 
@@ -505,12 +519,43 @@ bool overview_button(struct server *server, double x, double y, bool pressed) {
 	return true;
 }
 
-/* A window going: its thumbnail would point at nothing. */
-void overview_view_gone(struct server *server, struct view *view) {
-	for (int i = 0; i < o.count; i++) {
-		if (o.thumbs[i].view == view) {
-			overview_cancel(server);
-			return;
-		}
+/* The window Super+Q closes while it's up: the selected one, not the one
+ * that had focus before. NULL when it's not up. */
+struct view *overview_selected(struct server *server) {
+	if (o.tree == NULL || o.closing || o.selected < 0 || o.selected >= o.count) {
+		return NULL;
 	}
+	return o.thumbs[o.selected].view;
+}
+
+/* A window gone: its thumbnail goes, and the rest glide into the grid as
+ * it is without it; the last one gone, the overview goes too. */
+void overview_view_gone(struct server *server, struct view *view) {
+	int i = 0;
+	while (i < o.count && o.thumbs[i].view != view) {
+		i++;
+	}
+	if (i == o.count) {
+		return;
+	}
+	wlr_scene_node_destroy(&o.thumbs[i].tree->node);
+	memmove(&o.thumbs[i], &o.thumbs[i + 1], (o.count - i - 1) * sizeof(*o.thumbs));
+	o.count--;
+	if (o.chosen == view) {
+		o.chosen = NULL;
+	}
+	if (o.count == 0) {
+		o.chosen = NULL;
+		finish_close(server);
+		return;
+	}
+	/* The selection stays put: on the one that took its place. */
+	if (o.selected > i || o.selected >= o.count) {
+		o.selected--;
+	}
+	if (o.closing) {
+		return; /* gliding back already, to windows that haven't moved */
+	}
+	lay_out(server);
+	glide(server, true);
 }

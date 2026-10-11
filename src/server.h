@@ -334,6 +334,7 @@ bool overview_key(struct server *server, xkb_keysym_t sym);
 void overview_pointer(struct server *server, double x, double y);
 bool overview_button(struct server *server, double x, double y, bool pressed);
 void overview_view_gone(struct server *server, struct view *view);
+struct view *overview_selected(struct server *server);
 void greeter_fit(struct server *server);
 void highlight_update(struct server *server);
 
