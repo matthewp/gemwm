@@ -127,6 +127,7 @@ static const char default_config[] =
 	"[Desk > Office]\n"
 	"GemWrite = gemwrite\n"
 	"GemView = gemview\n"
+	"GemPlay = gemplay\n"
 	"\n"
 	"[Desk > Games]\n"
 	"Crossword Puzzle = gemwm-crossword\n"

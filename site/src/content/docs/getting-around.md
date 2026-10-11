@@ -24,7 +24,7 @@ menus if it has any, and **Options**. With nothing focused, it's the desktop's
 menus: Desk, File, View and Options.
 
 **Desk** is where programs start: **Internet** (the web browser, mail),
-**Office** (GemWrite), **Tools** (files, a terminal, printing, notifications),
+**Office** (GemWrite, GemView, GemPlay), **Tools** (files, a terminal, printing, notifications),
 **Games**. Lock Screen, Log Out, Restart and Shut Down are at the bottom of
 Desk, so they're always there. All of it can be changed: see [the menu bar](/docs/menu-bar/).
 

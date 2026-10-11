@@ -6,7 +6,7 @@ icon: folder
 command: "gemfiles"
 screenshot: "/screenshots/gemfiles.png"
 alt: "Two GemFiles windows: home as icons, and Pictures in front with one picture picked"
-order: 5
+order: 6
 ---
 
 GemFiles (**Desk > Tools > Files**) shows folders in windows, as GEM's desktop

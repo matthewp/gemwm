@@ -6,7 +6,7 @@ icon: cards
 command: "gemwm-solitaire"
 screenshot: "/screenshots/solitaire.png"
 alt: "Solitaire: the stock, waste and foundations above seven columns of cards on dark green"
-order: 8
+order: 9
 ---
 
 **Desk > Games > Solitaire**: Klondike, the patience game of every desktop,

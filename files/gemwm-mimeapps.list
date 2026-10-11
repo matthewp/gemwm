@@ -1,5 +1,17 @@
 # GemWM's own defaults, read only in a GemWM session (XDG_CURRENT_DESKTOP
-# is GemWM): folders open in GemFiles. Your ~/.config/mimeapps.list (as
-# xdg-mime default writes it) still comes first.
+# is GemWM): folders open in GemFiles, music in GemPlay. Your
+# ~/.config/mimeapps.list (as xdg-mime default writes it) still comes first.
 [Default Applications]
 inode/directory=org.gemwm.Files.desktop
+audio/mpeg=org.gemwm.Play.desktop
+audio/flac=org.gemwm.Play.desktop
+audio/x-flac=org.gemwm.Play.desktop
+audio/ogg=org.gemwm.Play.desktop
+audio/x-vorbis+ogg=org.gemwm.Play.desktop
+audio/opus=org.gemwm.Play.desktop
+audio/x-opus+ogg=org.gemwm.Play.desktop
+audio/mp4=org.gemwm.Play.desktop
+audio/x-m4a=org.gemwm.Play.desktop
+audio/aac=org.gemwm.Play.desktop
+audio/x-wav=org.gemwm.Play.desktop
+audio/wav=org.gemwm.Play.desktop

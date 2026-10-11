@@ -16,6 +16,7 @@ order: 2
 | Ctrl+Print | drag out an area, or click a window to take it |
 | Alt+Print | screenshot of the focused window |
 | Volume keys | volume up, down, mute; mic mute |
+| Media keys | play/pause, stop, next, previous, in [GemPlay](/apps/gemplay/) or any MPRIS player |
 | Super+Q | close the focused window |
 | Super+Z | full size (toggle) |
 | Super+F | fullscreen (toggle) |

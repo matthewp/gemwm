@@ -125,6 +125,7 @@ executable(
 )
 
 install_data('session/gemwm-session', 'session/gemwm-screenshot',
+	'session/gemwm-media',
 	install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')
 configure_file(
 	input: 'session/gemwm.desktop.in',
@@ -389,6 +390,30 @@ if gtk4.found()
 	)
 	install_data('files/org.gemwm.Files.desktop', 'files/gemwm-mimeapps.list',
 		install_dir: get_option('datadir') / 'applications')
+
+	# gemplay: an audio player. FFmpeg decodes, PipeWire plays.
+	avformat = dependency('libavformat', required: false)
+	avcodec = dependency('libavcodec', required: false)
+	avutil = dependency('libavutil', required: false)
+	swresample = dependency('libswresample', required: false)
+	pipewire = dependency('libpipewire-0.3', required: false)
+	if avformat.found() and avcodec.found() and avutil.found() and \
+			swresample.found() and pipewire.found()
+		executable(
+			'gemplay',
+			['player/gemplay.c', 'src/dither.c', 'lib/app-menu.c',
+				'lib/gem-alert.c', 'lib/gem-draw.c', 'lib/gem-file.c',
+				'lib/gem-popup.c', 'lib/gem-scrollbar.c', 'lib/gem-ui.c',
+				client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gdk-pixbuf-2.0'), avformat, avcodec, avutil, swresample,
+				pipewire, wayland_client, cairo, libm],
+			include_directories: ['lib', 'src'],
+			install: true,
+		)
+		install_data('player/org.gemwm.Play.desktop',
+			install_dir: get_option('datadir') / 'applications')
+	endif
 
 	# gemview: a PDF viewer. Built when poppler-glib is there; Poppler is
 	# GPL, so a gemview binary is too (GemWM's own code stays BSD).

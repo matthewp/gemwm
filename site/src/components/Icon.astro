@@ -111,6 +111,12 @@ const icons: Record<string, string> = {
 		path('M21 11.5 Q24 16 21 20.5', 'none', 1.5),
 		path('M24.5 8 Q30 16 24.5 24', 'none', 1.5),
 	].join(''),
+	note: [
+		`<ellipse cx="10" cy="24.5" rx="4.5" ry="3.5" transform="rotate(-20 10 24.5)"/>`,
+		`<ellipse cx="24" cy="21.5" rx="4.5" ry="3.5" transform="rotate(-20 24 21.5)"/>`,
+		fill(13, 8, 2, 16), fill(27, 5, 2, 16),
+		`<path d="M13 8 L29 5 L29 9 L13 12 Z"/>`,
+	].join(''),
 	printer: [
 		box(9, 3, 15, 10),
 		box(4, 11, 24, 12),

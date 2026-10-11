@@ -83,6 +83,7 @@ stay crisp); `-S 2` forces pixel doubling.
 | Ctrl+Print          | drag out an area, or click a window      |
 | Alt+Print           | screenshot of the focused window         |
 | Volume keys         | volume up, down, mute; mic mute          |
+| Media keys          | play/pause, stop, next, previous (`gemwm-media`) |
 | Super+Q             | close the focused window                 |
 | Super+Z             | maximize the focused window (toggle)     |
 | Super+F             | fullscreen the focused window (toggle)   |
@@ -1018,6 +1019,34 @@ first).
 
 Dragging between windows works in any program now: GemWM passes drags
 and drops between them.
+
+## GemPlay
+
+GemPlay (`gemplay`, Desk > Office) plays music. A deck at the top shows
+the album's cover in the ST's colours (from the file, or a cover.jpg or
+folder.jpg beside it), the track's title, artist and album, a bar for
+where it's got to (click or drag along it to go there), and GEM buttons
+for Previous, Play/Pause, Stop and Next; the playlist is under it.
+`gemplay FILE|FOLDER...` adds to the playlist and plays.
+
+- **File**: Add Files... (^O), Add Folder... (everything in it, sorted),
+  Clear Playlist, Quit (^Q). Music dropped on the window goes on too.
+- **Edit**: Remove (Delete), Select All.
+- **Controls**: Play/Pause (Space), Stop, Next (^Right), Previous (^Left;
+  a few seconds in, it starts the track again), Shuffle, and Repeat Off,
+  All or One. Left and Right go back and on five seconds; double-click a
+  track, or Return, to play it.
+
+FFmpeg reads and decodes nearly anything (MP3, FLAC, Ogg, Opus, AAC/M4A,
+WAV...), and the music plays through PipeWire, so it's in your volume
+controls like anything else; one track runs into the next with no gap.
+The playlist, where you were, Shuffle and Repeat are kept in
+`~/.local/state/gemwm/play`.
+
+It's an MPRIS player, so the media keys work (they run `gemwm-media`,
+which uses playerctl if it's installed, else gdbus), as does
+`playerctl -p gemplay`. It's built when FFmpeg's libraries and PipeWire's
+are installed (`pacman -S ffmpeg pipewire`).
 
 ## GemView
 

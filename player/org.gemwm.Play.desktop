@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GemPlay
+GenericName=Audio Player
+Comment=Play music, drawn as GEM would have
+Exec=gemplay %F
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/x-wav;audio/wav;audio/x-wavpack;audio/x-ape;audio/x-aiff;audio/x-ms-wma;audio/x-matroska;audio/x-musepack;inode/directory;
+Categories=AudioVideo;Audio;Player;
+StartupNotify=false

@@ -36,6 +36,7 @@ you write only what you change.
 | `~/.cache/gemmail/` | GemMail's mail, for offline reading and a quick start |
 | `~/.local/state/gemwm/files` | [GemFiles](/apps/gemfiles/): icons or text, the sort, hidden files |
 | `~/.local/state/gemwm/gemview` | where each PDF was left, and its zoom |
+| `~/.local/state/gemwm/play` | [GemPlay](/apps/gemplay/)'s playlist, Shuffle and Repeat |
 | `~/.local/state/gemwm/gemview-recent`, `gemwrite-recent` | File > Open Recent's documents |
 | `~/.local/state/gemwm/solitaire` | Solitaire's draw option and statistics |
 | `~/.local/share/gemwm/crossword/` | [crossword](/apps/crossword/) puzzles and progress |

@@ -1,0 +1,37 @@
+#!/bin/sh
+# gemwm-media play-pause|play|pause|stop|next|previous: tells the music
+# player (an MPRIS one: GemPlay, or another) what to do, for the media
+# keys. playerctl does it if it's installed; else the first player on the
+# session bus, playing ones first, is told through gdbus.
+
+cmd=${1:-play-pause}
+if command -v playerctl >/dev/null; then
+	exec playerctl "$cmd"
+fi
+case $cmd in
+play-pause) method=PlayPause ;;
+play) method=Play ;;
+pause) method=Pause ;;
+stop) method=Stop ;;
+next) method=Next ;;
+previous) method=Previous ;;
+*)
+	echo "usage: gemwm-media play-pause|play|pause|stop|next|previous" >&2
+	exit 2
+	;;
+esac
+
+players=$(gdbus call --session --dest org.freedesktop.DBus \
+	--object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames |
+	grep -o "org\.mpris\.MediaPlayer2\.[^']*")
+chosen=
+for p in $players; do
+	status=$(gdbus call --session --dest "$p" --object-path /org/mpris/MediaPlayer2 \
+		--method org.freedesktop.DBus.Properties.Get \
+		org.mpris.MediaPlayer2.Player PlaybackStatus 2>/dev/null)
+	case $status in *Playing*) chosen=$p; break ;; esac
+	[ -z "$chosen" ] && chosen=$p
+done
+[ -n "$chosen" ] || exit 1
+exec gdbus call --session --dest "$chosen" --object-path /org/mpris/MediaPlayer2 \
+	--method "org.mpris.MediaPlayer2.Player.$method" >/dev/null
