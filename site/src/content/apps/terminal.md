@@ -6,7 +6,7 @@ icon: terminal
 command: "gemwm-terminal"
 screenshot: "/screenshots/terminal.png"
 alt: "The GemWM terminal, light theme, black on white in the ST font"
-order: 5
+order: 6
 ---
 
 Super+T and **Desk > Tools > Terminal** open `gemwm-terminal`:

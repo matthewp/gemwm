@@ -34,6 +34,7 @@ you write only what you change.
 | `~/.local/state/gemweb/zoom` | zoom remembered per site |
 | `~/.local/share/gemmail/addresses.sqlite` | the people you write to, for GemMail's suggestions |
 | `~/.cache/gemmail/` | GemMail's mail, for offline reading and a quick start |
+| `~/.local/state/gemwm/files` | [GemFiles](/apps/gemfiles/): icons or text, the sort, hidden files |
 | `~/.local/state/gemwm/gemview` | where each PDF was left, and its zoom |
 | `~/.local/state/gemwm/gemview-recent`, `gemwrite-recent` | File > Open Recent's documents |
 | `~/.local/state/gemwm/solitaire` | Solitaire's draw option and statistics |

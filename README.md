@@ -975,6 +975,50 @@ self-signed one, `certificate = ~/server.pem` trusts that one. Sent and
 Trash are found by the flags servers give them, or by name, or `sent =`
 `trash =` and `archive =`.
 
+## GemFiles
+
+GemFiles (`gemfiles`, Desk > Tools > Files) shows folders in windows, as
+GEM's desktop did. Each window is one folder: its things as icons (a
+folder, a document, a picture, a program, each with its name under it) or
+as text, a line each with GEM's diamond for folders, size and date.
+Double-click a folder and the window shows it; the close box goes back up
+a folder at a time, as GEM's did, and closes the window at the top of
+where it is (home, a disk, /). `gemfiles FOLDER` opens that folder; given
+a file, its folder with it picked.
+
+- **Picking**: click, Shift-click for a run, Ctrl-click for one more, or
+  drag a box round things from an empty spot. Arrow keys move, typing a
+  name goes to it, Return opens.
+- **Moving and copying**: drag things to another window, or onto a folder,
+  to move them there (hold Ctrl to copy; to another disk, they're
+  copied). Cut, Copy and Paste do the same through the clipboard, which
+  other programs share. Something already there is asked about (Replace,
+  Skip or Cancel), and a copy into the same folder is named "name copy".
+  It all happens in the background, its progress on the info line.
+- **File**: New Window (^N), Open (^O), Show Info... (^I, or F2: what it
+  is, and its name to change), New Folder... (^Shift+N), Move to Trash
+  (Delete), Empty Trash..., Close Window (^W).
+- **View**: Show as Icons or Text, Sort by Name, Date, Size or Type
+  (folders first), Show Hidden Files (^H). One setting for every window,
+  kept in `~/.local/state/gemwm/files`.
+- **Go**: Enclosing Folder (^Up or Backspace), home and its usual folders,
+  the Trash, the disks that are mounted, Computer (/), and Go to Folder...
+  (^L).
+
+Move to Trash uses the freedesktop Trash that other programs share. Go >
+Trash shows it, where File has Put Back (to where it came from) and
+Delete... (for good) instead. Files open in their usual application.
+
+In a GemWM session, folders other programs open (a browser's "show in
+folder", say) open in GemFiles: GemWM installs `gemwm-mimeapps.list`,
+defaults read only when `XDG_CURRENT_DESKTOP` is GemWM, so other desktops
+keep theirs. To use another file manager in GemWM:
+`xdg-mime default yazi.desktop inode/directory` (your own choice comes
+first).
+
+Dragging between windows works in any program now: GemWM passes drags
+and drops between them.
+
 ## GemView
 
 GemView (`gemview`, Desk > Office) reads PDFs. The pages stand on GEM's

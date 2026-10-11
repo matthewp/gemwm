@@ -1,0 +1,5 @@
+# GemWM's own defaults, read only in a GemWM session (XDG_CURRENT_DESKTOP
+# is GemWM): folders open in GemFiles. Your ~/.config/mimeapps.list (as
+# xdg-mime default writes it) still comes first.
+[Default Applications]
+inode/directory=org.gemwm.Files.desktop

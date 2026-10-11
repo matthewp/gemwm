@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GemFiles
+GenericName=File Manager
+Comment=Folders in windows, as GEM's desktop showed them
+Exec=gemfiles %U
+MimeType=inode/directory;
+Categories=System;FileManager;
+StartupNotify=false

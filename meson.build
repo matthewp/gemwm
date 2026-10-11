@@ -376,6 +376,20 @@ if gtk4.found()
 	install_data('solitaire/org.gemwm.Solitaire.desktop',
 		install_dir: get_option('datadir') / 'applications')
 
+	# gemfiles: folders in windows, as GEM's desktop showed them.
+	executable(
+		'gemfiles',
+		['files/gemfiles.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+			'lib/gem-draw.c', 'lib/gem-popup.c', 'lib/gem-scrollbar.c',
+			'lib/gem-ui.c', client_protocols],
+		dependencies: [gtk4, dependency('gtk4-wayland'), wayland_client, cairo,
+			libm],
+		include_directories: 'lib',
+		install: true,
+	)
+	install_data('files/org.gemwm.Files.desktop', 'files/gemwm-mimeapps.list',
+		install_dir: get_option('datadir') / 'applications')
+
 	# gemview: a PDF viewer. Built when poppler-glib is there; Poppler is
 	# GPL, so a gemview binary is too (GemWM's own code stays BSD).
 	poppler = dependency('poppler-glib', required: false)

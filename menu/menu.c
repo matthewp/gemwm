@@ -133,6 +133,7 @@ static const char default_config[] =
 	"Solitaire = gemwm-solitaire\n"
 	"\n"
 	"[Desk > Tools]\n"
+	"Files = gemfiles\n"
 	"Terminal = ${TERMINAL:-gemwm-terminal}\n"
 	"Printing = gemwm-printing\n"
 	"Notifications = gemwm-notify --history\n"
