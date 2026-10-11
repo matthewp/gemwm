@@ -76,7 +76,7 @@ stay crisp); `-S 2` forces pixel doubling.
 
 | Keys                | Action                                   |
 |---------------------|------------------------------------------|
-| Super+T, Alt+Return | open a terminal (`$TERMINAL`, or the GEM one) |
+| Super+T             | open a terminal (`$TERMINAL`, or the GEM one) |
 | Super+B             | open the default browser                 |
 | Print               | screenshot of the whole screen           |
 | Shift+Print         | screenshot of an area you drag out       |
@@ -633,7 +633,7 @@ to send every terminal to workspace 2:
 
 ## Terminal
 
-Super+T, Alt+Return and Desk > Tools > Terminal open `gemwm-terminal`:
+Super+T and Desk > Tools > Terminal open `gemwm-terminal`:
 [foot](https://codeberg.org/dnkl/foot) dressed as an Atari ST terminal, in
 the ST's own 8x16 system font with the ST palette. There are two themes,
 light (the mono monitor's black on white) and dark (reverse video):

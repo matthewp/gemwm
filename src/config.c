@@ -55,7 +55,6 @@ static const char default_config[] =
 	"Super+Shift+7 = move-window focused 7\n"
 	"Super+Shift+8 = move-window focused 8\n"
 	"Super+Shift+9 = move-window focused 9\n"
-	"Alt+Return = exec ${TERMINAL:-gemwm-terminal}\n"
 	"Alt+Tab = cycle-windows next\n"
 	"Alt+Shift+Tab = cycle-windows prev\n"
 	"Super+Left = focus-direction left\n"

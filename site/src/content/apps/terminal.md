@@ -9,7 +9,7 @@ alt: "The GemWM terminal, light theme, black on white in the ST font"
 order: 5
 ---
 
-Super+T, Alt+Return and **Desk > Tools > Terminal** open `gemwm-terminal`:
+Super+T and **Desk > Tools > Terminal** open `gemwm-terminal`:
 [foot](https://codeberg.org/dnkl/foot) dressed as an Atari ST terminal, in the
 ST's own 8x16 system font with the ST palette.
 

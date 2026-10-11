@@ -45,7 +45,7 @@ right are the menu apps: Wi-Fi, Bluetooth, volume, the battery and the clock.
 
 | Keys | Does |
 |---|---|
-| Super+T, Alt+Return | open a terminal |
+| Super+T | open a terminal |
 | Super+B | open the web browser |
 | Super+Q | close the focused window |
 | Super+Tab, Alt+Tab | the next window (Shift: back) |

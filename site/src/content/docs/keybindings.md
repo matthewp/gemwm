@@ -9,7 +9,7 @@ order: 2
 
 | Keys | Does |
 |---|---|
-| Super+T, Alt+Return | open a terminal (`$TERMINAL`, or the [GEM one](/apps/terminal/)) |
+| Super+T | open a terminal (`$TERMINAL`, or the [GEM one](/apps/terminal/)) |
 | Super+B | open the default browser |
 | Print | screenshot of the whole screen |
 | Shift+Print | screenshot of an area you drag out |
