@@ -306,9 +306,52 @@ static void seat_request_set_selection(struct wl_listener *listener,
 	wlr_seat_set_selection(server->seat, event->source, event->serial);
 }
 
+/* ---- Drag and drop ------------------------------------------------------ */
+
+/* A client starting a drag (files out of GemFiles, a link out of GemWeb):
+ * let it, if it's from a press of a button on it. wlroots takes the drag
+ * from there: the pointer's events go to it, and on to whatever's under
+ * the pointer as drag-and-drop ones. */
+static void seat_request_start_drag(struct wl_listener *listener, void *data) {
+	struct server *server =
+		wl_container_of(listener, server, request_start_drag);
+	struct wlr_seat_request_start_drag_event *event = data;
+	if (wlr_seat_validate_pointer_grab_serial(server->seat, event->origin,
+			event->serial)) {
+		wlr_seat_start_pointer_drag(server->seat, event->drag, event->serial);
+	} else {
+		wlr_data_source_destroy(event->drag->source);
+	}
+}
+
+static void drag_icon_destroy(struct wl_listener *listener, void *data) {
+	struct server *server = wl_container_of(listener, server, drag_icon_destroy);
+	wl_list_remove(&server->drag_icon_destroy.link);
+	server->drag_icon = NULL; /* its scene node went with it */
+}
+
+/* What's dragged, drawn over everything at the pointer. */
+static void seat_start_drag(struct wl_listener *listener, void *data) {
+	struct server *server = wl_container_of(listener, server, start_drag);
+	struct wlr_drag *drag = data;
+	if (drag->icon == NULL || server->drag_icon != NULL) {
+		return;
+	}
+	server->drag_icon = wlr_scene_drag_icon_create(server->layer_drag,
+		drag->icon);
+	wlr_scene_node_set_position(&server->drag_icon->node,
+		(int)server->cursor->x, (int)server->cursor->y);
+	server->drag_icon_destroy.notify = drag_icon_destroy;
+	wl_signal_add(&drag->icon->events.destroy, &server->drag_icon_destroy);
+}
+
 /* ---- Pointer ------------------------------------------------------------ */
 
 static void process_cursor_motion(struct server *server, uint32_t time) {
+	if (server->drag_icon != NULL) {
+		wlr_scene_node_set_position(&server->drag_icon->node,
+			(int)server->cursor->x, (int)server->cursor->y);
+	}
 	if (lock_active(server)) {
 		/* Locked: only the locker's surfaces are there to point at. */
 		double lsx, lsy;
@@ -742,6 +785,11 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 		&server.request_set_selection);
+	server.request_start_drag.notify = seat_request_start_drag;
+	wl_signal_add(&server.seat->events.request_start_drag,
+		&server.request_start_drag);
+	server.start_drag.notify = seat_start_drag;
+	wl_signal_add(&server.seat->events.start_drag, &server.start_drag);
 
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
 	if (!socket) {
@@ -798,6 +846,8 @@ int main(int argc, char *argv[]) {
 	wl_list_remove(&server.new_virtual_keyboard.link);
 	wl_list_remove(&server.request_cursor.link);
 	wl_list_remove(&server.request_set_selection.link);
+	wl_list_remove(&server.request_start_drag.link);
+	wl_list_remove(&server.start_drag.link);
 	wl_list_remove(&server.new_output.link);
 
 	/* Outputs are destroyed with the backend, after the scene: drop their

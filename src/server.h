@@ -132,6 +132,11 @@ struct server {
 	struct wl_listener new_virtual_keyboard;
 	struct wl_listener request_cursor;
 	struct wl_listener request_set_selection;
+	struct wl_listener request_start_drag;
+	struct wl_listener start_drag;
+	/* A drag and drop's icon, following the pointer, while there's one. */
+	struct wlr_scene_tree *drag_icon;
+	struct wl_listener drag_icon_destroy;
 	struct wl_list keyboards;
 
 	/* Interactive move/resize. GEM style: an outline follows the pointer and
