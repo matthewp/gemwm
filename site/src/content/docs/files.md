@@ -37,6 +37,8 @@ you write only what you change.
 | `~/.local/state/gemwm/files` | [GemFiles](/apps/gemfiles/): icons or text, the sort, hidden files |
 | `~/.local/state/gemwm/gemview` | where each PDF was left, and its zoom |
 | `~/.local/state/gemwm/play` | [GemPlay](/apps/gemplay/)'s playlist, Shuffle and Repeat |
+| `~/.config/gempod/settings` | [GemPod](/apps/gempod/)'s sync server (and its password, if there's no keyring) |
+| `~/.local/share/gempod/` | GemPod's podcasts, episodes, where you got to, and downloads |
 | `~/.local/state/gemwm/gemview-recent`, `gemwrite-recent` | File > Open Recent's documents |
 | `~/.local/state/gemwm/solitaire` | Solitaire's draw option and statistics |
 | `~/.local/share/gemwm/crossword/` | [crossword](/apps/crossword/) puzzles and progress |

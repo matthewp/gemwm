@@ -1048,6 +1048,49 @@ which uses playerctl if it's installed, else gdbus), as does
 `playerctl -p gemplay`. It's built when FFmpeg's libraries and PipeWire's
 are installed (`pacman -S ffmpeg pipewire`).
 
+## GemPod
+
+GemPod (`gempod`, Desk > Office) is for podcasts. The podcasts are down
+the left, each with its artwork in the ST's colours (New Episodes, every
+podcast's fresh ones, at the top); the one picked's episodes are on the
+right, each with how long it is, how much is left, or Played; and what's
+playing is along the bottom: back 15 seconds, play, on 30, a bar to go
+anywhere in it, and the speed (0.8x to 2x, faster or slower without
+changing the voice).
+
+It syncs with a gpodder sync server: gpodder.net, or your own (barking,
+opodsync, mygpo), the same API AntennaPod and Kasts use. **File > Sync
+Settings** takes the server, your username and password, and a name for
+this computer there; Sign In checks them. From then on your
+subscriptions, and where you got to in each episode, are the same here
+and on your phone: GemPod sends what you play, finish, mark played or
+unplayed, download and delete, takes others' where they're newer, and
+keeps a place from your phone for an episode it hasn't read yet until it
+has. It syncs a little after you change something, every fifteen minutes,
+and when you ask (^S); the first time, its podcasts and the server's are
+put together, not replaced. The password goes to your keyring (the
+Secret Service) if there is one, else in `~/.config/gempod/settings`,
+readable only by you.
+
+- **File**: Add Podcast... (^N, a feed's address), Import and Export
+  OPML..., Refresh All (^R), Sync Now (^S), Sync Settings..., Quit.
+- **Podcast**: Refresh, Mark All Played, Unsubscribe...
+- **Episode**: Play (Return, or double-click), Show Notes... (^I), Mark as
+  Played (^M) or Unplayed (^U), Download (^D), Delete Download.
+- **Controls**: Play/Pause (Space), Back 15 Seconds (Left), On 30 Seconds
+  (Right), Speed.
+
+Episodes play streamed from the feed, or from the download if there is
+one. Feeds are read when it starts (if it's been a while) and hourly;
+they're RSS or Atom, with iTunes' tags. Everything's kept in
+`~/.local/share/gempod/` (downloads in `downloads/` there), artwork in
+`~/.cache/gempod/`. It's an MPRIS player: the media keys play and pause,
+and Next and Previous go on 30 and back 15 seconds. `gempod FEED-URL`
+subscribes.
+
+It's built with FFmpeg (and libavfilter, for the speed), PipeWire,
+libsoup, libxml2, SQLite and libsecret installed.
+
 ## GemView
 
 GemView (`gemview`, Desk > Office) reads PDFs. The pages stand on GEM's

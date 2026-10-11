@@ -128,6 +128,7 @@ static const char default_config[] =
 	"GemWrite = gemwrite\n"
 	"GemView = gemview\n"
 	"GemPlay = gemplay\n"
+	"GemPod = gempod\n"
 	"\n"
 	"[Desk > Games]\n"
 	"Crossword Puzzle = gemwm-crossword\n"

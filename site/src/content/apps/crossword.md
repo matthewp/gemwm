@@ -4,7 +4,7 @@ description: "The week's newspaper crosswords, solved on screen and printed the 
 kind: app
 icon: crossword
 command: "gemwm-crossword"
-order: 8
+order: 9
 ---
 
 **Desk > Games > Crossword Puzzle**, after MPOS's. The library lists your

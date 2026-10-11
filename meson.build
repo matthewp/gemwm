@@ -415,6 +415,31 @@ if gtk4.found()
 			install_dir: get_option('datadir') / 'applications')
 	endif
 
+	# gempod: podcasts, synced with a gpodder sync server. FFmpeg (with
+	# libavfilter, for speed) and PipeWire play them; libsoup fetches, libxml2
+	# reads feeds, SQLite keeps it all, libsecret the password.
+	avfilter = dependency('libavfilter', required: false)
+	secret = dependency('libsecret-1', required: false)
+	if avformat.found() and avcodec.found() and avutil.found() and \
+			avfilter.found() and pipewire.found() and secret.found()
+		executable(
+			'gempod',
+			['pod/gempod.c', 'pod/feed.c', 'pod/player.c', 'pod/store.c',
+				'pod/sync.c', 'src/dither.c', 'lib/app-menu.c', 'lib/gem-alert.c',
+				'lib/gem-draw.c', 'lib/gem-file.c', 'lib/gem-popup.c',
+				'lib/gem-scrollbar.c', 'lib/gem-ui.c', client_protocols],
+			dependencies: [gtk4, dependency('gtk4-wayland'),
+				dependency('gdk-pixbuf-2.0'), dependency('libsoup-3.0'),
+				dependency('libxml-2.0'), dependency('json-glib-1.0'),
+				dependency('sqlite3'), secret, avformat, avcodec, avutil, avfilter,
+				pipewire, wayland_client, cairo, libm],
+			include_directories: ['lib', 'src', 'pod'],
+			install: true,
+		)
+		install_data('pod/org.gemwm.Pod.desktop',
+			install_dir: get_option('datadir') / 'applications')
+	endif
+
 	# gemview: a PDF viewer. Built when poppler-glib is there; Poppler is
 	# GPL, so a gemview binary is too (GemWM's own code stays BSD).
 	poppler = dependency('poppler-glib', required: false)
