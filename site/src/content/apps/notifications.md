@@ -28,6 +28,11 @@ you haven't seen: one you closed or clicked is seen, one that just timed out
 isn't. Click it, or choose **Desk > Tools > Notifications**, for the history
 (the last 200), which marks them all seen; **File > Clear All** empties it.
 
+Clicking an entry in the history does what clicking its pop-up does, while
+the app's still listening for it. After that, it opens the file the
+notification named, if it named one (a [screenshot](/apps/screenshots/)'s
+picture, say), or brings the app's window forward.
+
 **Options > Do Not Disturb** keeps everything but critical notifications from
 popping up: they go quietly into the history, and the bell shows they came.
 

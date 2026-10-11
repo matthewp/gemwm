@@ -25,4 +25,5 @@ areas.
 
 They're saved to `~/Pictures/Screenshots` (or `$GEMWM_SCREENSHOT_DIR`), copied
 to the clipboard if `wl-copy` is installed, and announced by a
-[notification](/apps/notifications/).
+[notification](/apps/notifications/); clicking it, then or later in the
+history, opens the picture.

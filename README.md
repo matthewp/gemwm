@@ -108,7 +108,7 @@ many laptops' do (so Shift+Print takes the whole screen): drag out an area,
 or click a window to take it, frame and all, or Escape. They're
 saved to `~/Pictures/Screenshots` (or `$GEMWM_SCREENSHOT_DIR`), copied to
 the clipboard if `wl-copy` is installed, and announced by your notification
-daemon if one is running.
+daemon if one is running; with GemWM's, clicking it opens the picture.
 
 Environment:
 
@@ -405,13 +405,22 @@ notifications you haven't seen: one you closed or clicked is seen, one
 that just timed out isn't. Click it, or choose **Desk > Tools >
 Notifications**, for the history (the last 200, kept in
 `~/.local/state/gemwm/notifications`), which marks them all seen;
-**File > Clear All** empties it. **Options > Do Not Disturb** there keeps
+**File > Clear All** empties it. Clicking an entry there does what
+clicking its pop-up does, while the app's still listening for it; after
+that, it opens the file the notification named, if it named one, or
+brings the app's window forward. **Options > Do Not Disturb** there keeps
 everything but critical notifications from popping up: they go quietly
 into the history, and the bell shows they came.
 
 D-Bus starts it the first time a program sends a notification, so no
 other notification daemon should be installed: with mako, say,
 `sudo pacman -R mako`, and log in again.
+
+A program can name a file for a notification to open when clicked, which
+keeps working from the history long after the program's forgotten it:
+the `x-gemwm-open` hint, a path or URI, opened with its usual app.
+
+    notify-send -h string:x-gemwm-open:"$file" "Saved" "$file"
 
 ## Animation
 

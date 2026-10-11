@@ -11,10 +11,12 @@
 # on the clipboard if wl-copy is there, and announced if a notification
 # daemon is running.
 
-# notify SUMMARY [BODY [ICON]]
+# notify SUMMARY [BODY [ICON]]: the icon's a file, and clicking the
+# notification (or its entry in the history) opens it.
 notify() {
 	command -v notify-send >/dev/null &&
-		notify-send -a GemWM ${3:+-i "$3"} "$1" "${2:-}" 2>/dev/null
+		notify-send -a GemWM ${3:+-i "$3" -h "string:x-gemwm-open:$3"} \
+			"$1" "${2:-}" 2>/dev/null
 }
 
 need() {

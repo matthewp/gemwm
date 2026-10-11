@@ -20,10 +20,16 @@
  * history; one that just timed out isn't. With Do Not Disturb on, only
  * critical ones pop up; the rest go quietly into the history.
  *
+ * Clicking one, its pop-up or its entry in the history, does what it's
+ * for: the app's default action while the app can still take it (until
+ * it's closed), else the file it named with GemWM's x-gemwm-open hint
+ * (a path or URI, opened with its usual app; a screenshot's picture),
+ * else the app's window brought forward.
+ *
  * Besides the standard interface the daemon has its own,
  * org.gemwm.Notifications1, for the other two: GetState -> (unseen, dnd),
- * History -> a JSON array, MarkSeen, Clear, SetDoNotDisturb; and Changed
- * (unseen, dnd) when any of that does.
+ * History -> a JSON array, MarkSeen, Clear, SetDoNotDisturb, Activate
+ * (id), a click on one; and Changed (unseen, dnd) when any of that does.
  */
 #include <gio/gio.h>
 #include <gtk/gtk.h>
@@ -60,6 +66,8 @@ struct note {
 	int timeout;             /* ms; 0: until closed */
 	char *sender;            /* who to tell about actions and closing */
 	char *entry;             /* the app's desktop-entry hint, if it gave one */
+	char *open;              /* the x-gemwm-open hint: a file to open */
+	bool closed;             /* the app's been told it's gone */
 	/* While it's showing: */
 	GtkWidget *popup;
 	GArray *hits;
@@ -141,6 +149,7 @@ static void note_free(gpointer p) {
 	g_strfreev(n->actions);
 	g_free(n->sender);
 	g_free(n->entry);
+	g_free(n->open);
 	if (n->hits != NULL) {
 		g_array_unref(n->hits);
 	}
@@ -157,6 +166,8 @@ static char *history_path(void) {
 static JsonNode *note_json(struct note *n) {
 	JsonBuilder *b = json_builder_new();
 	json_builder_begin_object(b);
+	json_builder_set_member_name(b, "id");
+	json_builder_add_int_value(b, n->id);
 	json_builder_set_member_name(b, "app");
 	json_builder_add_string_value(b, n->app);
 	json_builder_set_member_name(b, "summary");
@@ -169,6 +180,14 @@ static JsonNode *note_json(struct note *n) {
 	json_builder_add_boolean_value(b, n->critical);
 	json_builder_set_member_name(b, "seen");
 	json_builder_add_boolean_value(b, n->seen);
+	if (n->entry != NULL) {
+		json_builder_set_member_name(b, "entry");
+		json_builder_add_string_value(b, n->entry);
+	}
+	if (n->open != NULL) {
+		json_builder_set_member_name(b, "open");
+		json_builder_add_string_value(b, n->open);
+	}
 	json_builder_end_object(b);
 	JsonNode *node = json_builder_get_root(b);
 	g_object_unref(b);
@@ -185,6 +204,12 @@ static struct note *note_from_json(JsonObject *o) {
 	n->critical = json_object_get_boolean_member_with_default(o, "critical",
 		FALSE);
 	n->seen = json_object_get_boolean_member_with_default(o, "seen", TRUE);
+	n->id = json_object_get_int_member_with_default(o, "id", 0);
+	n->entry = g_strdup(json_object_get_string_member_with_default(o, "entry",
+		NULL));
+	n->open = g_strdup(json_object_get_string_member_with_default(o, "open",
+		NULL));
+	n->closed = true; /* from before: whoever sent it has been told */
 	return n;
 }
 
@@ -258,6 +283,7 @@ static const char introspection[] =
 	"  <method name='MarkSeen'/>"
 	"  <method name='Clear'/>"
 	"  <method name='SetDoNotDisturb'><arg type='b' name='on' direction='in'/></method>"
+	"  <method name='Activate'><arg type='u' name='id' direction='in'/></method>"
 	"  <signal name='Changed'>"
 	"   <arg type='u' name='unseen'/><arg type='b' name='do_not_disturb'/>"
 	"  </signal>"
@@ -314,6 +340,18 @@ static void load(void) {
 	}
 	g_free(text);
 	g_free(path);
+	/* Numbered on from the last, and those kept before they had numbers
+	 * given some, for the history's clicks. */
+	for (guint i = 0; i < d.history->len; i++) {
+		struct note *n = d.history->pdata[i];
+		d.next_id = MAX(d.next_id, n->id + 1);
+	}
+	for (guint i = 0; i < d.history->len; i++) {
+		struct note *n = d.history->pdata[i];
+		if (n->id == 0) {
+			n->id = d.next_id++;
+		}
+	}
 }
 
 static guint unseen(void) {
@@ -345,6 +383,7 @@ static void popup_close(struct note *n, guint reason) {
 	}
 	d.shown = g_list_remove(d.shown, n);
 	g_queue_remove(&d.waiting, n);
+	n->closed = true;
 	g_dbus_connection_emit_signal(d.bus, n->sender, PATH, IFACE,
 		"NotificationClosed", g_variant_new("(uu)", n->id, reason), NULL);
 	if (reason != EXPIRED && reason != CLOSED_BY_CALL && !n->seen) {
@@ -524,6 +563,46 @@ static void focus_app(struct note *n) {
 	}
 }
 
+/* The file it named opened with its usual app; false if there's none, or
+ * it's gone. */
+static bool open_file(struct note *n) {
+	if (n->open == NULL) {
+		return false;
+	}
+	GFile *f = g_file_new_for_commandline_arg(n->open);
+	bool ok = false;
+	if (!g_file_is_native(f) || g_file_query_exists(f, NULL)) {
+		char *uri = g_file_get_uri(f);
+		GdkAppLaunchContext *ctx = gdk_display_get_app_launch_context(
+			gdk_display_get_default());
+		ok = g_app_info_launch_default_for_uri(uri, G_APP_LAUNCH_CONTEXT(ctx),
+			NULL);
+		g_object_unref(ctx);
+		g_free(uri);
+	}
+	g_object_unref(f);
+	return ok;
+}
+
+/* Clicked, in its pop-up or the history: the app's default action while
+ * it can take it, else the file it named, else the app's window. */
+static void activate(struct note *n) {
+	bool by_app = false;
+	for (int i = 0; !n->closed && n->actions != NULL && n->actions[i] != NULL &&
+			n->actions[i + 1] != NULL; i += 2) {
+		by_app |= strcmp(n->actions[i], "default") == 0;
+	}
+	if (by_app) {
+		g_dbus_connection_emit_signal(d.bus, n->sender, PATH, IFACE,
+			"ActionInvoked", g_variant_new("(us)", n->id, "default"), NULL);
+	} else if (!open_file(n)) {
+		focus_app(n);
+	}
+	if (!n->closed) {
+		popup_close(n, DISMISSED);
+	}
+}
+
 static void popup_pressed(GtkGestureClick *g, int n_press, double x, double y,
 		gpointer data) {
 	struct note *n = data;
@@ -531,23 +610,14 @@ static void popup_pressed(GtkGestureClick *g, int n_press, double x, double y,
 	if (hit == NULL) {
 		return;
 	}
-	const char *key = NULL;
-	if (hit->id == HIT_ACTION) {
-		key = n->actions[hit->index];
-	} else if (hit->id == HIT_BODY) {
-		/* The body's the default action, if it has one. */
-		for (int i = 0; n->actions != NULL && n->actions[i] != NULL &&
-				n->actions[i + 1] != NULL; i += 2) {
-			if (strcmp(n->actions[i], "default") == 0) {
-				key = "default";
-			}
-		}
+	if (hit->id == HIT_BODY) {
+		activate(n);
+		return;
 	}
-	if (key != NULL) {
+	if (hit->id == HIT_ACTION) {
 		g_dbus_connection_emit_signal(d.bus, n->sender, PATH, IFACE,
-			"ActionInvoked", g_variant_new("(us)", n->id, key), NULL);
-	} else if (hit->id == HIT_BODY) {
-		focus_app(n);
+			"ActionInvoked", g_variant_new("(us)", n->id, n->actions[hit->index]),
+			NULL);
 	}
 	popup_close(n, DISMISSED);
 }
@@ -668,6 +738,10 @@ static guint32 notify(GVariant *params, const char *sender) {
 	if (g_variant_lookup(hints, "desktop-entry", "&s", &entry) && entry[0] != '\0') {
 		n->entry = g_strdup(entry);
 	}
+	const char *open = NULL;
+	if (g_variant_lookup(hints, "x-gemwm-open", "&s", &open) && open[0] != '\0') {
+		n->open = g_strdup(open);
+	}
 	/* Critical ones stay until closed, as the spec says. */
 	n->timeout = n->critical ? 0 : timeout < 0 ? DEFAULT_TIMEOUT : timeout;
 	g_variant_unref(actions);
@@ -729,6 +803,14 @@ static void method_call(GDBusConnection *bus, const char *sender,
 			}
 		}
 		changed();
+		g_dbus_method_invocation_return_value(call, NULL);
+	} else if (strcmp(method, "Activate") == 0) {
+		guint32 id;
+		g_variant_get(params, "(u)", &id);
+		struct note *n = find(id);
+		if (n != NULL) {
+			activate(n);
+		}
 		g_dbus_method_invocation_return_value(call, NULL);
 	} else if (strcmp(method, "SetDoNotDisturb") == 0) {
 		gboolean on;
@@ -909,7 +991,8 @@ static struct {
 	GDBusConnection *bus;
 	GPtrArray *notes;        /* newest first */
 	bool dnd;
-} h;
+	int pressed;             /* the entry held down, or -1 */
+} h = { .pressed = -1 };
 
 static int entry_height(struct note *n, int w) {
 	char **body = lines(n->body, w - 2 * GEM_PAD, 3);
@@ -988,6 +1071,14 @@ static void paint_history(cairo_t *cr, int w, int ht, void *data) {
 			/* A dotted rule between them. */
 			for (int x = GEM_PAD; x < w - GEM_PAD; x += 2) {
 				gem_fill(cr, x, y + eh - 1, 1, 1);
+			}
+			/* Held down: shown inverted, as GEM selects. */
+			if ((int)i == h.pressed) {
+				cairo_save(cr);
+				cairo_set_operator(cr, CAIRO_OPERATOR_DIFFERENCE);
+				gem_white(cr);
+				gem_fill(cr, 0, y, w, eh - 1);
+				cairo_restore(cr);
 			}
 		}
 		y += eh;
@@ -1089,6 +1180,44 @@ static void menu_activate(uint32_t id, void *data) {
 	}
 }
 
+/* The entry at y in the window, or -1. */
+static int entry_at(double y) {
+	int w = gtk_widget_get_width(h.area);
+	double top = -gtk_adjustment_get_value(h.adj);
+	for (guint i = 0; h.notes != NULL && i < h.notes->len; i++) {
+		int eh = entry_height(h.notes->pdata[i], w);
+		if (y >= top && y < top + eh) {
+			return i;
+		}
+		top += eh;
+	}
+	return -1;
+}
+
+static void history_pressed(GtkGestureClick *g, int n_press, double x,
+		double y, gpointer data) {
+	h.pressed = entry_at(y);
+	gtk_widget_queue_draw(h.area);
+}
+
+/* Let go on the one pressed: the daemon does what it's for. */
+static void history_released(GtkGestureClick *g, int n_press, double x,
+		double y, gpointer data) {
+	int i = entry_at(y);
+	if (i >= 0 && i == h.pressed) {
+		struct note *n = h.notes->pdata[i];
+		call("Activate", g_variant_new("(u)", n->id));
+	}
+	h.pressed = -1;
+	gtk_widget_queue_draw(h.area);
+}
+
+static void history_unpressed(GtkGesture *g, GdkEventSequence *seq,
+		gpointer data) {
+	h.pressed = -1;
+	gtk_widget_queue_draw(h.area);
+}
+
 static gboolean history_scrolled(GtkEventControllerScroll *c, double dx,
 		double dy, gpointer data) {
 	gtk_adjustment_set_value(h.adj, gtk_adjustment_get_value(h.adj) +
@@ -1119,6 +1248,12 @@ static void history_activate(GtkApplication *app, gpointer data) {
 		GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
 	g_signal_connect(wheel, "scroll", G_CALLBACK(history_scrolled), NULL);
 	gtk_widget_add_controller(h.area, wheel);
+	GtkGesture *click = gtk_gesture_click_new();
+	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+	g_signal_connect(click, "pressed", G_CALLBACK(history_pressed), NULL);
+	g_signal_connect(click, "released", G_CALLBACK(history_released), NULL);
+	g_signal_connect(click, "cancel", G_CALLBACK(history_unpressed), NULL);
+	gtk_widget_add_controller(h.area, GTK_EVENT_CONTROLLER(click));
 	h.adj = gtk_adjustment_new(0, 0, 0, GEM_ROW_H, GEM_ROW_H, 0);
 	g_signal_connect_swapped(h.adj, "value-changed",
 		G_CALLBACK(gtk_widget_queue_draw), h.area);
