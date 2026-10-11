@@ -80,6 +80,14 @@ endforeach
 backgrounddir = get_option('datadir') / 'gemwm' / 'backgrounds'
 install_data('extras/backgrounds/sunburst.jpg', install_dir: backgrounddir)
 
+# Game controllers udev takes for keyboards (extras/udev), marked joysticks
+# so games can read them. Where udev looks, whatever the prefix, as udev
+# reads no other.
+udev = dependency('udev', required: false)
+udevdir = udev.found() ? udev.get_variable('udevdir') : '/usr/lib/udev'
+install_data('extras/udev/65-gemwm-gamepads.rules',
+	install_dir: udevdir / 'rules.d')
+
 executable(
 	'gemwm',
 	[

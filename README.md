@@ -231,6 +231,12 @@ shown, or asked about, in GEM alert boxes. It uses BlueZ (`bluetoothd`)
 over D-Bus and needs GTK 4 to build; without a Bluetooth adapter, there's
 no item.
 
+Xbox controllers paired over Bluetooth describe a keyboard as well as a
+gamepad, and udev takes them for keyboards, which games (SDL, Steam) can't
+open. GemWM installs a udev rule,
+`/usr/lib/udev/rules.d/65-gemwm-gamepads.rules`, that marks them as game
+controllers instead; it applies the next time the controller connects.
+
 ## Key bindings
 
 Keys are set in `~/.config/gemwm/config`. You only list what you change:

@@ -1,0 +1,19 @@
+# Game controllers that udev mistakes for keyboards, so games couldn't read
+# them. Installed with GemWM.
+#
+# Xbox controllers over Bluetooth describe a keyboard as well as a gamepad,
+# and udev's input_id (60-input-id.rules) calls them keyboards, not
+# joysticks. Only joysticks are given to whoever's logged in
+# (70-uaccess.rules), so SDL and Steam couldn't open them, and the
+# compositor took them for a keyboard. These say joystick, and not
+# keyboard. The products are SDL's Xbox Bluetooth ones (usb_ids.h): One S
+# (02e0, 02fd, 0b20), Elite Series 2 (0b05, 0b22), Adaptive (0b0c, 0b21)
+# and Series X|S (0b13).
+
+SUBSYSTEM!="input", GOTO="gemwm_gamepads_end"
+ATTRS{id/bustype}!="0005", GOTO="gemwm_gamepads_end"
+
+ATTRS{id/vendor}=="045e", ATTRS{id/product}=="02e0|02fd|0b05|0b0c|0b13|0b20|0b21|0b22", \
+  ENV{ID_INPUT_JOYSTICK}="1", ENV{ID_INPUT_KEYBOARD}="", ENV{ID_INPUT_KEY}=""
+
+LABEL="gemwm_gamepads_end"
