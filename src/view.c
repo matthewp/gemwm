@@ -776,6 +776,25 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 	ipc_notify_windows(server);
 }
 
+/* The window geometry the client set, clipped to what its surface has now,
+ * as wlroots works it out, but on every commit. wlroots (0.19) does it only
+ * when the geometry itself is committed, so a commit that sets it along
+ * with a new buffer scale, while the buffer's still the old size, leaves it
+ * clipped small: GLFW's on learning the screen's scale, 1280x720 set on
+ * what's 640x360 for that one commit. The bigger buffer that follows came
+ * without the geometry again, and the window stayed small and cropped until
+ * something made the client set it once more. */
+static void effective_geometry(struct wlr_xdg_surface *xdg) {
+	if (wlr_box_empty(&xdg->current.geometry)) {
+		return; /* none set: wlroots uses the extents, every commit */
+	}
+	struct wlr_box extents, geo;
+	wlr_surface_get_extents(xdg->surface, &extents);
+	if (wlr_box_intersection(&geo, &extents, &xdg->current.geometry)) {
+		xdg->geometry = geo;
+	}
+}
+
 static void view_commit(struct wl_listener *listener, void *data) {
 	struct view *view = wl_container_of(listener, view, commit);
 	struct wlr_xdg_toplevel *toplevel = view->xdg_toplevel;
@@ -804,6 +823,7 @@ static void view_commit(struct wl_listener *listener, void *data) {
 		return;
 	}
 	if (toplevel->base->surface->mapped) {
+		effective_geometry(toplevel->base);
 		view_update_frame(view);
 	}
 }
