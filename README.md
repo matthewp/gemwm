@@ -986,7 +986,9 @@ real resolution, so text is sharp at any zoom.
   closes it.
 - **View**: Thumbnails (F9), a list of the pages down the left, small, the
   one you're reading framed and its number inverted, following as you read;
-  click one to go there (shown or not is kept). Two Pages: facing pages side
+  click one to go there (shown or not is kept). Full Screen (F11, or
+  Super+F): the pages alone, no scroll bars, info line or thumbnails;
+  Escape or F11 again comes back. Two Pages: facing pages side
   by side, meeting at the spine, as a magazine opens, with Cover Alone (on
   unless you turn it off) putting page 1 by itself on the right so the
   spreads pair as in print; Next and Previous go a spread at a time, and

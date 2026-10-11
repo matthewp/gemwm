@@ -60,7 +60,11 @@ struct match {
 };
 
 struct view {
-	GtkWidget *window, *area, *hbar, *info, *find_row, *find_area, *find_field;
+	GtkWidget *window, *area, *vbar, *hbar, *info, *find_row, *find_area,
+		*find_field;
+	/* View > Full Screen (or GemWM's Super+F): the pages alone, without
+	 * the scroll bars, the info line or the thumbnails. */
+	bool full;
 	GtkOverlay *host;
 	GtkAdjustment *vadj, *hadj;
 	struct app_menu *menu;
@@ -347,7 +351,7 @@ static void relayout(struct view *v) {
 		MAX(STEP, v->area_w - STEP), v->area_w);
 	gtk_adjustment_set_value(v->hadj, hfrac * MAX(v->doc_w, v->area_w) -
 		v->area_w / 2.0);
-	gtk_widget_set_visible(v->hbar, v->doc_w > v->area_w + 0.5);
+	gtk_widget_set_visible(v->hbar, !v->full && v->doc_w > v->area_w + 0.5);
 	gtk_widget_queue_draw(v->area);
 	gtk_widget_queue_draw(v->info);
 }
@@ -875,6 +879,17 @@ static void show_thumbs(struct view *v, bool on) {
 	app_menu_update(v->menu);
 }
 
+/* In full screen or out, whoever asked (View > Full Screen, F11, or GemWM's
+ * Super+F): the scroll bars, the info line and the thumbnails go, and come
+ * back as they were. */
+static void fullscreened(GtkWindow *window, GParamSpec *pspec, struct view *v) {
+	v->full = gtk_window_is_fullscreen(window);
+	gtk_widget_set_visible(v->vbar, !v->full);
+	gtk_widget_set_visible(v->info, !v->full);
+	gtk_widget_set_visible(v->hbar, !v->full && v->doc_w > v->area_w + 0.5);
+	show_thumbs(v, !v->full && setting_thumbs());
+}
+
 /* ---- Find --------------------------------------------------------------- */
 
 static void find_reset(struct view *v) {
@@ -1265,7 +1280,7 @@ enum {
 	ACT_OPEN = 1, ACT_PRINT, ACT_CLOSE, ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
 	ACT_FIT_WIDTH, ACT_FIT_PAGE, ACT_ACTUAL, ACT_ZOOM_IN, ACT_ZOOM_OUT,
 	ACT_NEXT, ACT_PREV, ACT_FIRST, ACT_LAST, ACT_THUMBS, ACT_TWO, ACT_COVER,
-	ACT_RECENT_CLEAR,
+	ACT_FULL, ACT_RECENT_CLEAR,
 	ACT_RECENT = 1000, /* File > Open Recent's first; the rest follow */
 };
 
@@ -1289,6 +1304,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "View");
 	app_menu_add_item(m, ACT_THUMBS, "Thumbnails", "F9",
 		gtk_widget_get_visible(v->side) ? APP_MENU_CHECKED : 0);
+	app_menu_add_item(m, ACT_FULL, "Full Screen", "F11",
+		v->full ? APP_MENU_CHECKED : 0);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_TWO, "Two Pages", NULL,
 		doc | (v->two ? APP_MENU_CHECKED : 0));
@@ -1318,7 +1335,7 @@ static void act(struct view *v, int id) {
 		return;
 	}
 	if (v->doc == NULL && id != ACT_OPEN && id != ACT_CLOSE &&
-			id != ACT_THUMBS) {
+			id != ACT_THUMBS && id != ACT_FULL) {
 		return;
 	}
 	switch (id) {
@@ -1377,6 +1394,13 @@ static void act(struct view *v, int id) {
 		}
 		relayout(v);
 		app_menu_update(v->menu);
+		break;
+	case ACT_FULL:
+		if (v->full) {
+			gtk_window_unfullscreen(GTK_WINDOW(v->window));
+		} else {
+			gtk_window_fullscreen(GTK_WINDOW(v->window));
+		}
 		break;
 	case ACT_THUMBS: {
 		bool on = !gtk_widget_get_visible(v->side);
@@ -1451,9 +1475,14 @@ static gboolean key_pressed(GtkEventControllerKey *c, guint key, guint code,
 	double page = gtk_adjustment_get_page_increment(v->vadj);
 	switch (key) {
 	case GDK_KEY_F9: act(v, ACT_THUMBS); return TRUE;
+	case GDK_KEY_F11: act(v, ACT_FULL); return TRUE;
 	case GDK_KEY_Escape:
 		if (v->finding) {
 			find_show(v, false);
+			return TRUE;
+		}
+		if (v->full) {
+			act(v, ACT_FULL);
 			return TRUE;
 		}
 		return FALSE;
@@ -1620,8 +1649,8 @@ static struct view *view_new(GtkApplication *app) {
 
 	GtkWidget *grid = gtk_grid_new();
 	gtk_grid_attach(GTK_GRID(grid), v->area, 0, 0, 1, 1);
-	gtk_grid_attach(GTK_GRID(grid),
-		gem_scrollbar_new(GTK_ORIENTATION_VERTICAL, v->vadj), 1, 0, 1, 1);
+	v->vbar = gem_scrollbar_new(GTK_ORIENTATION_VERTICAL, v->vadj);
+	gtk_grid_attach(GTK_GRID(grid), v->vbar, 1, 0, 1, 1);
 	v->hbar = gem_scrollbar_new(GTK_ORIENTATION_HORIZONTAL, v->hadj);
 	gtk_widget_set_visible(v->hbar, FALSE);
 	gtk_grid_attach(GTK_GRID(grid), v->hbar, 0, 1, 1, 1);
@@ -1657,6 +1686,8 @@ static struct view *view_new(GtkApplication *app) {
 	g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), v);
 	gtk_widget_add_controller(v->window, keys);
 	g_signal_connect(v->window, "close-request", G_CALLBACK(close_request), v);
+	g_signal_connect(v->window, "notify::fullscreened",
+		G_CALLBACK(fullscreened), v);
 	g_object_weak_ref(G_OBJECT(v->window), view_free, v);
 
 	v->menu = app_menu_new(v->window, build_menus, menu_activate, v);
@@ -1669,9 +1700,14 @@ static struct view *view_new(GtkApplication *app) {
 /* ---- The application ---------------------------------------------------- */
 
 static void activate(GtkApplication *app, void *data) {
-	/* With nothing to show: a window, and the item selector to pick one. */
-	struct view *v = view_new(app);
-	ask_open(v);
+	/* With nothing to show: a window saying File > Open (or, running
+	 * already, its window forward). */
+	GtkWindow *active = gtk_application_get_active_window(app);
+	if (active != NULL) {
+		gtk_window_present(active);
+	} else {
+		view_new(app);
+	}
 }
 
 static void open_files(GApplication *app, GFile **files, int n,

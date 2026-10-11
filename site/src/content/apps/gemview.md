@@ -16,7 +16,7 @@ the engine Evince uses, reads and draws them, and each page is drawn at the
 screen's real resolution, so text is sharp at any zoom.
 
 ```
-gemview                 # a window, and the item selector to pick a PDF
+gemview                 # an empty window: File > Open... (or Open Recent)
 gemview FILE.pdf...     # each in a window of its own
 ```
 
@@ -30,7 +30,9 @@ gemview FILE.pdf...     # each in a window of its own
   closes it.
 - **View**: Thumbnails (F9) shows the pages down the left, small, the one
   you're reading framed with its number inverted, following along as you read;
-  click one to go to it. **Two Pages** shows facing pages side by side,
+  click one to go to it. **Full Screen** (F11, or Super+F) shows the pages
+  alone, without the scroll bars, info line or thumbnails; Escape or F11 again
+  comes back. **Two Pages** shows facing pages side by side,
   meeting at the spine, as a magazine opens; with **Cover Alone** (on unless
   you turn it off), page 1 sits by itself on the right, so the spreads pair as
   they would in print. Next and Previous go a spread at a time. Then Fit
