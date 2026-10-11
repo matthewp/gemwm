@@ -16,9 +16,11 @@
  * computer art. It's done once per desktop change, never per frame.
  */
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "server.h"
+#include "dither.h"
 
 #define ST_LEVELS 8   /* per channel */
 #define MAX_COLORS 16 /* st16, atari16 */

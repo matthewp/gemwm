@@ -9,6 +9,7 @@
 #include <wlr/util/box.h>
 #include <xkbcommon/xkbcommon.h>
 #include "frame.h"
+#include "dither.h"
 
 /* A key binding from the config: the action is a control-socket command. */
 struct binding {
@@ -88,9 +89,8 @@ struct server {
 	char *font_family;
 	int font_size;
 	/* Shown as an ST would (dither.c), in big pixels of pixel_size. */
-	enum dither_palette { DITHER_OFF, DITHER_ST, DITHER_ST16, DITHER_ATARI16 }
-		desktop_palette;
-	enum dither_style { DITHER_DIFFUSE, DITHER_ORDERED } desktop_dither_style;
+	enum dither_palette desktop_palette;
+	enum dither_style desktop_dither_style;
 	int desktop_pixel_size;
 	int desktop_res_w, desktop_res_h; /* instead of pixel_size; 0 if not */
 	/* A black pattern over the colour (desktop.c). */
@@ -433,7 +433,5 @@ void idle_configure(struct server *server);
 void desktop_update_output(struct output *output);
 bool desktop_parse_color(const char *value, uint32_t *argb, bool *mono);
 void desktop_configure(struct server *server);
-void dither_surface(cairo_surface_t *surface, double block,
-	enum dither_palette palette, enum dither_style style);
 
 #endif
