@@ -2200,16 +2200,46 @@ static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
  * if the host has several logins. Nothing is filled without the press, and
  * only into the page the lookup was for. */
 
+/* The page's input fields in order, those inside web components' (open)
+ * shadow roots too, as many sites' login forms are now (Reddit's): calls
+ * found with each shadow root on the way. */
+#define INPUTS_JS \
+	"function allInputs(root, found) {" \
+	"  var out = [];" \
+	"  (function walk(r) {" \
+	"    var all = r.querySelectorAll('*');" \
+	"    for (var i = 0; i < all.length; i++) {" \
+	"      if (all[i].tagName === 'INPUT') out.push(all[i]);" \
+	"      if (all[i].shadowRoot) {" \
+	"        if (found) found(all[i].shadowRoot);" \
+	"        walk(all[i].shadowRoot);" \
+	"      }" \
+	"    }" \
+	"  })(root);" \
+	"  return out;" \
+	"}"
+
 /* Runs in its own JavaScript world, which the page's scripts can't see or
- * change: says whether the page has a login field, as that changes. */
+ * change: says whether the page has a login field, as that changes. A
+ * shadow root's changes aren't the document's, so each is watched too. */
 static const char login_script[] =
 	"(function () {"
-	"  var last = null, queued = false;"
+	INPUTS_JS
+	"  var last = null, queued = false, watched = new WeakSet();"
+	"  var observer = new MutationObserver(queue);"
+	"  function watch(root) {"
+	"    if (watched.has(root)) return;"
+	"    watched.add(root);"
+	"    observer.observe(root, { subtree: true, childList: true,"
+	"      attributes: true,"
+	"      attributeFilter: ['type', 'style', 'class', 'hidden'] });"
+	"  }"
 	"  function check() {"
 	"    queued = false;"
-	"    var has = Array.prototype.some.call(document.querySelectorAll("
-	"      'input[type=password], input[autocomplete~=username]'),"
-	"      function (e) { return e.getClientRects().length > 0; });"
+	"    var has = allInputs(document, watch).some(function (e) {"
+	"      return (e.type === 'password' || /username/.test(e.autocomplete)) &&"
+	"        e.getClientRects().length > 0;"
+	"    });"
 	"    if (has !== last) {"
 	"      last = has;"
 	"      window.webkit.messageHandlers.gemwebLogin.postMessage(has);"
@@ -2218,9 +2248,7 @@ static const char login_script[] =
 	"  function queue() {"
 	"    if (!queued) { queued = true; setTimeout(check, 300); }"
 	"  }"
-	"  new MutationObserver(queue).observe(document.documentElement,"
-	"    { subtree: true, childList: true, attributes: true,"
-	"      attributeFilter: ['type', 'style', 'class', 'hidden'] });"
+	"  watch(document.documentElement);"
 	"  addEventListener('load', queue);"
 	"  check();"
 	"})();";
@@ -2239,9 +2267,12 @@ static const char fill_script[] =
 	"function isUser(e) {"
 	"  return ['text', 'email', 'tel'].indexOf(e.type) >= 0;"
 	"}"
-	"var inputs = Array.prototype.filter.call("
-	"  document.querySelectorAll('input'), shown);"
+	INPUTS_JS
+	"var inputs = allInputs(document).filter(shown);"
 	"var active = document.activeElement;"
+	"while (active && active.shadowRoot && active.shadowRoot.activeElement) {"
+	"  active = active.shadowRoot.activeElement;"
+	"}"
 	"var focused = active && inputs.indexOf(active) >= 0 ? active : null;"
 	"var pass = focused && focused.type === 'password' ? focused :"
 	"  inputs.find(function (e) { return e.type === 'password'; });"
