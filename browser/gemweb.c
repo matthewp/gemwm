@@ -94,6 +94,11 @@ struct browser {
 	GtkWidget *tabbar, *toolbar, *buttons, *entry, *info, *stack;
 	GPtrArray *tabs; /* struct tab * */
 	int active;
+	/* A tab being dragged along the bar: its index (or -1), where in it
+	 * the pointer took hold, and where its left edge is now. */
+	int drag_tab;
+	bool dragging;
+	double drag_grab, drag_left;
 	char *hover_link;      /* link under the pointer, for the info line */
 	char *download_status; /* last download message */
 	char *notice;          /* a passing one: passwords, Reader View */
@@ -466,46 +471,70 @@ static int tab_width(struct browser *b, int w) {
 	return tw < TAB_MIN_W ? TAB_MIN_W : tw > TAB_MAX_W ? TAB_MAX_W : tw;
 }
 
+static void paint_tab(struct browser *b, cairo_t *cr, guint i, int x,
+		int tw, int h) {
+	struct tab *t = g_ptr_array_index(b->tabs, i);
+	bool active = (int)i == b->active;
+
+	/* The active tab is inverted, as GEM shows an open menu title. */
+	if (active) {
+		black(cr);
+		fill(cr, x, 0, tw - 1, h - 1);
+	}
+	bool playing = webkit_web_view_is_playing_audio(t->view);
+	int speaker_room = playing ? SPEAKER_W + 8 : 0;
+	if (active) {
+		white(cr);
+	} else {
+		black(cr);
+	}
+	if (playing) {
+		draw_speaker(cr, x + tw - 1 - 5 - SPEAKER_W, (h - 1 - SPEAKER_H) / 2);
+	}
+	cairo_save(cr);
+	cairo_rectangle(cr, x + GADGET + 1, 0, tw - GADGET - 2 - speaker_room,
+		h - 1);
+	cairo_clip(cr);
+	text(cr, tab_title(t), x + GADGET + 7, 0, h - 1);
+	cairo_restore(cr);
+
+	if (active) {
+		white(cr);
+		draw_closer(cr, x, 0);
+		fill(cr, x + GADGET, 0, 1, h - 1);  /* after the closer */
+	} else {
+		black(cr);
+		draw_closer(cr, x, 0);
+		fill(cr, x + GADGET, 0, 1, h - 1);
+	}
+	black(cr);
+	fill(cr, x + tw - 1, 0, 1, h - 1);      /* between tabs */
+}
+
 static void paint_tabbar(struct browser *b, cairo_t *cr, int w, int h) {
 	int tw = tab_width(b, w);
-	for (guint i = 0; i < b->tabs->len; i++) {
-		struct tab *t = g_ptr_array_index(b->tabs, i);
-		int x = i * tw;
-		bool active = (int)i == b->active;
-
-		/* The active tab is inverted, as GEM shows an open menu title. */
-		if (active) {
+	int n = b->tabs->len;
+	bool dragging = b->dragging && b->drag_tab >= 0 && b->drag_tab < n;
+	for (int i = 0; i < n; i++) {
+		if (dragging && i == b->drag_tab) {
+			/* Its place stays empty, but for the line after it. */
 			black(cr);
-			fill(cr, x, 0, tw - 1, h - 1);
+			fill(cr, i * tw + tw - 1, 0, 1, h - 1);
+			continue;
 		}
-		bool playing = webkit_web_view_is_playing_audio(t->view);
-		int speaker_room = playing ? SPEAKER_W + 8 : 0;
-		if (active) {
-			white(cr);
-		} else {
-			black(cr);
-		}
-		if (playing) {
-			draw_speaker(cr, x + tw - 1 - 5 - SPEAKER_W, (h - 1 - SPEAKER_H) / 2);
-		}
-		cairo_save(cr);
-		cairo_rectangle(cr, x + GADGET + 1, 0, tw - GADGET - 2 - speaker_room,
-			h - 1);
-		cairo_clip(cr);
-		text(cr, tab_title(t), x + GADGET + 7, 0, h - 1);
-		cairo_restore(cr);
-
-		if (active) {
-			white(cr);
-			draw_closer(cr, x, 0);
-			fill(cr, x + GADGET, 0, 1, h - 1);  /* after the closer */
-		} else {
-			black(cr);
-			draw_closer(cr, x, 0);
-			fill(cr, x + GADGET, 0, 1, h - 1);
-		}
+		paint_tab(b, cr, i, i * tw, tw, h);
+	}
+	/* The dragged tab rides over the others, under the pointer. */
+	if (dragging) {
+		int x = (int)b->drag_left;
+		x = x < 0 ? 0 : x > (n - 1) * tw ? (n - 1) * tw : x;
+		white(cr);
+		fill(cr, x, 0, tw - 1, h - 1);
+		paint_tab(b, cr, b->drag_tab, x, tw, h);
 		black(cr);
-		fill(cr, x + tw - 1, 0, 1, h - 1);      /* between tabs */
+		if (x > 0) {
+			fill(cr, x - 1, 0, 1, h - 1);
+		}
 	}
 	/* The "+" box. */
 	int px = b->tabs->len * tw;
@@ -543,6 +572,57 @@ static void tabbar_pressed(GtkGestureClick *gesture, int n_press,
 	} else if (button == GDK_BUTTON_PRIMARY) {
 		tab_select(b, i);
 	}
+}
+
+/* Dragging a tab by its title moves it along the bar; the others make
+ * way as it passes their middles. */
+static void tabbar_drag_begin(GtkGestureDrag *gesture, double x, double y,
+		gpointer data) {
+	struct browser *b = data;
+	int tw = tab_width(b, gtk_widget_get_width(b->tabbar));
+	int i = (int)x / tw;
+	b->dragging = false;
+	b->drag_tab = i < (int)b->tabs->len && x - i * tw >= GADGET ? i : -1;
+	b->drag_grab = x - i * tw;
+}
+
+static void tabbar_drag_update(GtkGestureDrag *gesture, double dx, double dy,
+		gpointer data) {
+	struct browser *b = data;
+	int n = b->tabs->len;
+	if (b->drag_tab < 0 || b->drag_tab >= n) {
+		return;
+	}
+	if (!b->dragging && fabs(dx) < 4) {
+		return;
+	}
+	b->dragging = true;
+	int tw = tab_width(b, gtk_widget_get_width(b->tabbar));
+	double sx, sy;
+	gtk_gesture_drag_get_start_point(gesture, &sx, &sy);
+	b->drag_left = sx + dx - b->drag_grab;
+	int to = (int)floor((b->drag_left + tw / 2.0) / tw);
+	to = to < 0 ? 0 : to >= n ? n - 1 : to;
+	if (to != b->drag_tab) {
+		struct tab *active = b->active >= 0 && b->active < n ?
+			g_ptr_array_index(b->tabs, b->active) : NULL;
+		struct tab *t = g_ptr_array_steal_index(b->tabs, b->drag_tab);
+		g_ptr_array_insert(b->tabs, to, t);
+		guint index;
+		if (active != NULL && g_ptr_array_find(b->tabs, active, &index)) {
+			b->active = index;
+		}
+		b->drag_tab = to;
+	}
+	gtk_widget_queue_draw(b->tabbar);
+}
+
+static void tabbar_drag_end(GtkGestureDrag *gesture, double dx, double dy,
+		gpointer data) {
+	struct browser *b = data;
+	b->drag_tab = -1;
+	b->dragging = false;
+	gtk_widget_queue_draw(b->tabbar);
 }
 
 /* ---- Toolbar buttons ---------------------------------------------------- */
@@ -4342,6 +4422,13 @@ static struct browser *browser_new(GtkApplication *app) {
 	b->box = box;
 	b->selected = -1;
 	b->tabbar = pixel_area(b, TAB_H, draw_tabbar, G_CALLBACK(tabbar_pressed));
+	b->drag_tab = -1;
+	GtkGesture *drag = gtk_gesture_drag_new();
+	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
+	g_signal_connect(drag, "drag-begin", G_CALLBACK(tabbar_drag_begin), b);
+	g_signal_connect(drag, "drag-update", G_CALLBACK(tabbar_drag_update), b);
+	g_signal_connect(drag, "drag-end", G_CALLBACK(tabbar_drag_end), b);
+	gtk_widget_add_controller(b->tabbar, GTK_EVENT_CONTROLLER(drag));
 
 	GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	b->toolbar = toolbar;
