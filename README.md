@@ -1051,8 +1051,10 @@ are installed (`pacman -S ffmpeg pipewire`).
 ## GemPod
 
 GemPod (`gempod`, Desk > Office) is for podcasts. The podcasts are down
-the left, each with its artwork in the ST's colours (New Episodes, every
-podcast's fresh ones, at the top); the one picked's episodes are on the
+the left, each with its artwork in the ST's colours. At the top are
+Currently Listening, every episode you've started and not finished, here
+or on your phone (as synced), the last listened to first, and where it
+opens if there are any; and New Episodes, every podcast's fresh ones; the one picked's episodes are on the
 right, each with how long it is, how much is left, or Played; and what's
 playing is along the bottom: back 15 seconds, play, on 30, a bar to go
 anywhere in it, and the speed (0.8x to 2x, faster or slower without

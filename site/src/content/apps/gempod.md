@@ -5,13 +5,15 @@ kind: app
 icon: microphone
 command: "gempod"
 screenshot: "/screenshots/gempod.png"
-alt: "GemPod: podcasts down the left with dithered artwork, a podcast's episodes with how much is left of each, and one playing at 1.5x"
+alt: "GemPod's Currently Listening: two started episodes with how much is left of each, one of them paused at 1.5x"
 order: 6
 ---
 
 GemPod (**Desk > Office**) is for podcasts. The podcasts are down the left,
-each with its artwork in the ST's colours, and **New Episodes**, every
-podcast's fresh ones, at the top. The one picked's episodes are on the right,
+each with its artwork in the ST's colours. At the top, **Currently Listening**
+has every episode you've started and not finished, here or on your phone (as
+synced), the one you listened to last first; GemPod opens on it when there's
+anything there. Under it, **New Episodes** has every podcast's fresh ones. The one picked's episodes are on the right,
 each with how long it is, how much is left, or Played. What's playing is along
 the bottom: back 15 seconds, play, on 30, a bar to go anywhere in it, and the
 speed, from 0.8x to 2x, faster or slower without changing the voice.

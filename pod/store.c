@@ -273,6 +273,18 @@ GPtrArray *store_episodes(const char *podcast) {
 	return a;
 }
 
+GPtrArray *store_episodes_started(void) {
+	GPtrArray *a = g_ptr_array_new_with_free_func((GDestroyNotify)episode_free);
+	sqlite3_stmt *st = prepare("SELECT " EPISODE_COLUMNS " FROM episodes e "
+		"JOIN podcasts p ON p.url = e.podcast WHERE e.position > 0 AND NOT e.played "
+		"ORDER BY e.action_ts DESC, e.published DESC");
+	while (st != NULL && sqlite3_step(st) == SQLITE_ROW) {
+		g_ptr_array_add(a, episode_row(st));
+	}
+	sqlite3_finalize(st);
+	return a;
+}
+
 struct episode *store_episode(const char *url) {
 	sqlite3_stmt *st = prepare("SELECT " EPISODE_COLUMNS " FROM episodes e "
 		"LEFT JOIN podcasts p ON p.url = e.podcast WHERE e.url = ?");

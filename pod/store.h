@@ -47,6 +47,9 @@ void podcast_free(struct podcast *p);
 /* ---- Episodes ---- */
 /* podcast NULL: the fresh ones from every podcast, newest first. */
 GPtrArray *store_episodes(const char *podcast);
+/* Started and not finished, here or on another device (as synced): the
+ * ones listened to last first. */
+GPtrArray *store_episodes_started(void);
 struct episode *store_episode(const char *url);
 /* From the feed: added if it's new (fresh unless first is set: a newly
  * added podcast has only its latest fresh), else its feed fields

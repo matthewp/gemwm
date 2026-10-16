@@ -54,7 +54,11 @@
 
 #define MPRIS_PATH "/org/mpris/MediaPlayer2"
 #define MPRIS_NAME "org.mpris.MediaPlayer2.gempod"
-#define NEW_EPISODES ""              /* the left list's first row */
+/* The left list's first rows, before the podcasts: what's started (from
+ * any device, as synced), then what's new. */
+#define LISTENING "\001listening"
+#define NEW_EPISODES ""
+#define TOP_ROWS 2
 
 static const double speeds[] = { 0.8, 1.0, 1.2, 1.5, 1.75, 2.0 };
 
@@ -75,7 +79,8 @@ static struct {
 	SoupSession *soup;
 
 	GPtrArray *podcasts;       /* struct podcast */
-	char *picked;              /* the podcast shown: a url, or NEW_EPISODES */
+	char *picked;              /* a podcast's url, LISTENING or NEW_EPISODES */
+	int started_count;         /* episodes in Currently Listening */
 	GPtrArray *episodes;       /* struct episode, of the picked */
 	int cursor;                /* in episodes */
 	bool right_focus;
@@ -154,6 +159,21 @@ static struct podcast *podcast_of(const char *url) {
 
 static bool showing_new(void) {
 	return ui.picked == NULL || strcmp(ui.picked, NEW_EPISODES) == 0;
+}
+
+static bool showing_listening(void) {
+	return ui.picked != NULL && strcmp(ui.picked, LISTENING) == 0;
+}
+
+/* Episodes from every podcast, not one's. */
+static bool showing_all(void) {
+	return showing_new() || showing_listening();
+}
+
+/* The left list's row i: LISTENING, NEW_EPISODES or a podcast's url. */
+static const char *left_row(int i) {
+	return i == 0 ? LISTENING : i == 1 ? NEW_EPISODES :
+		((struct podcast *)ui.podcasts->pdata[i - TOP_ROWS])->url;
 }
 
 static struct episode *cursor_episode(void) {
@@ -451,6 +471,41 @@ static void no_art(cairo_t *cr, int x, int y, int size) {
 	}
 }
 
+/* Currently Listening's picture: headphones. */
+static const char *const phones[] = {
+	".....######.....",
+	"...##......##...",
+	"..#..........#..",
+	".#............#.",
+	".#............#.",
+	"#..............#",
+	"#..............#",
+	"####........####",
+	"#..#........#..#",
+	"#..#........#..#",
+	"#..#........#..#",
+	"#..#........#..#",
+	"####........####",
+};
+
+static void headphones(cairo_t *cr, int x, int y) {
+	gem_white(cr);
+	gem_fill(cr, x, y, ART_SMALL, ART_SMALL);
+	gem_black(cr);
+	int n = G_N_ELEMENTS(phones), w = (int)strlen(phones[0]);
+	int ox = x + (ART_SMALL - w) / 2, oy = y + (ART_SMALL - n) / 2;
+	for (int r = 0; r < n; r++) {
+		for (int c = 0; c < w; c++) {
+			if (phones[r][c] == '#') {
+				gem_fill(cr, ox + c, oy + r, 1, 1);
+			}
+		}
+	}
+	/* Its cups, filled. */
+	gem_fill(cr, ox + 1, oy + 8, 2, 4);
+	gem_fill(cr, ox + w - 3, oy + 8, 2, 4);
+}
+
 /* The New Episodes row's picture: an in-tray. */
 static void tray(cairo_t *cr, int x, int y) {
 	gem_white(cr);
@@ -492,7 +547,7 @@ static double rscroll(void) {
 }
 
 static int n_left(void) {
-	return 1 + (int)ui.podcasts->len;
+	return TOP_ROWS + (int)ui.podcasts->len;
 }
 
 static void fit(GtkWidget *area, GtkAdjustment *adj, int rows, int row_h) {
@@ -513,13 +568,17 @@ static void paint_left(cairo_t *cr, int w, int h, void *data) {
 		if (y + PODCAST_H < 0 || y > h) {
 			continue;
 		}
-		struct podcast *p = i > 0 ? ui.podcasts->pdata[i - 1] : NULL;
-		bool picked = p != NULL ? g_strcmp0(ui.picked, p->url) == 0 : showing_new();
+		struct podcast *p = i >= TOP_ROWS ? ui.podcasts->pdata[i - TOP_ROWS] : NULL;
+		bool picked = g_strcmp0(ui.picked, left_row(i)) == 0;
 		int ax = GEM_PAD, ay = y + (PODCAST_H - ART_SMALL) / 2;
 		if (p != NULL) {
 			picture(cr, p->image, ax, ay, ART_SMALL);
 		} else {
-			tray(cr, ax, ay);
+			if (i == 0) {
+				headphones(cr, ax, ay);
+			} else {
+				tray(cr, ax, ay);
+			}
 			gem_frame(cr, ax, ay, ART_SMALL, ART_SMALL, 1);
 		}
 		int tx = ax + ART_SMALL + GEM_PAD, tw = w - tx - GEM_PAD;
@@ -530,8 +589,9 @@ static void paint_left(cairo_t *cr, int w, int h, void *data) {
 		} else {
 			gem_black(cr);
 		}
-		const char *name = p != NULL ? podcast_name(p) : "New Episodes";
-		int fresh = p != NULL ? p->fresh : fresh_total;
+		const char *name = p != NULL ? podcast_name(p) :
+			i == 0 ? "Currently Listening" : "New Episodes";
+		int fresh = p != NULL ? p->fresh : i == 0 ? ui.started_count : fresh_total;
 		char *count = fresh > 0 ? g_strdup_printf("%d", fresh) : NULL;
 		int cw = count != NULL ? (int)gem_text_width(cr, count) + GEM_PAD : 0;
 		gem_text_clipped(cr, name, tx, y + 2, tw - cw, GEM_ROW_H);
@@ -539,7 +599,8 @@ static void paint_left(cairo_t *cr, int w, int h, void *data) {
 			gem_text(cr, count, w - GEM_PAD - (int)gem_text_width(cr, count), y + 2,
 				GEM_ROW_H);
 		}
-		const char *second = p == NULL ? "From every podcast" :
+		const char *second = i == 0 ? "Started, on any device" :
+			p == NULL ? "From every podcast" :
 			p->fetched == 0 ? "Not read yet" : p->author;
 		if (second != NULL) {
 			gem_text_clipped(cr, second, tx, y + 2 + GEM_ROW_H - 2, tw, GEM_ROW_H);
@@ -548,10 +609,10 @@ static void paint_left(cairo_t *cr, int w, int h, void *data) {
 		gem_black(cr);
 	}
 	if (ui.podcasts->len == 0) {
-		gem_text(cr, "No podcasts yet:", GEM_PAD, 2 + PODCAST_H + GEM_PAD, GEM_ROW_H);
-		gem_text(cr, "File > Add Podcast.", GEM_PAD,
-			2 + PODCAST_H + GEM_PAD + GEM_ROW_H, GEM_ROW_H);
-		gem_grey_out(cr, 0, 2 + PODCAST_H + GEM_PAD, w, 2 * GEM_ROW_H);
+		int ty = 2 + TOP_ROWS * PODCAST_H + GEM_PAD - y0;
+		gem_text(cr, "No podcasts yet:", GEM_PAD, ty, GEM_ROW_H);
+		gem_text(cr, "File > Add Podcast.", GEM_PAD, ty + GEM_ROW_H, GEM_ROW_H);
+		gem_grey_out(cr, 0, ty, w, 2 * GEM_ROW_H);
 	}
 }
 
@@ -567,7 +628,8 @@ static void paint_right(cairo_t *cr, int w, int h, void *data) {
 	gem_black(cr);
 	gem_fill(cr, 0, 0, 1, h);   /* the line between the lists */
 	if (ui.episodes->len == 0) {
-		const char *s = showing_new() ? "Nothing new." : "No episodes.";
+		const char *s = showing_listening() ? "Nothing started." :
+			showing_new() ? "Nothing new." : "No episodes.";
 		gem_text(cr, s, (w - (int)gem_text_width(cr, s)) / 2, h / 3, GEM_ROW_H);
 		gem_grey_out(cr, 1, h / 3, w - 1, GEM_ROW_H);
 		return;
@@ -626,7 +688,7 @@ static void paint_right(cairo_t *cr, int w, int h, void *data) {
 		} else if (ui.downloading != NULL && strcmp(ui.downloading, e->url) == 0) {
 			g_string_append(s, s->len > 0 ? ", downloading..." : "Downloading...");
 		}
-		if (showing_new() && e->podcast_title != NULL) {
+		if (showing_all() && e->podcast_title != NULL) {
 			g_string_append_printf(s, "%s%s", s->len > 0 ? "  -  " : "",
 				e->podcast_title);
 		}
@@ -800,7 +862,8 @@ static void alert(enum gem_alert_icon icon, const char *text) {
 static void load_episodes(void) {
 	char *keep = cursor_episode() != NULL ? g_strdup(cursor_episode()->url) : NULL;
 	g_clear_pointer(&ui.episodes, g_ptr_array_unref);
-	ui.episodes = store_episodes(showing_new() ? NULL : ui.picked);
+	ui.episodes = showing_listening() ? store_episodes_started() :
+		store_episodes(showing_new() ? NULL : ui.picked);
 	ui.cursor = -1;
 	for (guint i = 0; keep != NULL && i < ui.episodes->len; i++) {
 		if (strcmp(((struct episode *)ui.episodes->pdata[i])->url, keep) == 0) {
@@ -814,7 +877,10 @@ static void load_episodes(void) {
 static void reload(void) {
 	g_clear_pointer(&ui.podcasts, g_ptr_array_unref);
 	ui.podcasts = store_podcasts();
-	if (!showing_new() && podcast_of(ui.picked) == NULL) {
+	GPtrArray *started = store_episodes_started();
+	ui.started_count = (int)started->len;
+	g_ptr_array_unref(started);
+	if (!showing_all() && podcast_of(ui.picked) == NULL) {
 		g_free(ui.picked);
 		ui.picked = g_strdup(NEW_EPISODES);
 	}
@@ -1696,7 +1762,7 @@ static void remove_answered(int button, void *data) {
 }
 
 static void remove_podcast(void) {
-	if (showing_new()) {
+	if (showing_all()) {
 		return;
 	}
 	struct podcast *p = podcast_of(ui.picked);
@@ -1891,7 +1957,7 @@ enum {
 static void build_menus(struct app_menu *m, void *data) {
 	struct episode *e = cursor_episode();
 	uint32_t ep = e != NULL ? 0 : APP_MENU_DISABLED;
-	uint32_t pod = showing_new() ? APP_MENU_DISABLED : 0;
+	uint32_t pod = showing_all() ? APP_MENU_DISABLED : 0;
 	app_menu_add_menu(m, "File");
 	app_menu_add_item(m, ACT_ADD, "Add Podcast...", "^N", 0);
 	app_menu_add_item(m, ACT_IMPORT, "Import OPML...", NULL, 0);
@@ -1965,7 +2031,7 @@ static void run(int id) {
 	case ACT_SYNC: sync_now(); break;
 	case ACT_SETTINGS: show_settings(); break;
 	case ACT_QUIT: g_application_quit(G_APPLICATION(ui.app)); break;
-	case ACT_REFRESH: if (!showing_new()) refresh(ui.picked); break;
+	case ACT_REFRESH: if (!showing_all()) refresh(ui.picked); break;
 	case ACT_ALL_PLAYED:
 		for (guint i = 0; i < ui.episodes->len; i++) {
 			struct episode *x = ui.episodes->pdata[i];
@@ -2011,10 +2077,9 @@ static void left_pressed(GtkGestureClick *g, int n, double x, double y,
 	if (i < 0 || i >= n_left()) {
 		return;
 	}
-	pick_podcast(i == 0 ? NEW_EPISODES :
-		((struct podcast *)ui.podcasts->pdata[i - 1])->url);
+	pick_podcast(left_row(i));
 	if (gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g)) ==
-			GDK_BUTTON_SECONDARY && i > 0) {
+			GDK_BUTTON_SECONDARY && i >= TOP_ROWS) {
 		gem_popup_clear(ui.lpopup);
 		gem_popup_add(ui.lpopup, ACT_REFRESH, "Refresh", NULL, 0);
 		gem_popup_add(ui.lpopup, ACT_ALL_PLAYED, "Mark All Played", NULL, 0);
@@ -2143,15 +2208,13 @@ static void move_cursor(int to) {
 		app_menu_update(ui.menu);
 		return;
 	}
-	int i = CLAMP(to, 0, n_left() - 1);
-	pick_podcast(i == 0 ? NEW_EPISODES :
-		((struct podcast *)ui.podcasts->pdata[i - 1])->url);
+	pick_podcast(left_row(CLAMP(to, 0, n_left() - 1)));
 }
 
 static int left_index(void) {
-	for (guint i = 0; !showing_new() && i < ui.podcasts->len; i++) {
-		if (strcmp(((struct podcast *)ui.podcasts->pdata[i])->url, ui.picked) == 0) {
-			return (int)i + 1;
+	for (int i = 0; i < n_left(); i++) {
+		if (g_strcmp0(left_row(i), ui.picked) == 0) {
+			return i;
 		}
 	}
 	return 0;
@@ -2561,6 +2624,13 @@ static void startup(GApplication *app, gpointer data) {
 		g_free(last);
 	}
 	ui.podcasts = store_podcasts();
+	/* What you're in the middle of first, if anything. */
+	GPtrArray *started = store_episodes_started();
+	if (started->len > 0) {
+		g_free(ui.picked);
+		ui.picked = g_strdup(LISTENING);
+	}
+	g_ptr_array_unref(started);
 	ui.episodes = store_episodes(NULL);
 	mpris_start();
 	g_timeout_add(500, tick, NULL);
