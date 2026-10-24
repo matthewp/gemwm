@@ -12,7 +12,7 @@
  *   info line  | Loading... 45%                                  |
  *   page       (a WebKitWebView per tab, in a GtkStack)
  *
- * Under GemWM, its File, View and Go menus are in the menu bar
+ * Under GemWM, its File, View, Go and Help menus are in the menu bar
  * (lib/app-menu.c).
  */
 #include <cairo.h>
@@ -87,6 +87,13 @@ struct tab {
 	bool reading; /* in Reader View */
 	bool reader_loading; /* the load starting is the reader's page */
 	WebKitUserContentFilter *ads; /* the ad filter it has on, or NULL */
+	/* For diagnostics: the tab's number in the logs, when its page
+	 * started loading, how many resources that load asked for and how
+	 * many failed, and those still loading (struct pending, by resource). */
+	unsigned id;
+	gint64 load_started;
+	unsigned resources, resources_failed;
+	GHashTable *pending;
 };
 
 struct browser {
@@ -190,6 +197,7 @@ static struct {
 	WebKitUserContentFilter *ads_filter;
 	char *ads_dir;
 	bool ads_updating;
+	gint64 started; /* for diagnostics */
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -217,6 +225,7 @@ static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
 	WebKitHitTestResult *hit, struct tab *t);
 static bool app_owns(struct browser *b, const char *uri);
 static void open_in_browser(const char *uri);
+static char *debug_dump(void);
 static struct browser *app_window(const char *uri, const char *name);
 static GtkWidget *pixel_area(struct browser *b, int height,
 	GtkDrawingAreaDrawFunc draw, GCallback pressed);
@@ -855,28 +864,46 @@ static void sync_tabbar(struct browser *b) {
  * The vertical bar is always there; the horizontal one only for pages
  * wider than the window (it takes height, not width, so it can't make the
  * page reflow in and out of needing it). */
-/* The last DEBUG_LINES things the scroll bars were told, and why, kept in
- * memory all the time, so that when they stop following a page `gemweb
- * --debug` can write out what led up to it without a restart (which
- * would put it right). */
+/* What led up to now, kept in memory all the time, so that when something
+ * goes wrong (the scroll bars stop following a page, pages stop loading)
+ * `gemweb --debug` or Help > Save Diagnostics can write it out without a
+ * restart (which would put it right). Each log is a ring of its last
+ * DEBUG_LINES lines: the scroll bars are told things constantly, so page
+ * loading has its own, or they'd crowd it out. */
 #define DEBUG_LINES 400
-static char *debug_lines[DEBUG_LINES];
-static unsigned debug_next;
+struct debug_log {
+	char *lines[DEBUG_LINES];
+	unsigned next;
+};
+static struct debug_log scroll_log, load_log;
 
-static void scroll_debug(const char *format, ...) G_GNUC_PRINTF(1, 2);
-static void scroll_debug(const char *format, ...) {
+static void debug_add(struct debug_log *log, const char *format,
+		va_list args) {
 	GDateTime *now = g_date_time_new_now_local();
 	char *when = g_date_time_format(now, "%H:%M:%S.%f");
 	g_date_time_unref(now);
-	va_list args;
-	va_start(args, format);
 	char *what = g_strdup_vprintf(format, args);
-	va_end(args);
-	char **slot = &debug_lines[debug_next++ % DEBUG_LINES];
+	char **slot = &log->lines[log->next++ % DEBUG_LINES];
 	g_free(*slot);
 	*slot = g_strdup_printf("%.12s %s", when, what);
 	g_free(what);
 	g_free(when);
+}
+
+static void scroll_debug(const char *format, ...) G_GNUC_PRINTF(1, 2);
+static void scroll_debug(const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	debug_add(&scroll_log, format, args);
+	va_end(args);
+}
+
+static void load_debug(const char *format, ...) G_GNUC_PRINTF(1, 2);
+static void load_debug(const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	debug_add(&load_log, format, args);
+	va_end(args);
 }
 
 static void report_scroll(struct browser *b) {
@@ -1014,12 +1041,155 @@ static gboolean record_later(gpointer data) {
 	return G_SOURCE_REMOVE;
 }
 
+/* A page's resources still loading, for diagnostics: pages that won't
+ * load fully show there as the ones that never finish. Only copies of
+ * their addresses are kept; WebKit frees the resources themselves when
+ * the page goes, so they're watched with weak references, and there are
+ * never more than PENDING_MAX. */
+#define PENDING_MAX 500
+struct pending {
+	char *uri;
+	gint64 started;
+};
+
+static unsigned tab_ids;
+
+static void pending_free(gpointer data) {
+	struct pending *p = data;
+	g_free(p->uri);
+	g_free(p);
+}
+
+static void resource_gone(gpointer data, GObject *resource) {
+	struct tab *t = data;
+	g_hash_table_remove(t->pending, resource);
+}
+
+static void resource_forget(struct tab *t, WebKitWebResource *r) {
+	g_signal_handlers_disconnect_by_data(r, t);
+	g_object_weak_unref(G_OBJECT(r), resource_gone, t);
+	g_hash_table_remove(t->pending, r);
+}
+
+static void pending_clear(struct tab *t) {
+	GHashTableIter iter;
+	gpointer r;
+	g_hash_table_iter_init(&iter, t->pending);
+	while (g_hash_table_iter_next(&iter, &r, NULL)) {
+		g_signal_handlers_disconnect_by_data(r, t);
+		g_object_weak_unref(r, resource_gone, t);
+		g_hash_table_iter_remove(&iter);
+	}
+}
+
+static void on_resource_failed(WebKitWebResource *r, GError *error,
+		struct tab *t) {
+	if (g_error_matches(error, WEBKIT_NETWORK_ERROR,
+			WEBKIT_NETWORK_ERROR_CANCELLED)) {
+		return;
+	}
+	t->resources_failed++;
+	load_debug("tab %u: resource failed: %.200s: %s (%s %d)", t->id,
+		webkit_web_resource_get_uri(r), error->message,
+		g_quark_to_string(error->domain), error->code);
+}
+
+/* Comes after "failed" too. */
+static void on_resource_finished(WebKitWebResource *r, struct tab *t) {
+	WebKitURIResponse *response = webkit_web_resource_get_response(r);
+	guint status = response != NULL ?
+		webkit_uri_response_get_status_code(response) : 0;
+	if (status >= 400) {
+		load_debug("tab %u: resource got HTTP %u: %.200s", t->id, status,
+			webkit_web_resource_get_uri(r));
+	}
+	resource_forget(t, r);
+}
+
+static void on_resource_started(WebKitWebView *view, WebKitWebResource *r,
+		WebKitURIRequest *request, struct tab *t) {
+	t->resources++;
+	if (g_hash_table_size(t->pending) >= PENDING_MAX ||
+			g_hash_table_contains(t->pending, r)) {
+		return;
+	}
+	struct pending *p = g_new(struct pending, 1);
+	p->uri = g_strndup(webkit_uri_request_get_uri(request), 300);
+	p->started = g_get_monotonic_time();
+	g_hash_table_insert(t->pending, r, p);
+	g_object_weak_ref(G_OBJECT(r), resource_gone, t);
+	g_signal_connect(r, "failed", G_CALLBACK(on_resource_failed), t);
+	g_signal_connect(r, "finished", G_CALLBACK(on_resource_finished), t);
+}
+
+/* The resources a tab has been waiting on longest, oldest first. */
+static int pending_older(gconstpointer a, gconstpointer b) {
+	const struct pending *pa = *(struct pending *const *)a;
+	const struct pending *pb = *(struct pending *const *)b;
+	return pa->started < pb->started ? -1 : pa->started > pb->started;
+}
+
+static GPtrArray *pending_sorted(struct tab *t) {
+	GPtrArray *list = g_ptr_array_new();
+	GHashTableIter iter;
+	gpointer p;
+	g_hash_table_iter_init(&iter, t->pending);
+	while (g_hash_table_iter_next(&iter, NULL, &p)) {
+		g_ptr_array_add(list, p);
+	}
+	g_ptr_array_sort(list, pending_older);
+	return list;
+}
+
+static void on_web_process_terminated(WebKitWebView *view,
+		WebKitWebProcessTerminationReason reason, struct tab *t) {
+	load_debug("tab %u: WEB PROCESS ENDED (%s): %.200s", t->id,
+		reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" :
+		reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ?
+		"out of memory" : "ended by GemWeb", webkit_web_view_get_uri(view));
+}
+
+static void on_responsive(WebKitWebView *view, GParamSpec *pspec,
+		struct tab *t) {
+	load_debug("tab %u: web process %s", t->id,
+		webkit_web_view_get_is_web_process_responsive(view) ?
+		"responding again" : "NOT RESPONDING");
+}
+
+static gboolean on_tls_errors(WebKitWebView *view, const char *uri,
+		GTlsCertificate *certificate, GTlsCertificateFlags errors,
+		struct tab *t) {
+	load_debug("tab %u: TLS errors (flags 0x%x): %.200s", t->id, errors, uri);
+	return FALSE;
+}
+
 /* A page is recorded when it commits (after any redirects), or, for pages
  * that change their address themselves (YouTube's videos), once the
  * address has settled. */
 static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 		struct tab *t) {
 	const char *uri = webkit_web_view_get_uri(view);
+	static const char *const events[] = { "started", "redirected",
+		"committed", "finished" };
+	if (event == WEBKIT_LOAD_STARTED) {
+		t->load_started = g_get_monotonic_time();
+		t->resources = t->resources_failed = 0;
+	}
+	if (event != WEBKIT_LOAD_FINISHED) {
+		load_debug("tab %u: %s: %.200s", t->id, events[event], uri);
+	} else {
+		load_debug("tab %u: finished in %.1fs, %u resources, %u failed, "
+			"%u still loading: %.200s", t->id,
+			(g_get_monotonic_time() - t->load_started) / 1e6, t->resources,
+			t->resources_failed, g_hash_table_size(t->pending), uri);
+		GPtrArray *list = pending_sorted(t);
+		for (guint i = 0; i < list->len && i < 5; i++) {
+			struct pending *p = list->pdata[i];
+			load_debug("tab %u:   still loading after %.1fs: %s", t->id,
+				(g_get_monotonic_time() - p->started) / 1e6, p->uri);
+		}
+		g_ptr_array_free(list, TRUE);
+	}
 	if (event == WEBKIT_LOAD_STARTED || event == WEBKIT_LOAD_REDIRECTED) {
 		ads_apply(t);
 	}
@@ -1094,6 +1264,8 @@ static gboolean on_file_chooser(WebKitWebView *view,
 /* A page that didn't load (a mistyped address) isn't worth suggesting. */
 static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event,
 		const char *uri, GError *error, struct tab *t) {
+	load_debug("tab %u: load failed: %.200s: %s (%s %d)", t->id, uri,
+		error->message, g_quark_to_string(error->domain), error->code);
 	if (g_error_matches(error, WEBKIT_NETWORK_ERROR,
 			WEBKIT_NETWORK_ERROR_CANCELLED)) {
 		return FALSE;
@@ -1525,6 +1697,15 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	struct tab *t = g_new0(struct tab, 1);
 	t->browser = b;
 	t->media = b->tabs->len == 0;
+	t->id = ++tab_ids;
+	t->pending = g_hash_table_new_full(NULL, NULL, NULL, pending_free);
+	struct tab *opener = related != NULL ?
+		g_object_get_data(G_OBJECT(related), "tab") : NULL;
+	if (opener != NULL) {
+		load_debug("tab %u: opened by tab %u", t->id, opener->id);
+	} else {
+		load_debug("tab %u: opened", t->id);
+	}
 	/* Each tab has its own content manager so its scroll reports say which
 	 * tab they come from. */
 	t->content = webkit_user_content_manager_new();
@@ -1577,6 +1758,14 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), t);
 	g_signal_connect(t->view, "run-file-chooser", G_CALLBACK(on_file_chooser), t);
 	g_signal_connect(t->view, "load-failed", G_CALLBACK(on_load_failed), t);
+	g_signal_connect(t->view, "load-failed-with-tls-errors",
+		G_CALLBACK(on_tls_errors), t);
+	g_signal_connect(t->view, "resource-load-started",
+		G_CALLBACK(on_resource_started), t);
+	g_signal_connect(t->view, "web-process-terminated",
+		G_CALLBACK(on_web_process_terminated), t);
+	g_signal_connect(t->view, "notify::is-web-process-responsive",
+		G_CALLBACK(on_responsive), t);
 	g_signal_connect(t->view, "script-dialog", G_CALLBACK(on_script_dialog), t);
 	g_signal_connect(t->view, "context-menu", G_CALLBACK(on_context_menu), t);
 	find_connect(t);
@@ -1622,6 +1811,9 @@ static void tab_close(struct browser *b, int index) {
 	}
 	g_free(t->recorded);
 	g_free(t->failed);
+	pending_clear(t);
+	g_hash_table_unref(t->pending);
+	load_debug("tab %u: closed", t->id);
 	gtk_stack_remove(GTK_STACK(b->stack), GTK_WIDGET(t->view));
 	g_free(t);
 	if (b->tabs->len == 0) {
@@ -1914,7 +2106,7 @@ enum action {
 	ACT_ZOOM_RESET, ACT_QUIT, ACT_HOME, ACT_NEW_WINDOW, ACT_CLEAR_HISTORY,
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
-	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD,
+	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD, ACT_DIAGNOSTICS,
 	ACT_DEFAULT_ZOOM = 2000, /* View > Default Zoom: this, plus a step */
 	ACT_APPEARANCE = 2100,   /* View > Website Appearance: this, plus one */
 };
@@ -2257,7 +2449,9 @@ static void dialog_pressed(GtkGestureClick *gesture, int n_press, double x,
  * with only OK, OK). Other keys go to the field, if there is one. */
 static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
 		guint keycode, GdkModifierType state, struct browser *b) {
-	if (!dialog_up(b)) {
+	/* Only GemWeb's own: a GEM alert or the item selector takes its keys
+	 * itself. */
+	if (b->dialog == DIALOG_NONE) {
 		return FALSE;
 	}
 	if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
@@ -3115,6 +3309,8 @@ static void ads_apply(struct tab *t) {
 	if (want != NULL) {
 		webkit_user_content_manager_add_filter(t->content, want);
 	}
+	load_debug("tab %u: ad filter %s", t->id, want == NULL ? "off" :
+		t->ads == NULL ? "on" : "replaced by the new one");
 	t->ads = want;
 }
 
@@ -3289,6 +3485,8 @@ static void ads_apply_all(void) {
 
 static void ads_use(WebKitUserContentFilter *filter) {
 	WebKitUserContentFilter *old = shared.ads_filter;
+	load_debug("ad filter: %s", old == NULL ? "ready" :
+		"replaced by a newly compiled one");
 	shared.ads_filter = filter;
 	ads_apply_all();
 	if (old != NULL) {
@@ -3317,6 +3515,7 @@ static void ads_saved(GObject *source, GAsyncResult *result, gpointer data) {
 	if (filter == NULL) {
 		g_printerr("gemweb: ad blocking lists didn't compile: %s\n",
 			error->message);
+		load_debug("ad filter: lists didn't compile: %s", error->message);
 		g_error_free(error);
 		return;
 	}
@@ -3366,6 +3565,8 @@ static void ads_fetch_next(struct ads_update *u) {
 	}
 	guint n = 0;
 	GBytes *rules = adblock_finish(u->converter, &n);
+	load_debug("ad filter: fetched %d lists, %u rules, %s", u->fetched, n,
+		u->fetched > 0 ? "compiling" : "keeping the old filter");
 	if (u->fetched > 0) {
 		webkit_user_content_filter_store_save(shared.ads_store, ADS_ID, rules,
 			NULL, ads_saved, NULL);
@@ -3407,6 +3608,8 @@ static void ads_loaded(GObject *source, GAsyncResult *result, gpointer data) {
 		shared.ads_store, result, NULL);
 	if (filter != NULL) {
 		ads_use(filter);
+	} else {
+		load_debug("ad filter: none compiled yet");
 	}
 	if (ads_enabled() && (filter == NULL || ads_stale())) {
 		ads_update();
@@ -4044,6 +4247,18 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 		lock_passwords();
 		show_notice(b, g_strdup("Passwords locked"));
 		break;
+	case ACT_DIAGNOSTICS: {
+		static const char *const ok[] = { "OK", NULL };
+		char *path = debug_dump();
+		char *text = path != NULL ?
+			g_strdup_printf("Diagnostics saved to\n%s", path) :
+			g_strdup("Couldn't save diagnostics.");
+		gem_alert(GTK_OVERLAY(b->overlay), path != NULL ? GEM_ALERT_NOTE :
+			GEM_ALERT_STOP, text, ok, 0, 0, NULL, NULL);
+		g_free(text);
+		g_free(path);
+		break;
+	}
 	}
 	return TRUE;
 }
@@ -4142,6 +4357,9 @@ static void build_menus(struct app_menu *m, void *data) {
 		app_menu_add_item(m, ACT_LOCK_PASSWORDS, "Lock Passwords", NULL,
 			shared.password_session != NULL ? 0 : APP_MENU_DISABLED);
 	}
+
+	app_menu_add_menu(m, "Help");
+	app_menu_add_item(m, ACT_DIAGNOSTICS, "Save Diagnostics", NULL, 0);
 }
 
 static void menu_activate(uint32_t id, void *data) {
@@ -4176,7 +4394,7 @@ static void menu_activate(uint32_t id, void *data) {
 	}
 	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
 			id == ACT_QUIT || id == ACT_CLEAR_HISTORY ||
-			id == ACT_LOCK_PASSWORDS) {
+			id == ACT_LOCK_PASSWORDS || id == ACT_DIAGNOSTICS) {
 		shortcut(b->window, NULL, GINT_TO_POINTER(id));
 	}
 }
@@ -4343,6 +4561,7 @@ static void find_scroll_manager(void) {
 
 static void shared_init(GtkApplication *app) {
 	shared.app = app;
+	shared.started = g_get_monotonic_time();
 	appearance_init();
 	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
 	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
@@ -4664,8 +4883,19 @@ static void app_open(const char *input, const char *name) {
 
 /* Every `gemweb [URL...]` lands here, in the first instance: URLs open as
  * tabs in the existing window. */
-/* gemweb --debug: writes the scroll history and how every window and tab
- * stands now to ~/.local/state/gemweb/debug.log; returns its path. */
+static void debug_write(FILE *f, struct debug_log *log, const char *what) {
+	fprintf(f, "\nLast %d %s, oldest first:\n", DEBUG_LINES, what);
+	for (unsigned i = 0; i < DEBUG_LINES; i++) {
+		char *line = log->lines[(log->next + i) % DEBUG_LINES];
+		if (line != NULL) {
+			fprintf(f, "%s\n", line);
+		}
+	}
+}
+
+/* gemweb --debug, or Help > Save Diagnostics: writes the logs and how
+ * every window and tab stands now to ~/.local/state/gemweb/debug.log;
+ * returns its path. */
 static char *debug_dump(void) {
 	char *dir = g_build_filename(g_get_user_state_dir(), "gemweb", NULL);
 	g_mkdir_with_parents(dir, 0700);
@@ -4677,7 +4907,26 @@ static char *debug_dump(void) {
 		return NULL;
 	}
 	gint64 now = g_get_monotonic_time();
-	fprintf(f, "GemWeb (pid %d)\n\n", (int)getpid());
+	GDateTime *date = g_date_time_new_now_local();
+	char *written = g_date_time_format(date, "%Y-%m-%d %H:%M:%S");
+	g_date_time_unref(date);
+	fprintf(f, "GemWeb (pid %d), written %s, running %.1f hours\n",
+		(int)getpid(), written, (now - shared.started) / 3.6e9);
+	g_free(written);
+	fprintf(f, "WebKitGTK %u.%u.%u, GTK %u.%u.%u\n\n",
+		webkit_get_major_version(), webkit_get_minor_version(),
+		webkit_get_micro_version(), gtk_get_major_version(),
+		gtk_get_minor_version(), gtk_get_micro_version());
+	char *stamp = ads_stamp();
+	GStatBuf st;
+	char *age = g_stat(stamp, &st) == 0 ? g_strdup_printf("%.1f days ago",
+		(g_get_real_time() / G_USEC_PER_SEC - st.st_mtime) / 86400.0) :
+		g_strdup("never");
+	fprintf(f, "Ad blocking: %s, filter %s, lists fetched %s%s\n",
+		ads_enabled() ? "on" : "off", shared.ads_filter != NULL ?
+		"ready" : "NONE", age, shared.ads_updating ? ", updating now" : "");
+	g_free(age);
+	g_free(stamp);
 	fprintf(f, "GemWM scroll bars: %s\n\n", shared.scroll_manager != NULL ?
 		"offered" : "NOT OFFERED (gemwm-scroll-v1 missing)");
 	int n = 0;
@@ -4697,6 +4946,26 @@ static char *debug_dump(void) {
 			fprintf(f, "  tab %u%s: %s\n", i + 1, (int)i == b->active ?
 				" (front)" : "", webkit_web_view_get_uri(t->view) ?
 				webkit_web_view_get_uri(t->view) : "(nothing)");
+			fprintf(f, "    tab %u in the logs; %s, %.0f%%, web process %s, ad "
+				"filter %s\n", t->id, webkit_web_view_is_loading(t->view) ?
+				"LOADING" : "loaded",
+				webkit_web_view_get_estimated_load_progress(t->view) * 100,
+				webkit_web_view_get_is_web_process_responsive(t->view) ?
+				"responding" : "NOT RESPONDING", t->ads != NULL ? "on" : "off");
+			if (t->failed != NULL) {
+				fprintf(f, "    failed to load: %s\n", t->failed);
+			}
+			fprintf(f, "    last load: started %.1fs ago, %u resources, %u "
+				"failed, %u still loading\n", (now - t->load_started) / 1e6,
+				t->resources, t->resources_failed,
+				g_hash_table_size(t->pending));
+			GPtrArray *list = pending_sorted(t);
+			for (guint j = 0; j < list->len && j < 20; j++) {
+				struct pending *p = list->pdata[j];
+				fprintf(f, "      %.1fs: %s\n", (now - p->started) / 1e6,
+					p->uri);
+			}
+			g_ptr_array_free(list, TRUE);
 			if (t->scroll_messages == 0) {
 				fprintf(f, "    page has sent NO scroll reports\n");
 			} else {
@@ -4707,13 +4976,8 @@ static char *debug_dump(void) {
 			}
 		}
 	}
-	fprintf(f, "\nLast %d events, oldest first:\n", DEBUG_LINES);
-	for (unsigned i = 0; i < DEBUG_LINES; i++) {
-		char *line = debug_lines[(debug_next + i) % DEBUG_LINES];
-		if (line != NULL) {
-			fprintf(f, "%s\n", line);
-		}
-	}
+	debug_write(f, &load_log, "page loading events");
+	debug_write(f, &scroll_log, "scroll bar events");
 	fclose(f);
 	return path;
 }

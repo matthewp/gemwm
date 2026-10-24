@@ -11,7 +11,7 @@ order: 1
 
 A WebKit browser whose tabs, buttons and info line are drawn like GemWM's
 windows, and whose pages scroll with the window frame's own GEM scroll bars.
-Its menus, File, View and Go, are in the menu bar.
+Its menus, File, View, Go and Help, are in the menu bar.
 
 ```
 gemweb               # opens a new window
@@ -128,6 +128,14 @@ search = kagi
 `home` is an address, or `start` for GemWeb's own start page. `search` is
 `duckduckgo` (the default), `google`, `bing`, `brave`, `startpage` or `kagi`,
 or any search URL with `%s` where the query goes.
+
+## When pages misbehave
+
+GemWeb keeps a short record of what its pages have been doing (loads,
+failures, requests that never finish, crashed pages, ad filter changes).
+**Help > Save Diagnostics**, or `gemweb --debug`, writes it out with how every
+tab stands now to `~/.local/state/gemweb/debug.log`, without a restart that
+might put things right.
 
 ## What it needs
 
