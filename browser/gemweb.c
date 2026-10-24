@@ -202,6 +202,7 @@ static struct {
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	const char *uri, bool select);
+static void tab_free(gpointer data, GObject *view);
 static void tab_close(struct browser *b, int index);
 static void tab_select(struct browser *b, int index);
 static void load_home(struct tab *t);
@@ -1743,6 +1744,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	}
 	gtk_widget_set_vexpand(GTK_WIDGET(t->view), TRUE);
 	g_object_set_data(G_OBJECT(t->view), "tab", t);
+	g_object_weak_ref(G_OBJECT(t->view), tab_free, t);
 	g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), t);
 	g_signal_connect_swapped(t->view, "notify::is-playing-audio",
 		G_CALLBACK(gtk_widget_queue_draw), t->browser->tabbar);
@@ -1800,10 +1802,15 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	return t;
 }
 
-static void tab_close(struct browser *b, int index) {
-	struct tab *t = g_ptr_array_index(b->tabs, index);
-	g_ptr_array_remove_index(b->tabs, index);
-	g_object_set_data(G_OBJECT(t->view), "tab", NULL);
+/* A tab lasts as long as its page's view: closing the tab, or its window,
+ * lets the view go (WebKit may hold it a little longer), and then the
+ * rest goes with it. A tab still in a window's list here is going with
+ * the window, which takes down its views before it says it's going. */
+static void tab_free(gpointer data, GObject *view) {
+	struct tab *t = data;
+	if (t->browser != NULL && g_ptr_array_remove(t->browser->tabs, t)) {
+		load_debug("tab %u: closed with its window", t->id);
+	}
 	g_signal_handlers_disconnect_by_data(t->content, t);
 	g_object_unref(t->content);
 	if (t->record_timer != 0) {
@@ -1813,9 +1820,15 @@ static void tab_close(struct browser *b, int index) {
 	g_free(t->failed);
 	pending_clear(t);
 	g_hash_table_unref(t->pending);
+	g_free(t);
+}
+
+static void tab_close(struct browser *b, int index) {
+	struct tab *t = g_ptr_array_index(b->tabs, index);
+	g_ptr_array_remove_index(b->tabs, index);
+	g_object_set_data(G_OBJECT(t->view), "tab", NULL);
 	load_debug("tab %u: closed", t->id);
 	gtk_stack_remove(GTK_STACK(b->stack), GTK_WIDGET(t->view));
-	g_free(t);
 	if (b->tabs->len == 0) {
 		gtk_window_destroy(GTK_WINDOW(b->window));
 		return;
@@ -4492,12 +4505,17 @@ static void window_destroyed(GtkWidget *window, struct browser *b) {
 	if (b->scroll != NULL) {
 		gemwm_scroll_v1_destroy(b->scroll);
 	}
+	/* Tabs whose views something still holds: they go when it lets go,
+	 * without the window. */
 	for (guint i = 0; i < b->tabs->len; i++) {
 		struct tab *t = g_ptr_array_index(b->tabs, i);
 		if (t->record_timer != 0) {
 			g_source_remove(t->record_timer);
 			t->record_timer = 0;
 		}
+		t->browser = NULL;
+		load_debug("tab %u: closed with its window (its page still held)",
+			t->id);
 	}
 	if (b->complete_idle != 0) {
 		g_source_remove(b->complete_idle);
@@ -4559,9 +4577,28 @@ static void find_scroll_manager(void) {
 	wl_registry_destroy(registry);
 }
 
+static const char *connectivity_name(GNetworkMonitor *monitor) {
+	switch (g_network_monitor_get_connectivity(monitor)) {
+	case G_NETWORK_CONNECTIVITY_LOCAL: return "none";
+	case G_NETWORK_CONNECTIVITY_LIMITED: return "limited";
+	case G_NETWORK_CONNECTIVITY_PORTAL: return "behind a captive portal";
+	default: return "full";
+	}
+}
+
+/* Pages that hang after the network changes (resuming, another Wi-Fi)
+ * may be on connections WebKit doesn't know are dead. */
+static void on_network_changed(GNetworkMonitor *monitor, gboolean available,
+		gpointer data) {
+	load_debug("network changed: %s, connectivity %s",
+		available ? "available" : "UNAVAILABLE", connectivity_name(monitor));
+}
+
 static void shared_init(GtkApplication *app) {
 	shared.app = app;
 	shared.started = g_get_monotonic_time();
+	g_signal_connect(g_network_monitor_get_default(), "network-changed",
+		G_CALLBACK(on_network_changed), NULL);
 	appearance_init();
 	char *data = g_build_filename(g_get_user_data_dir(), "gemweb", NULL);
 	char *cache = g_build_filename(g_get_user_cache_dir(), "gemweb", NULL);
@@ -4927,6 +4964,25 @@ static char *debug_dump(void) {
 		"ready" : "NONE", age, shared.ads_updating ? ", updating now" : "");
 	g_free(age);
 	g_free(stamp);
+	GNetworkMonitor *monitor = g_network_monitor_get_default();
+	fprintf(f, "Network: %s, connectivity %s\n",
+		g_network_monitor_get_network_available(monitor) ? "available" :
+		"UNAVAILABLE", connectivity_name(monitor));
+	/* What a paste would get: on Wayland, what the app copied from still
+	 * holds, offered as these types. */
+	GdkDisplay *display = gdk_display_get_default();
+	GdkClipboard *boards[] = { gdk_display_get_clipboard(display),
+		gdk_display_get_primary_clipboard(display) };
+	const char *board_names[] = { "Clipboard", "Primary selection" };
+	for (guint i = 0; i < G_N_ELEMENTS(boards); i++) {
+		GdkContentFormats *formats = gdk_clipboard_get_formats(boards[i]);
+		char *types = gdk_content_formats_to_string(formats);
+		fprintf(f, "%s: %s%s\n", board_names[i], types[0] != '\0' ? types :
+			"EMPTY", types[0] == '\0' ? "" :
+			gdk_clipboard_is_local(boards[i]) ? " (from GemWeb)" :
+			" (from another app)");
+		g_free(types);
+	}
 	fprintf(f, "GemWM scroll bars: %s\n\n", shared.scroll_manager != NULL ?
 		"offered" : "NOT OFFERED (gemwm-scroll-v1 missing)");
 	int n = 0;
