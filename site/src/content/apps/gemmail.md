@@ -29,6 +29,9 @@ reads.
   and Mark as Read (^U) act on all of them at once.
 - Drag messages onto a folder, or **Move to Folder...** (M).
 - **File > Empty Trash...** deletes everything in Trash for good.
+- **File > Delete Folder...** deletes the folder shown, after asking; its
+  messages go to Trash first (on Gmail, they stay in All Mail). The Inbox, Trash and the other special folders
+  can't be deleted, and neither can a folder that holds other folders.
 - Attachments are buttons that save them, in GEM's item selector; pictures
   attached can be shown under the text.
 

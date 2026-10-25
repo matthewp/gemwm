@@ -358,6 +358,7 @@ static int run_list_folders(struct mail *m, struct job *j) {
 		f->mailbox = g_strdup(mb->mb_name);
 		char *full = decode_mutf7(mb->mb_name);
 		char delim = mb->mb_delimiter;
+		f->delimiter = delim;
 		const char *last = delim ? strrchr(full, delim) : NULL;
 		f->name = g_strdup(last != NULL ? last + 1 : full);
 		for (const char *p = full; delim && *p; p++) {
@@ -1241,6 +1242,59 @@ void mail_empty(struct mail *m, const char *mailbox, mail_done_fn done,
 	struct job *j = job_new(do_empty, (GSourceFunc)finish_done,
 		G_CALLBACK(done), data);
 	j->mailbox = g_strdup(mailbox);
+	queue(m, j);
+}
+
+/* Its messages to the trash, all of them (not just those listed), then
+ * the folder. Unselected before it goes: not every server will delete the
+ * folder that's open. */
+static int run_delete_folder(struct mail *m, struct job *j) {
+	g_clear_pointer(&m->selected, g_free);
+	int r = select_mailbox(m, j->mailbox);
+	if (r != MAILIMAP_NO_ERROR) {
+		j->error = imap_error(m, "Couldn't open the folder", r);
+		return r;
+	}
+	struct mailimap_selection_info *sel = m->imap->imap_selection_info;
+	if (j->other != NULL && sel != NULL && sel->sel_exists > 0) {
+		struct mailimap_set *set = mailimap_set_new_interval(1, 0); /* 1:* */
+		if (mailimap_has_extension(m->imap, (char *)"MOVE")) {
+			r = mailimap_move(m->imap, set, j->other);
+		} else {
+			r = mailimap_copy(m->imap, set, j->other);
+			if (r == MAILIMAP_NO_ERROR) {
+				r = store_flag(m, set, mailimap_flag_new_deleted(), true);
+			}
+		}
+		mailimap_set_free(set);
+		if (r != MAILIMAP_NO_ERROR) {
+			j->error = imap_error(m, "Couldn't move its messages to the Trash", r);
+			return r;
+		}
+	}
+	g_clear_pointer(&m->selected, g_free);
+	r = mailimap_close(m->imap);
+	if (r == MAILIMAP_NO_ERROR) {
+		r = mailimap_delete(m->imap, j->mailbox);
+	}
+	if (r == MAILIMAP_NO_ERROR) {
+		cache_forget_folder(m->cache, j->mailbox);
+	} else {
+		j->error = imap_error(m, "Couldn't delete the folder", r);
+	}
+	return r;
+}
+
+static void do_delete_folder(struct mail *m, struct job *j) {
+	run_with(m, j, run_delete_folder);
+}
+
+void mail_delete_folder(struct mail *m, const char *mailbox, const char *trash,
+		mail_done_fn done, void *data) {
+	struct job *j = job_new(do_delete_folder, (GSourceFunc)finish_done,
+		G_CALLBACK(done), data);
+	j->mailbox = g_strdup(mailbox);
+	j->other = g_strdup(trash);
 	queue(m, j);
 }
 

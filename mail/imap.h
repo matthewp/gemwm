@@ -21,6 +21,7 @@ struct folder {
 	char *mailbox; /* the server's name (modified UTF-7) */
 	char *name;    /* for people: decoded, the last part of the path */
 	int depth;     /* how far down the tree */
+	char delimiter; /* between the path's parts; 0 if none */
 	enum folder_role role;
 	bool selectable;
 	guint32 messages, unseen;
@@ -83,6 +84,10 @@ void mail_move(struct mail *m, const char *mailbox, const guint32 *uids,
 /* Deletes everything in a folder for good (emptying the Trash). */
 void mail_empty(struct mail *m, const char *mailbox, mail_done_fn done,
 	void *data);
+/* Deletes a folder, its messages moved to trash first (or, with trash
+ * NULL, deleted for good with it). */
+void mail_delete_folder(struct mail *m, const char *mailbox, const char *trash,
+	mail_done_fn done, void *data);
 /* Sends message (from and to the addresses given) by SMTP, then keeps a
  * copy in sent, if set. */
 void mail_send(struct mail *m, GBytes *message, const char *from,

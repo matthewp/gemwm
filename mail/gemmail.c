@@ -68,6 +68,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
+	ACT_DELETE_FOLDER,
 	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
@@ -1003,6 +1004,7 @@ static void show_folders(GPtrArray *folders) {
 	folders_free(ui.folder_list);
 	/* Kept: the thread frees its own copy after this. */
 	ui.folder_list = g_ptr_array_new();
+	bool found = false;
 	for (guint i = 0; i < folders->len; i++) {
 		struct folder *f = g_memdup2(folders->pdata[i], sizeof(struct folder));
 		f->mailbox = g_strdup(f->mailbox);
@@ -1010,11 +1012,12 @@ static void show_folders(GPtrArray *folders) {
 		g_ptr_array_add(ui.folder_list, f);
 		if (g_strcmp0(f->mailbox, was) == 0) {
 			ui.folder = i;
+			found = true;
 		}
 	}
 	gtk_widget_queue_draw(ui.folders);
-	if (was == NULL) {
-		choose_folder(0); /* the Inbox, first */
+	if (!found) {
+		choose_folder(0); /* the Inbox, first; or the one shown's gone */
 	} else {
 		status_counts();
 	}
@@ -3026,6 +3029,96 @@ static void empty_trash(void) {
 	g_free(text);
 }
 
+/* ---- Deleting a folder ---------------------------------------------------- */
+
+/* Folders inside it: deleting it might take them too, or leave it there
+ * hollow, as the server pleases. */
+static bool has_subfolders(struct folder *f) {
+	size_t n = strlen(f->mailbox);
+	for (guint i = 0; f->delimiter != 0 && i < ui.folder_list->len; i++) {
+		struct folder *g = ui.folder_list->pdata[i];
+		if (strncmp(g->mailbox, f->mailbox, n) == 0 &&
+				g->mailbox[n] == f->delimiter) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* The folder shown, if it's one that can go: not the Inbox, Trash and the
+ * others with a part to play, nor one holding others. */
+static struct folder *deletable_folder(void) {
+	struct folder *f = ui.mail != NULL && !viewing() ? current_folder() : NULL;
+	return f != NULL && f->role == ROLE_NONE && !has_subfolders(f) ? f : NULL;
+}
+
+static void folder_deleted(const char *error, void *data) {
+	char *name = data;
+	if (error != NULL) {
+		set_status("%s", error);
+		g_free(name);
+		return;
+	}
+	refresh_view(); /* what was in it is off the shelf and the ledger */
+	mail_list_folders(ui.mail, got_folders,
+		g_strdup_printf("%s deleted.", name));
+	g_free(name);
+}
+
+/* Where a deleted folder's messages go: the Trash; or nowhere, on a server
+ * with an All Mail (Gmail), where a folder's only a label and they stay
+ * there without it. */
+static struct folder *deleted_to(void) {
+	return folder_with_role(ROLE_ALL) != NULL ? NULL :
+		folder_with_role(ROLE_TRASH);
+}
+
+static void delete_folder_answered(int button, void *data) {
+	char *mailbox = data;
+	struct folder *f = deletable_folder();
+	if (button == 1 && f != NULL && strcmp(f->mailbox, mailbox) == 0) {
+		struct folder *trash = deleted_to();
+		set_status("Deleting %s...", f->name);
+		mail_delete_folder(ui.mail, f->mailbox,
+			trash != NULL ? trash->mailbox : NULL, folder_deleted,
+			g_strdup(f->name));
+	}
+	g_free(mailbox);
+}
+
+/* Asks first, saying where its messages go. */
+static void delete_folder(void) {
+	struct folder *f = deletable_folder();
+	if (f == NULL || gem_alert_up(ui.host)) {
+		return;
+	}
+	struct folder *trash = deleted_to(), *all = folder_with_role(ROLE_ALL);
+	char *text;
+	if (f->messages == 0) {
+		text = g_strdup_printf("Delete the folder %s?", f->name);
+	} else if (all != NULL) {
+		text = g_strdup_printf("Delete the folder %s?\n%s stay in\n%s.",
+			f->name, f->messages == 1 ? "Its message will" : "Its messages will",
+			all->name);
+	} else if (trash != NULL) {
+		text = f->messages == 1 ?
+			g_strdup_printf("Delete the folder %s?\nIts message goes to\n%s.",
+				f->name, trash->name) :
+			g_strdup_printf("Delete the folder %s?\nIts %u messages go to\n%s.",
+				f->name, f->messages, trash->name);
+	} else {
+		text = f->messages == 1 ?
+			g_strdup_printf("Delete the folder %s\nand its message for good?",
+				f->name) :
+			g_strdup_printf("Delete the folder %s\nand its %u messages for good?",
+				f->name, f->messages);
+	}
+	static const char *const buttons[] = { "Cancel", "Delete", NULL };
+	gem_alert(ui.host, GEM_ALERT_STOP, text, buttons, 0, 0,
+		delete_folder_answered, g_strdup(f->mailbox));
+	g_free(text);
+}
+
 static void run_action(enum action action, int index) {
 	if (action >= ACT_VIEW_CATEGORY) {
 		/* Shown alone; chosen again (checked), all again. */
@@ -3142,6 +3235,9 @@ static void run_action(enum action action, int index) {
 		break;
 	case ACT_EMPTY_TRASH:
 		empty_trash();
+		break;
+	case ACT_DELETE_FOLDER:
+		delete_folder();
 		break;
 	case ACT_GET_MAIL:
 		get_mail();
@@ -3442,6 +3538,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	struct folder *trash = folder_with_role(ROLE_TRASH);
 	app_menu_add_item(m, ACT_EMPTY_TRASH, "Empty Trash...", NULL,
 		trash != NULL && trash->messages > 0 ? 0 : APP_MENU_DISABLED);
+	app_menu_add_item(m, ACT_DELETE_FOLDER, "Delete Folder...", NULL,
+		deletable_folder() != NULL ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_QUIT, "Close", "^Q", 0);
 	app_menu_add_menu(m, "Message");
