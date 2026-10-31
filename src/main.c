@@ -43,9 +43,11 @@ struct keyboard {
 	struct wl_list link;
 	struct server *server;
 	struct wlr_keyboard *wlr_keyboard;
+	bool is_virtual; /* made by a client: it brings its own keymap */
 	bool swallowed[KEY_CNT]; /* bound keys: hide their release from clients too */
 	struct wl_listener modifiers;
 	struct wl_listener key;
+	struct wl_listener keymap;
 	struct wl_listener destroy;
 };
 
@@ -198,13 +200,51 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	}
 }
 
+/* Gives the seat a keyboard again when its own has gone, a real one if
+ * there is one. Without this, a virtual keyboard that's done (wtype, after
+ * a tool's paste) leaves the seat with none until a real key is pressed,
+ * and a client asking for the keyboard in between gets no keymap: wl-copy
+ * and wl-paste wait for one, so a paste hangs until the next key. */
+static void seat_restore_keyboard(struct server *server) {
+	if (wlr_seat_get_keyboard(server->seat) != NULL) {
+		return;
+	}
+	struct keyboard *best = NULL, *k;
+	wl_list_for_each(k, &server->keyboards, link) {
+		if (k->wlr_keyboard->keymap == NULL) {
+			continue;
+		}
+		if (best == NULL || (best->is_virtual && !k->is_virtual)) {
+			best = k;
+		}
+	}
+	if (best != NULL) {
+		wlr_seat_set_keyboard(server->seat, best->wlr_keyboard);
+	}
+}
+
+/* A virtual keyboard's keymap has come: it's the seat's keyboard from now,
+ * so clients have its keymap before its first key. */
+static void keyboard_handle_keymap(struct wl_listener *listener, void *data) {
+	struct keyboard *keyboard = wl_container_of(listener, keyboard, keymap);
+	wlr_seat_set_keyboard(keyboard->server->seat, keyboard->wlr_keyboard);
+}
+
 static void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
 	struct keyboard *keyboard = wl_container_of(listener, keyboard, destroy);
+	struct server *server = keyboard->server;
+	if (wlr_seat_get_keyboard(server->seat) == keyboard->wlr_keyboard) {
+		wlr_seat_set_keyboard(server->seat, NULL);
+	}
 	wl_list_remove(&keyboard->modifiers.link);
 	wl_list_remove(&keyboard->key.link);
+	wl_list_remove(&keyboard->keymap.link);
 	wl_list_remove(&keyboard->destroy.link);
 	wl_list_remove(&keyboard->link);
 	free(keyboard);
+	/* The seat keeps saying it has a keyboard: clients that drop theirs
+	 * and bind a new one when the next keyboard comes miss its first key. */
+	seat_restore_keyboard(server);
 }
 
 static void server_new_keyboard(struct server *server,
@@ -213,24 +253,40 @@ static void server_new_keyboard(struct server *server,
 	struct keyboard *keyboard = calloc(1, sizeof(*keyboard));
 	keyboard->server = server;
 	keyboard->wlr_keyboard = wlr_keyboard;
+	keyboard->is_virtual =
+		wlr_input_device_get_virtual_keyboard(device) != NULL;
 
-	/* Layout etc. come from XKB_DEFAULT_* environment variables. */
-	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL,
-		XKB_KEYMAP_COMPILE_NO_FLAGS);
-	wlr_keyboard_set_keymap(wlr_keyboard, keymap);
-	xkb_keymap_unref(keymap);
-	xkb_context_unref(context);
-	wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
+	/* Layout etc. come from XKB_DEFAULT_* environment variables. A virtual
+	 * keyboard sends its own keymap (wtype's has only the keys it types);
+	 * ours would replace it, and clients would read its keys wrong. */
+	if (!keyboard->is_virtual) {
+		struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+		struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL,
+			XKB_KEYMAP_COMPILE_NO_FLAGS);
+		wlr_keyboard_set_keymap(wlr_keyboard, keymap);
+		xkb_keymap_unref(keymap);
+		xkb_context_unref(context);
+		wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
+	}
 
 	keyboard->modifiers.notify = keyboard_handle_modifiers;
 	wl_signal_add(&wlr_keyboard->events.modifiers, &keyboard->modifiers);
 	keyboard->key.notify = keyboard_handle_key;
 	wl_signal_add(&wlr_keyboard->events.key, &keyboard->key);
+	keyboard->keymap.notify = keyboard_handle_keymap;
+	wl_list_init(&keyboard->keymap.link);
+	if (keyboard->is_virtual) {
+		wl_signal_add(&wlr_keyboard->events.keymap, &keyboard->keymap);
+	}
 	keyboard->destroy.notify = keyboard_handle_destroy;
 	wl_signal_add(&device->events.destroy, &keyboard->destroy);
 
-	wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
+	/* A virtual keyboard has no keymap yet; it becomes the seat's when it
+	 * sends one (keyboard_handle_keymap), so clients never see a seat
+	 * keyboard without one. */
+	if (!keyboard->is_virtual) {
+		wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
+	}
 	wl_list_insert(&server->keyboards, &keyboard->link);
 
 	/* A keyboard that appears later (plugged in, or virtual) still has to
