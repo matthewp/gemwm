@@ -94,6 +94,7 @@ struct tab {
 	gint64 load_started;
 	unsigned resources, resources_failed;
 	GHashTable *pending;
+	bool private; /* its window's a private one (see private_session) */
 };
 
 struct browser {
@@ -158,6 +159,9 @@ struct browser {
 	bool fullscreen;
 	bool find_was_open;
 
+	/* A private window: nothing it visits is kept (see private_session). */
+	bool private;
+
 	/* A web app's window (gemweb --app): just its page, named after it. */
 	bool app;
 	char *app_uri, *app_name;
@@ -198,6 +202,10 @@ static struct {
 	char *ads_dir;
 	bool ads_updating;
 	gint64 started; /* for diagnostics */
+	/* Private windows' session, while any of their pages is open, and
+	 * the zooms given sites in them (site to percent), kept as long. */
+	WebKitNetworkSession *private_session;
+	GHashTable *private_zooms;
 } shared;
 
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
@@ -453,6 +461,19 @@ static const char *tab_title(struct tab *t) {
 	}
 	const char *uri = webkit_web_view_get_uri(t->view);
 	return uri != NULL && strcmp(uri, "about:blank") != 0 ? uri : "New Tab";
+}
+
+/* An address, for the logs: not a private tab's. */
+static const char *logged(struct tab *t, const char *uri) {
+	return t->private ? "(private)" : uri;
+}
+
+/* The window's named after its page; a private one says so first. */
+static void sync_title(struct browser *b, struct tab *t) {
+	char *title = b->private ? g_strconcat("Private: ", tab_title(t), NULL) :
+		g_strdup(tab_title(t));
+	gtk_window_set_title(GTK_WINDOW(b->window), title);
+	g_free(title);
 }
 
 /* ---- Tab bar ------------------------------------------------------------ */
@@ -756,6 +777,8 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 	struct tab *t = active_tab(b);
 	char buf[512];
 	const char *msg = NULL;
+	/* A private window's line ends in "Private", white on black. */
+	int label = b->private ? (int)text_width(cr, "Private") + 12 : 0;
 
 	if (b->hover_link != NULL) {
 		msg = b->hover_link;
@@ -779,7 +802,7 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 	}
 	if (msg != NULL) {
 		cairo_save(cr);
-		cairo_rectangle(cr, 0, 0, w - 4, h - 1);
+		cairo_rectangle(cr, 0, 0, w - 4 - label, h - 1);
 		cairo_clip(cr);
 		white(cr);
 		fill(cr, 2, 0, text_width(cr, msg) + 8, h - 1);
@@ -789,6 +812,11 @@ static void paint_info(struct browser *b, cairo_t *cr, int w, int h) {
 	}
 	black(cr);
 	fill(cr, 0, h - 1, w, 1);
+	if (label > 0) {
+		fill(cr, w - label, 0, label, h - 1);
+		white(cr);
+		text(cr, "Private", w - label + 6, 0, h - 1);
+	}
 }
 
 static void draw_info(GtkDrawingArea *area, cairo_t *cr, int w, int h,
@@ -938,7 +966,7 @@ static void on_scroll_message(WebKitUserContentManager *content,
 	t->scroll_last = g_get_monotonic_time();
 	scroll_debug("page says: x %d y %d, viewport %dx%d, document %dx%d (%s)%s",
 		t->scroll_x, t->scroll_y, t->view_w, t->view_h, t->doc_w, t->doc_h,
-		webkit_web_view_get_uri(t->view),
+		logged(t, webkit_web_view_get_uri(t->view)),
 		t->browser->active >= 0 &&
 		g_ptr_array_index(t->browser->tabs, t->browser->active) == t ? "" :
 		" [a background tab]");
@@ -996,7 +1024,7 @@ static void window_mapped(GtkWidget *window, struct browser *b) {
 static void sync_all(struct browser *b) {
 	struct tab *t = active_tab(b);
 	if (t != NULL) {
-		gtk_window_set_title(GTK_WINDOW(b->window), tab_title(t));
+		sync_title(b, t);
 	}
 	sync_entry(b);
 	sync_tabbar(b);
@@ -1016,7 +1044,7 @@ static bool is_active(struct tab *t) {
 /* Records the page shown in history, once per address it goes to. */
 static void record_visit(struct tab *t) {
 	const char *uri = webkit_web_view_get_uri(t->view);
-	if (uri == NULL || g_strcmp0(uri, t->recorded) == 0 ||
+	if (t->private || uri == NULL || g_strcmp0(uri, t->recorded) == 0 ||
 			g_strcmp0(uri, t->failed) == 0 ||
 			!(g_str_has_prefix(uri, "https://") ||
 			g_str_has_prefix(uri, "http://") ||
@@ -1091,7 +1119,7 @@ static void on_resource_failed(WebKitWebResource *r, GError *error,
 	}
 	t->resources_failed++;
 	load_debug("tab %u: resource failed: %.200s: %s (%s %d)", t->id,
-		webkit_web_resource_get_uri(r), error->message,
+		logged(t, webkit_web_resource_get_uri(r)), error->message,
 		g_quark_to_string(error->domain), error->code);
 }
 
@@ -1102,7 +1130,7 @@ static void on_resource_finished(WebKitWebResource *r, struct tab *t) {
 		webkit_uri_response_get_status_code(response) : 0;
 	if (status >= 400) {
 		load_debug("tab %u: resource got HTTP %u: %.200s", t->id, status,
-			webkit_web_resource_get_uri(r));
+			logged(t, webkit_web_resource_get_uri(r)));
 	}
 	resource_forget(t, r);
 }
@@ -1115,7 +1143,7 @@ static void on_resource_started(WebKitWebView *view, WebKitWebResource *r,
 		return;
 	}
 	struct pending *p = g_new(struct pending, 1);
-	p->uri = g_strndup(webkit_uri_request_get_uri(request), 300);
+	p->uri = g_strndup(logged(t, webkit_uri_request_get_uri(request)), 300);
 	p->started = g_get_monotonic_time();
 	g_hash_table_insert(t->pending, r, p);
 	g_object_weak_ref(G_OBJECT(r), resource_gone, t);
@@ -1147,7 +1175,8 @@ static void on_web_process_terminated(WebKitWebView *view,
 	load_debug("tab %u: WEB PROCESS ENDED (%s): %.200s", t->id,
 		reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" :
 		reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ?
-		"out of memory" : "ended by GemWeb", webkit_web_view_get_uri(view));
+		"out of memory" : "ended by GemWeb",
+		logged(t, webkit_web_view_get_uri(view)));
 }
 
 static void on_responsive(WebKitWebView *view, GParamSpec *pspec,
@@ -1160,7 +1189,8 @@ static void on_responsive(WebKitWebView *view, GParamSpec *pspec,
 static gboolean on_tls_errors(WebKitWebView *view, const char *uri,
 		GTlsCertificate *certificate, GTlsCertificateFlags errors,
 		struct tab *t) {
-	load_debug("tab %u: TLS errors (flags 0x%x): %.200s", t->id, errors, uri);
+	load_debug("tab %u: TLS errors (flags 0x%x): %.200s", t->id, errors,
+		logged(t, uri));
 	return FALSE;
 }
 
@@ -1177,12 +1207,12 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 		t->resources = t->resources_failed = 0;
 	}
 	if (event != WEBKIT_LOAD_FINISHED) {
-		load_debug("tab %u: %s: %.200s", t->id, events[event], uri);
+		load_debug("tab %u: %s: %.200s", t->id, events[event], logged(t, uri));
 	} else {
 		load_debug("tab %u: finished in %.1fs, %u resources, %u failed, "
 			"%u still loading: %.200s", t->id,
 			(g_get_monotonic_time() - t->load_started) / 1e6, t->resources,
-			t->resources_failed, g_hash_table_size(t->pending), uri);
+			t->resources_failed, g_hash_table_size(t->pending), logged(t, uri));
 		GPtrArray *list = pending_sorted(t);
 		for (guint i = 0; i < list->len && i < 5; i++) {
 			struct pending *p = list->pdata[i];
@@ -1265,7 +1295,7 @@ static gboolean on_file_chooser(WebKitWebView *view,
 /* A page that didn't load (a mistyped address) isn't worth suggesting. */
 static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event,
 		const char *uri, GError *error, struct tab *t) {
-	load_debug("tab %u: load failed: %.200s: %s (%s %d)", t->id, uri,
+	load_debug("tab %u: load failed: %.200s: %s (%s %d)", t->id, logged(t, uri),
 		error->message, g_quark_to_string(error->domain), error->code);
 	if (g_error_matches(error, WEBKIT_NETWORK_ERROR,
 			WEBKIT_NETWORK_ERROR_CANCELLED)) {
@@ -1287,7 +1317,7 @@ static void on_title(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 		history_set_title(t->recorded, title);
 	}
 	if (is_active(t)) {
-		gtk_window_set_title(GTK_WINDOW(t->browser->window), tab_title(t));
+		sync_title(t->browser, t);
 	}
 	gtk_widget_queue_draw(t->browser->tabbar);
 }
@@ -1693,10 +1723,41 @@ static void tab_select(struct browser *b, int index) {
 	sync_all(b);
 }
 
+/* ---- Private windows ---------------------------------------------------- */
+
+/* Private windows share one session, kept in memory only: cookies, cache,
+ * sites' storage. It's made for the first private page, and each page's
+ * view holds it, so it goes (and all that with it) when the last private
+ * page does. Nothing they visit goes in history, nor their zooms in the
+ * zoom file, nor their addresses in the logs. Downloads are still saved,
+ * as are settings changed from the menus. */
+static void private_session_gone(gpointer data, GObject *session) {
+	shared.private_session = NULL;
+	g_clear_pointer(&shared.private_zooms, g_hash_table_unref);
+	load_debug("private session: ended");
+}
+
+/* The private session, with a reference for the caller. */
+static WebKitNetworkSession *private_session_ref(void) {
+	if (shared.private_session != NULL) {
+		return g_object_ref(shared.private_session);
+	}
+	shared.private_session = webkit_network_session_new_ephemeral();
+	g_object_weak_ref(G_OBJECT(shared.private_session), private_session_gone,
+		NULL);
+	g_signal_connect(shared.private_session, "download-started",
+		G_CALLBACK(on_download_started), NULL);
+	shared.private_zooms = g_hash_table_new_full(g_str_hash, g_str_equal,
+		g_free, NULL);
+	load_debug("private session: started");
+	return shared.private_session;
+}
+
 static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 		const char *input, bool select) {
 	struct tab *t = g_new0(struct tab, 1);
 	t->browser = b;
+	t->private = b->private;
 	t->media = b->tabs->len == 0;
 	t->id = ++tab_ids;
 	t->pending = g_hash_table_new_full(NULL, NULL, NULL, pending_free);
@@ -1705,7 +1766,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	if (opener != NULL) {
 		load_debug("tab %u: opened by tab %u", t->id, opener->id);
 	} else {
-		load_debug("tab %u: opened", t->id);
+		load_debug("tab %u: opened%s", t->id, t->private ? " (private)" : "");
 	}
 	/* Each tab has its own content manager so its scroll reports say which
 	 * tab they come from. */
@@ -1737,10 +1798,15 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 			"related-view", related,
 			"user-content-manager", t->content, NULL);
 	} else {
+		/* A related view shares its opener's session; this one gets the
+		 * window's. */
+		WebKitNetworkSession *session = b->private ? private_session_ref() :
+			g_object_ref(shared.session);
 		t->view = g_object_new(WEBKIT_TYPE_WEB_VIEW,
-			"network-session", shared.session,
+			"network-session", session,
 			"user-content-manager", t->content,
 			"settings", shared.settings, NULL);
+		g_object_unref(session);
 	}
 	gtk_widget_set_vexpand(GTK_WIDGET(t->view), TRUE);
 	g_object_set_data(G_OBJECT(t->view), "tab", t);
@@ -2120,11 +2186,13 @@ enum action {
 	ACT_FILL_PASSWORD, ACT_LOCK_PASSWORDS, ACT_READER, ACT_FIND,
 	ACT_FIND_NEXT, ACT_FIND_PREV, ACT_PRINT, ACT_BLOCK_ADS, ACT_BLOCK_ADS_SITE,
 	ACT_OPEN_IN_BROWSER, ACT_HARD_RELOAD, ACT_DIAGNOSTICS,
+	ACT_NEW_PRIVATE_WINDOW,
 	ACT_DEFAULT_ZOOM = 2000, /* View > Default Zoom: this, plus a step */
 	ACT_APPEARANCE = 2100,   /* View > Website Appearance: this, plus one */
 };
 
 static struct browser *browser_new(GtkApplication *app);
+static struct browser *private_window(void);
 
 /* ---- Dialogs ------------------------------------------------------------- */
 
@@ -2506,12 +2574,28 @@ static gboolean dialog_key(GtkEventControllerKey *ctrl, guint keyval,
 	"  return out;" \
 	"}"
 
+/* Whether a field asks for the username, on a page with no password field
+ * yet: one saying so, or, on a page whose address says it's for signing
+ * in, an email or user field. Many sign-ins ask for that alone first
+ * (Google's, Microsoft's, Fox's), the password on the next step; outside
+ * them, an email field's more often a newsletter's. */
+#define USER_FIELD_JS \
+	"function userField(e) {" \
+	"  if (/username/.test(e.autocomplete)) return true;" \
+	"  if (!/log-?in|log-?on|sign-?in|auth|sso|account|identifier/i.test(" \
+	"      location.hostname + location.pathname)) return false;" \
+	"  return e.type === 'email' || /email/.test(e.autocomplete) ||" \
+	"    (['text', 'tel'].indexOf(e.type) >= 0 &&" \
+	"     /user|login|email|identifier/i.test(e.name + ' ' + e.id));" \
+	"}"
+
 /* Runs in its own JavaScript world, which the page's scripts can't see or
  * change: says whether the page has a login field, as that changes. A
  * shadow root's changes aren't the document's, so each is watched too. */
 static const char login_script[] =
 	"(function () {"
 	INPUTS_JS
+	USER_FIELD_JS
 	"  var last = null, queued = false, watched = new WeakSet();"
 	"  var observer = new MutationObserver(queue);"
 	"  function watch(root) {"
@@ -2524,7 +2608,7 @@ static const char login_script[] =
 	"  function check() {"
 	"    queued = false;"
 	"    var has = allInputs(document, watch).some(function (e) {"
-	"      return (e.type === 'password' || /username/.test(e.autocomplete)) &&"
+	"      return (e.type === 'password' || userField(e)) &&"
 	"        e.getClientRects().length > 0;"
 	"    });"
 	"    if (has !== last) {"
@@ -2543,8 +2627,9 @@ static const char login_script[] =
 /* Fills a login, given host, username and password, in that same world.
  * The password field is the focused one or the first shown; the username
  * field is the text field before it (or, on a page asking only for a
- * username, that field). Values are set the way typing sets them, so
- * pages' scripts see them. Returns whether it found somewhere to fill. */
+ * username, the one userField picks, or the focused field). Values are
+ * set the way typing sets them, so pages' scripts see them. Returns
+ * whether it found somewhere to fill. */
 static const char fill_script[] =
 	"if (location.hostname !== host) return false;"
 	"function shown(e) {"
@@ -2555,6 +2640,7 @@ static const char fill_script[] =
 	"  return ['text', 'email', 'tel'].indexOf(e.type) >= 0;"
 	"}"
 	INPUTS_JS
+	USER_FIELD_JS
 	"var inputs = allInputs(document).filter(shown);"
 	"var active = document.activeElement;"
 	"while (active && active.shadowRoot && active.shadowRoot.activeElement) {"
@@ -2569,8 +2655,7 @@ static const char fill_script[] =
 	"    if (isUser(inputs[i])) user = inputs[i];"
 	"  }"
 	"} else {"
-	"  user = inputs.find(function (e) {"
-	"    return /username/.test(e.autocomplete); }) ||"
+	"  user = inputs.find(userField) ||"
 	"    (focused && isUser(focused) ? focused : null);"
 	"}"
 	"var set = Object.getOwnPropertyDescriptor("
@@ -3396,7 +3481,13 @@ static void zoom_apply(struct tab *t) {
 		return;
 	}
 	char *site = site_of(webkit_web_view_get_uri(t->view));
-	int z = site != NULL ? site_zoom(site) : 0;
+	int z = 0;
+	if (site != NULL && t->private && shared.private_zooms != NULL) {
+		z = GPOINTER_TO_INT(g_hash_table_lookup(shared.private_zooms, site));
+	}
+	if (site != NULL && z == 0) {
+		z = site_zoom(site);
+	}
 	g_free(site);
 	webkit_web_view_set_zoom_level(t->view, (z != 0 ? z : default_zoom()) / 100.0);
 }
@@ -3430,7 +3521,16 @@ static void zoom_by(struct tab *t, int dir) {
 	}
 	webkit_web_view_set_zoom_level(t->view, z / 100.0);
 	char *site = site_of(webkit_web_view_get_uri(t->view));
-	if (site != NULL) {
+	if (site != NULL && t->private) {
+		/* Kept while the private session is: Actual Size goes back to
+		 * the default, not the site's saved zoom. */
+		if (shared.private_zooms != NULL) {
+			g_hash_table_insert(shared.private_zooms, site,
+				GINT_TO_POINTER(dir == 0 ? default_zoom() : z));
+		} else {
+			g_free(site);
+		}
+	} else if (site != NULL) {
 		site_zoom_set(site, dir == 0 ? 0 : z);
 		g_free(site);
 	}
@@ -3936,7 +4036,8 @@ static void ctx_run(struct browser *b, int index) {
 		open_link(b, b->ctx_link);
 		break;
 	case CTX_OPEN_LINK_WINDOW: {
-		struct browser *nb = browser_new(shared.app);
+		struct browser *nb = b->private ? private_window() :
+			browser_new(shared.app);
 		tab_new(nb, NULL, b->ctx_link, true);
 		gtk_window_present(GTK_WINDOW(nb->window));
 		break;
@@ -4174,8 +4275,10 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 		return TRUE;
 	}
 	switch (GPOINTER_TO_INT(data)) {
-	case ACT_NEW_WINDOW: {
-		struct browser *nb = browser_new(shared.app);
+	case ACT_NEW_WINDOW:
+	case ACT_NEW_PRIVATE_WINDOW: {
+		struct browser *nb = GPOINTER_TO_INT(data) == ACT_NEW_WINDOW ?
+			browser_new(shared.app) : private_window();
 		tab_new(nb, NULL, NULL, true);
 		gtk_window_present(GTK_WINDOW(nb->window));
 		break;
@@ -4291,6 +4394,8 @@ static void build_menus(struct app_menu *m, void *data) {
 			t != NULL ? 0 : APP_MENU_DISABLED);
 	} else {
 		app_menu_add_item(m, ACT_NEW_WINDOW, "New Window", "^N", 0);
+		app_menu_add_item(m, ACT_NEW_PRIVATE_WINDOW, "New Private Window",
+			"^Shift+N", 0);
 		app_menu_add_item(m, ACT_NEW_TAB, "New Tab", "^T", 0);
 		app_menu_add_item(m, ACT_FOCUS_URL, "Open Location...", "^L", 0);
 	}
@@ -4405,7 +4510,8 @@ static void menu_activate(uint32_t id, void *data) {
 		}
 		return;
 	}
-	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW || id == ACT_NEW_TAB ||
+	if (active_tab(b) != NULL || id == ACT_NEW_WINDOW ||
+			id == ACT_NEW_PRIVATE_WINDOW || id == ACT_NEW_TAB ||
 			id == ACT_QUIT || id == ACT_CLEAR_HISTORY ||
 			id == ACT_LOCK_PASSWORDS || id == ACT_DIAGNOSTICS) {
 		shortcut(b->window, NULL, GINT_TO_POINTER(id));
@@ -4415,6 +4521,7 @@ static void menu_activate(uint32_t id, void *data) {
 static void add_shortcuts(GtkWidget *window) {
 	static const struct { const char *trigger; enum action action; } keys[] = {
 		{ "<Control>n", ACT_NEW_WINDOW },
+		{ "<Control><Shift>n", ACT_NEW_PRIVATE_WINDOW },
 		{ "<Control>t", ACT_NEW_TAB },
 		{ "<Control>w", ACT_CLOSE_TAB },
 		{ "<Control>l", ACT_FOCUS_URL },
@@ -4836,7 +4943,7 @@ static struct browser *browser_window(void) {
 	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
 			w = w->next) {
 		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
-		if (b != NULL && !b->app) {
+		if (b != NULL && !b->app && !b->private) {
 			return b;
 		}
 	}
@@ -4861,6 +4968,14 @@ static void app_realized(GtkWidget *window, struct browser *b) {
 		gdk_wayland_toplevel_set_application_id(GDK_TOPLEVEL(surface), id);
 		g_free(id);
 	}
+}
+
+/* A new private window, without a tab yet. */
+static struct browser *private_window(void) {
+	struct browser *b = browser_new(shared.app);
+	b->private = true;
+	gtk_window_set_title(GTK_WINDOW(b->window), "Private: New Tab");
+	return b;
 }
 
 /* A new app window, without a tab yet. */
@@ -4992,16 +5107,16 @@ static char *debug_dump(void) {
 		if (b == NULL) {
 			continue;
 		}
+		const char *title = gtk_window_get_title(GTK_WINDOW(b->window));
 		fprintf(f, "Window %d \"%s\"%s: scroll bar link %s, tab %d of %u in "
-			"front\n", ++n, gtk_window_get_title(GTK_WINDOW(b->window)) ?
-			gtk_window_get_title(GTK_WINDOW(b->window)) : "",
+			"front\n", ++n, b->private ? "(private)" : title ? title : "",
 			b->app ? " (web app)" : "", b->scroll != NULL ? "held" : "NONE",
 			b->active + 1, b->tabs->len);
 		for (guint i = 0; i < b->tabs->len; i++) {
 			struct tab *t = g_ptr_array_index(b->tabs, i);
+			const char *uri = webkit_web_view_get_uri(t->view);
 			fprintf(f, "  tab %u%s: %s\n", i + 1, (int)i == b->active ?
-				" (front)" : "", webkit_web_view_get_uri(t->view) ?
-				webkit_web_view_get_uri(t->view) : "(nothing)");
+				" (front)" : "", uri != NULL ? logged(t, uri) : "(nothing)");
 			fprintf(f, "    tab %u in the logs; %s, %.0f%%, web process %s, ad "
 				"filter %s\n", t->id, webkit_web_view_is_loading(t->view) ?
 				"LOADING" : "loaded",
@@ -5009,7 +5124,7 @@ static char *debug_dump(void) {
 				webkit_web_view_get_is_web_process_responsive(t->view) ?
 				"responding" : "NOT RESPONDING", t->ads != NULL ? "on" : "off");
 			if (t->failed != NULL) {
-				fprintf(f, "    failed to load: %s\n", t->failed);
+				fprintf(f, "    failed to load: %s\n", logged(t, t->failed));
 			}
 			fprintf(f, "    last load: started %.1fs ago, %u resources, %u "
 				"failed, %u still loading\n", (now - t->load_started) / 1e6,
@@ -5066,9 +5181,12 @@ static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 		shared_init(GTK_APPLICATION(app));
 	}
 	const char *app_uri = NULL, *name = NULL;
+	bool private = false;
 	GPtrArray *uris = g_ptr_array_new();
 	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--app") == 0 && i + 1 < argc) {
+		if (strcmp(argv[i], "--private") == 0) {
+			private = true;
+		} else if (strcmp(argv[i], "--app") == 0 && i + 1 < argc) {
 			app_uri = argv[++i];
 		} else if (g_str_has_prefix(argv[i], "--app=")) {
 			app_uri = argv[i] + 6;
@@ -5085,9 +5203,10 @@ static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 	}
 	/* Starting GemWeb opens a new window (tabs are made inside it). Links
 	 * handed over by other programs open as tabs in the last-used window,
-	 * as other browsers do. */
+	 * as other browsers do; with --private, in a new private window. */
 	if (app_uri == NULL || uris->len > 0) {
-		struct browser *b = uris->len > 0 ? browser_window() : NULL;
+		struct browser *b = private ? private_window() :
+			uris->len > 0 ? browser_window() : NULL;
 		if (b == NULL) {
 			b = browser_new(shared.app);
 		}

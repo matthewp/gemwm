@@ -16,6 +16,7 @@ Its menus, File, View, Go and Help, are in the menu bar.
 ```
 gemweb               # opens a new window
 gemweb URL...        # opens tabs in the last-used window
+gemweb --private [URL...]        # a new private window
 gemweb --app URL [--name NAME]   # a web app in a window of its own
 ```
 
@@ -28,6 +29,7 @@ browser, for links opened from other programs:
 | Keys | Does |
 |---|---|
 | Ctrl+T / Ctrl+W | new tab / close tab |
+| Ctrl+Shift+N | new private window |
 | Ctrl+L, F6 | edit the address |
 | Ctrl+Tab, Ctrl+Shift+Tab | next / previous tab |
 | Alt+Left / Alt+Right | back / forward |
@@ -44,6 +46,22 @@ tab to close it. Text that isn't an address is searched. Right-clicking opens
 a GEM menu for what's under the pointer: a link, an image, a text field,
 selected text, or the page. A page's own `alert()`, `confirm()` and
 "Leave this page?" come up as GEM alert boxes, naming the site that asks.
+
+## Private windows
+
+**File > New Private Window** (Ctrl+Shift+N) opens a window whose info
+line ends in a black "Private" and whose title starts with "Private:".
+Nothing it visits goes into history, and cookies, the cache and what sites
+store are kept in memory only. Private windows share them with each other
+(log in to a site in one and you're logged in in the others), and when the
+last private window closes, they're gone. A site zoomed in a private window
+stays zoomed only until then.
+
+Address suggestions still come from your history, password filling still
+works, downloads are still saved, and settings changed from the menus
+(Block Ads, Default Zoom, Website Appearance) are still kept. Links opened
+from other programs never go to a private window. Help > Save Diagnostics
+leaves private pages' addresses out.
 
 ## Reader View
 
