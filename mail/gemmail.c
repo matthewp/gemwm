@@ -27,6 +27,7 @@
 #include "categories.h"
 #include "gem-alert.h"
 #include "gem-file.h"
+#include "gem-print.h"
 #include "gem-draw.h"
 #include "gem-scrollbar.h"
 #include "imap.h"
@@ -68,7 +69,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
-	ACT_DELETE_FOLDER,
+	ACT_DELETE_FOLDER, ACT_PRINT,
 	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
@@ -1698,8 +1699,10 @@ static char *pictures_html(const struct message *m) {
 	return g_string_free(s, FALSE);
 }
 
-/* GEM's scroll bars, and GEM's selection. */
+/* GEM's scroll bars, and GEM's selection; the header only on paper. */
 static const char page_css[] =
+	"#gemmail-print-header { display: none !important; }"
+	"@media print { #gemmail-print-header { display: block !important; } }"
 	"::selection { background: #000; color: #fff; }"
 	"::-webkit-scrollbar { width: 19px; height: 19px; background: #fff; }"
 	"::-webkit-scrollbar-track { background: repeating-conic-gradient("
@@ -1795,6 +1798,30 @@ static char *text_page(const char *text) {
 	return page;
 }
 
+/* From, To, Cc, Date and Subject, hidden on screen (GemMail draws them
+ * above the page) and printed at the top of the first page. */
+static char *print_header(const struct message *m) {
+	const struct { const char *label, *value; } fields[] = {
+		{ "From:", m->from }, { "To:", m->to }, { "Cc:", m->cc },
+		{ "Date:", m->date }, { "Subject:", m->subject },
+	};
+	GString *s = g_string_new("<div id=\"gemmail-print-header\" style=\""
+		"margin: 0 0 16px; padding: 0 0 8px; border-bottom: 1px solid #000;"
+		" font: 11pt/1.4 sans-serif; color: #000; background: #fff;"
+		" white-space: normal; overflow-wrap: anywhere; text-align: left;\">");
+	for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
+		if (fields[i].value == NULL || fields[i].value[0] == '\0') {
+			continue;
+		}
+		char *value = g_markup_escape_text(fields[i].value, -1);
+		g_string_append_printf(s, "<div><b style=\"display: inline-block;"
+			" min-width: 5.5em;\">%s</b>%s</div>", fields[i].label, value);
+		g_free(value);
+	}
+	g_string_append(s, "</div>");
+	return g_string_free(s, FALSE);
+}
+
 static void show_body(void) {
 	struct message *m = ui.open;
 	char *body = m->html != NULL ? g_strdup(m->html) :
@@ -1814,6 +1841,23 @@ static void show_body(void) {
 		g_free(body);
 		body = with;
 	}
+	/* The header GemMail draws over the page, in the page for printing:
+	 * just inside its body, so the message's own head stays a head. */
+	char *header = print_header(m);
+	GMatchInfo *at = NULL;
+	static GRegex *body_tag;
+	if (body_tag == NULL) {
+		body_tag = g_regex_new("<body\\b[^>]*>", G_REGEX_CASELESS, 0, NULL);
+	}
+	int end = 0;
+	if (g_regex_match(body_tag, body, 0, &at)) {
+		g_match_info_fetch_pos(at, 0, NULL, &end);
+	}
+	g_match_info_free(at);
+	char *headed = g_strdup_printf("%.*s%s%s", end, body, header, body + end);
+	g_free(header);
+	g_free(body);
+	body = headed;
 	char *page = g_strdup_printf("<meta charset=\"utf-8\">"
 		"<meta http-equiv=\"Content-Security-Policy\" content=\"%s\">"
 		"<style>%s</style>%s", policy(ui.remote_images), page_css, body);
@@ -3119,6 +3163,47 @@ static void delete_folder(void) {
 	g_free(text);
 }
 
+/* File > Print...: GemWM's print dialog, then WebKit prints the open
+ * message as shown, with its header on top, to a printer or a PDF in
+ * Documents. */
+
+static void print_failed(WebKitPrintOperation *op, GError *error,
+		gpointer data) {
+	g_object_set_data_full(G_OBJECT(op), "error", g_strdup(error->message),
+		g_free);
+}
+
+static void print_finished(WebKitPrintOperation *op, gpointer data) {
+	gem_print_job_done(data, g_object_get_data(G_OBJECT(op), "error"));
+	g_object_unref(op);
+}
+
+static void print_run(GtkPrintSettings *settings, struct gem_print_job *job,
+		void *data) {
+	WebKitPrintOperation *op = webkit_print_operation_new(data);
+	webkit_print_operation_set_print_settings(op, settings);
+	g_signal_connect(op, "failed", G_CALLBACK(print_failed), job);
+	g_signal_connect(op, "finished", G_CALLBACK(print_finished), job);
+	webkit_print_operation_print(op);
+}
+
+static void print_done(const char *message, void *data) {
+	if (message != NULL) {
+		set_status("%s", message);
+	}
+	g_object_unref(data);
+}
+
+static void print_message(void) {
+	if (ui.open == NULL) {
+		return;
+	}
+	const char *name = ui.open->subject != NULL && ui.open->subject[0] != '\0' ?
+		ui.open->subject : "Message";
+	gem_print_dialog_run(GTK_WINDOW(ui.window), name, print_run, print_done,
+		g_object_ref(ui.view));
+}
+
 static void run_action(enum action action, int index) {
 	if (action >= ACT_VIEW_CATEGORY) {
 		/* Shown alone; chosen again (checked), all again. */
@@ -3238,6 +3323,9 @@ static void run_action(enum action action, int index) {
 		break;
 	case ACT_DELETE_FOLDER:
 		delete_folder();
+		break;
+	case ACT_PRINT:
+		print_message();
 		break;
 	case ACT_GET_MAIL:
 		get_mail();
@@ -3540,6 +3628,8 @@ static void build_menus(struct app_menu *m, void *data) {
 		trash != NULL && trash->messages > 0 ? 0 : APP_MENU_DISABLED);
 	app_menu_add_item(m, ACT_DELETE_FOLDER, "Delete Folder...", NULL,
 		deletable_folder() != NULL ? 0 : APP_MENU_DISABLED);
+	app_menu_add_separator(m);
+	app_menu_add_item(m, ACT_PRINT, "Print...", "^P", open);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_QUIT, "Close", "^Q", 0);
 	app_menu_add_menu(m, "Message");
@@ -4631,6 +4721,7 @@ static void activate(GtkApplication *app, gpointer data) {
 		{ "<Control>q", ACT_QUIT }, { "<Control>r", ACT_REPLY },
 		{ "<Control><Shift>r", ACT_REPLY_ALL }, { "<Control>l", ACT_FORWARD },
 		{ "<Control>u", ACT_UNREAD }, { "<Control>a", ACT_SELECT_ALL },
+		{ "<Control>p", ACT_PRINT },
 	};
 	add_shortcuts(ui.window, shortcuts, G_N_ELEMENTS(shortcuts));
 	ui.menu = app_menu_new(ui.window, build_menus, menu_activate, NULL);
@@ -4660,6 +4751,7 @@ static void activate(GtkApplication *app, gpointer data) {
 }
 
 int main(int argc, char *argv[]) {
+	gem_print_setup();
 	g_mime_init();
 	GtkApplication *app = gtk_application_new("org.gemwm.GemMail",
 		G_APPLICATION_DEFAULT_FLAGS);
