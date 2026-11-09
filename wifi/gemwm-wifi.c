@@ -12,7 +12,14 @@
  * agent, so a network's password is asked for in a GEM alert box. It
  * handles open and password (PSK) networks; enterprise (802.1X) ones need
  * iwd's own configuration.
+ *
+ * Once connected, both ask GNOME's connectivity check whether the internet
+ * is really there (iwd doesn't). A hotel's or a café's network answers for
+ * it, with its sign-in page: then the menu bar says "Sign In", and that,
+ * or the window's Sign In button, opens the page in a private GemWeb
+ * window. Until the internet answers, it asks again every few seconds.
  */
+#define _GNU_SOURCE /* strcasestr */
 #include <gio/gio.h>
 #include <gio/gunixinputstream.h>
 #include <gtk/gtk.h>
@@ -30,6 +37,16 @@
 #define BUTTON_H 18
 #define MAX_SHOWN 12  /* networks listed, strongest first */
 #define SIGNAL_POLL 15 /* seconds between signal readings */
+/* The connectivity check: plain HTTP, so a sign-in page can answer it. */
+#define CHECK_HOST "nmcheck.gnome.org"
+#define CHECK_PATH "/check_network_status.txt"
+#define CHECK_URL "http://" CHECK_HOST CHECK_PATH
+#define CHECK_ANSWER "NetworkManager is online"
+#define CHECK_TIMEOUT 10   /* seconds */
+#define CHECK_SETTLE 1     /* seconds after connecting, for DNS */
+#define CHECK_ONLINE 600   /* seconds between checks: sign-ins expire */
+#define CHECK_PORTAL 10    /* ...while waiting for a sign-in */
+#define CHECK_OFFLINE 30   /* ...while the internet doesn't answer */
 
 static GDBusObjectManager *iwd;
 
@@ -120,6 +137,7 @@ static struct {
 } model;
 
 static void fetch(void);
+static void online_track(void);
 
 static void on_networks(GObject *source, GAsyncResult *result, void *data) {
 	model.asking = false;
@@ -150,6 +168,7 @@ static void on_networks(GObject *source, GAsyncResult *result, void *data) {
 	}
 	g_clear_pointer(&model.networks, g_ptr_array_unref);
 	model.networks = list;
+	online_track();
 	model.changed();
 	if (model.again) {
 		model.again = false;
@@ -166,6 +185,7 @@ static void fetch(void) {
 	GDBusProxy *s = station();
 	if (s == NULL) {
 		g_clear_pointer(&model.networks, g_ptr_array_unref);
+		online_track();
 		model.changed();
 		return;
 	}
@@ -225,6 +245,225 @@ static struct network *connected_network(void) {
 	return NULL;
 }
 
+/* ---- Is the internet there? --------------------------------------------- */
+
+enum online {
+	ONLINE_UNKNOWN, /* not connected, or not asked yet */
+	ONLINE_YES,
+	ONLINE_PORTAL,  /* the network wants a sign-in first */
+	ONLINE_NO,      /* nothing answered */
+};
+
+static struct {
+	char *network;  /* the connected network's path: what was asked about */
+	enum online state;
+	char *url;      /* the sign-in page, for ONLINE_PORTAL */
+	guint timer;
+	GCancellable *cancel; /* the check in flight */
+} online;
+
+struct check {
+	GCancellable *cancel;
+	GSocketConnection *connection;
+	char buf[8192];
+	gsize len;
+};
+
+static void online_check_later(int seconds);
+
+static void check_free(struct check *c) {
+	g_clear_object(&c->connection);
+	g_object_unref(c->cancel);
+	g_free(c);
+}
+
+/* What the check got: our answer (online), or someone else's (a sign-in
+ * page, where a redirect points or else the check's own address, which
+ * the network sends there). */
+static void check_answered(struct check *c, const char *reply) {
+	if (c->cancel != online.cancel) {
+		return; /* about a network since left */
+	}
+	g_clear_pointer(&online.url, g_free);
+	int status = 0;
+	if (reply != NULL) {
+		sscanf(reply, "HTTP/%*s %d", &status);
+	}
+	const char *body = reply != NULL ? strstr(reply, "\r\n\r\n") : NULL;
+	if (reply == NULL) {
+		online.state = ONLINE_NO;
+	} else if (status == 200 && body != NULL &&
+			strstr(body, CHECK_ANSWER) != NULL) {
+		online.state = ONLINE_YES;
+	} else {
+		online.state = ONLINE_PORTAL;
+		const char *at = status >= 300 && status < 400 ?
+			strcasestr(reply, "\r\nLocation:") : NULL;
+		if (at != NULL && (body == NULL || at < body)) {
+			at += strlen("\r\nLocation:");
+			at += strspn(at, " \t");
+			char *url = g_strndup(at, strcspn(at, "\r\n"));
+			online.url = url[0] == '/' ?
+				g_strconcat("http://" CHECK_HOST, url, NULL) : g_strdup(url);
+			g_free(url);
+		}
+		if (online.url == NULL || (!g_str_has_prefix(online.url, "http://") &&
+				!g_str_has_prefix(online.url, "https://"))) {
+			g_free(online.url);
+			online.url = g_strdup(CHECK_URL);
+		}
+	}
+	g_clear_object(&online.cancel);
+	online_check_later(online.state == ONLINE_YES ? CHECK_ONLINE :
+		online.state == ONLINE_PORTAL ? CHECK_PORTAL : CHECK_OFFLINE);
+	model.changed();
+}
+
+static void check_read(GObject *source, GAsyncResult *result, void *data) {
+	struct check *c = data;
+	GError *error = NULL;
+	gsize got = 0;
+	bool ok = g_input_stream_read_all_finish(G_INPUT_STREAM(source), result,
+		&got, &error);
+	if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+		g_error_free(error);
+		check_free(c);
+		return;
+	}
+	c->len = got;
+	c->buf[MIN(c->len, sizeof(c->buf) - 1)] = '\0';
+	check_answered(c, ok || c->len > 0 ? c->buf : NULL);
+	g_clear_error(&error);
+	check_free(c);
+}
+
+static void check_sent(GObject *source, GAsyncResult *result, void *data) {
+	struct check *c = data;
+	GError *error = NULL;
+	if (!g_output_stream_write_all_finish(G_OUTPUT_STREAM(source), result, NULL,
+			&error)) {
+		bool cancelled = g_error_matches(error, G_IO_ERROR,
+			G_IO_ERROR_CANCELLED);
+		g_error_free(error);
+		if (!cancelled) {
+			check_answered(c, NULL);
+		}
+		check_free(c);
+		return;
+	}
+	g_input_stream_read_all_async(g_io_stream_get_input_stream(
+		G_IO_STREAM(c->connection)), c->buf, sizeof(c->buf) - 1,
+		G_PRIORITY_DEFAULT, c->cancel, check_read, c);
+}
+
+static void check_connected(GObject *source, GAsyncResult *result,
+		void *data) {
+	struct check *c = data;
+	GError *error = NULL;
+	c->connection = g_socket_client_connect_to_host_finish(
+		G_SOCKET_CLIENT(source), result, &error);
+	if (c->connection == NULL) {
+		bool cancelled = g_error_matches(error, G_IO_ERROR,
+			G_IO_ERROR_CANCELLED);
+		g_error_free(error);
+		if (!cancelled) {
+			check_answered(c, NULL);
+		}
+		check_free(c);
+		return;
+	}
+	static const char request[] = "GET " CHECK_PATH " HTTP/1.1\r\n"
+		"Host: " CHECK_HOST "\r\nConnection: close\r\n\r\n";
+	g_output_stream_write_all_async(g_io_stream_get_output_stream(
+		G_IO_STREAM(c->connection)), request, strlen(request),
+		G_PRIORITY_DEFAULT, c->cancel, check_sent, c);
+}
+
+static void online_check(void) {
+	if (online.cancel != NULL) {
+		return; /* already asking */
+	}
+	struct check *c = g_new0(struct check, 1);
+	online.cancel = g_cancellable_new();
+	c->cancel = g_object_ref(online.cancel);
+	GSocketClient *client = g_socket_client_new();
+	g_socket_client_set_timeout(client, CHECK_TIMEOUT);
+	g_socket_client_connect_to_host_async(client, CHECK_HOST, 80, c->cancel,
+		check_connected, c);
+	g_object_unref(client);
+}
+
+static gboolean online_timer(void *data) {
+	online.timer = 0;
+	online_check();
+	return G_SOURCE_REMOVE;
+}
+
+static void online_check_later(int seconds) {
+	if (online.timer != 0) {
+		g_source_remove(online.timer);
+	}
+	online.timer = g_timeout_add_seconds(seconds, online_timer, NULL);
+}
+
+/* Asks again soon: after the sign-in page has been opened. */
+static void online_check_soon(void) {
+	if (online.network != NULL && online.cancel == NULL) {
+		online_check_later(CHECK_SETTLE);
+	}
+}
+
+/* Connected to a different network, or none: forget what was known, and
+ * ask about the new one once it's settled. */
+static void online_track(void) {
+	GDBusProxy *s = station();
+	char *state = prop_string(s, "State");
+	char *path = g_strcmp0(state, "connected") == 0 ?
+		prop_string(s, "ConnectedNetwork") : NULL;
+	g_free(state);
+	g_clear_object(&s);
+	if (g_strcmp0(path, online.network) == 0) {
+		g_free(path);
+		return;
+	}
+	g_free(online.network);
+	online.network = path;
+	online.state = ONLINE_UNKNOWN;
+	g_clear_pointer(&online.url, g_free);
+	if (online.cancel != NULL) {
+		g_cancellable_cancel(online.cancel);
+		g_clear_object(&online.cancel);
+	}
+	if (online.timer != 0) {
+		g_source_remove(online.timer);
+		online.timer = 0;
+	}
+	if (path != NULL) {
+		online_check_later(CHECK_SETTLE);
+	}
+}
+
+static bool needs_sign_in(void) {
+	return online.network != NULL && online.state == ONLINE_PORTAL &&
+		online.url != NULL;
+}
+
+/* The sign-in page, in a private GemWeb window: the network's cookies
+ * don't join the user's own. */
+static void open_sign_in(void) {
+	if (!needs_sign_in()) {
+		return;
+	}
+	char *argv[] = { "gemweb", "--private", online.url, NULL };
+	GError *error = NULL;
+	if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
+			&error)) {
+		fprintf(stderr, "gemwm-wifi: %s\n", error->message);
+		g_error_free(error);
+	}
+	online_check_soon();
+}
+
 /* ---- The icon ----------------------------------------------------------- */
 
 /* Four bars, 2 pixels wide, rising left to right; unlit ones are just
@@ -272,11 +511,23 @@ static void status_print(void) {
 				g_string_append_printf(line, "%02x", byte);
 			}
 		}
-		/* No text; the tooltip says what it's connected to. */
+		/* No text, unless there's a sign-in waiting; the tooltip says what
+		 * it's connected to. */
 		char *name = n != NULL ? g_strdelimit(g_strdup(n->name), "\t\n", ' ') :
 			NULL;
-		g_string_append_printf(line, "\t\t\t%s%s", !powered ? "Wi-Fi off" :
-			n != NULL ? "Connected to " : "Not connected", name ? name : "");
+		if (!powered) {
+			g_string_append(line, "\t\t\tWi-Fi off");
+		} else if (name == NULL) {
+			g_string_append(line, "\t\t\tNot connected");
+		} else if (needs_sign_in()) {
+			g_string_append_printf(line, "\tSign In\tinverse\t"
+				"%s wants you to sign in", name);
+		} else if (online.state == ONLINE_NO) {
+			g_string_append_printf(line, "\t\t\tConnected to %s, "
+				"but the internet isn't answering", name);
+		} else {
+			g_string_append_printf(line, "\t\t\tConnected to %s", name);
+		}
 		g_free(name);
 		g_object_unref(d);
 	}
@@ -297,7 +548,9 @@ static void read_bar(GObject *source, GAsyncResult *result, void *data) {
 		g_main_loop_quit(loop); /* the bar has gone */
 		return;
 	}
-	if (strcmp(line, "click 1") == 0) {
+	if (strcmp(line, "click 1") == 0 && needs_sign_in()) {
+		open_sign_in(); /* what "Sign In" says */
+	} else if (strcmp(line, "click 1") == 0) {
 		/* Single instance: a second click brings the window forward. */
 		char *argv[] = { self, NULL };
 		g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL,
@@ -332,6 +585,7 @@ enum action {
 	ACT_CONNECT,
 	ACT_DISCONNECT,
 	ACT_FORGET,
+	ACT_SIGN_IN,
 	ACT_ALERT_0, /* the alert's buttons */
 	ACT_ALERT_1,
 	ACT_CLOSE,
@@ -604,6 +858,9 @@ static void act(enum action action, const char *path) {
 		g_clear_object(&n);
 		break;
 	}
+	case ACT_SIGN_IN:
+		open_sign_in();
+		break;
 	case ACT_ALERT_0:
 	case ACT_ALERT_1:
 		alert_answer(action == ACT_ALERT_0 ? 0 : 1);
@@ -720,6 +977,29 @@ static int note(cairo_t *cr, const char *s, int y, int w) {
 	return y + ROW_H;
 }
 
+/* Under the networks: a sign-in waiting, or no internet. */
+static int online_row(cairo_t *cr, int y, int w) {
+	if (online.network == NULL) {
+		return y;
+	}
+	const char *say = needs_sign_in() ? "This network wants you to sign in." :
+		online.state == ONLINE_NO ? "The internet isn't answering." : NULL;
+	if (say == NULL) {
+		return y;
+	}
+	y += PAD / 2;
+	gem_black(cr);
+	gem_fill(cr, PAD, y, w - 2 * PAD, 1);
+	y += PAD / 2;
+	gem_text(cr, say, PAD + 12, y, ROW_H);
+	if (needs_sign_in()) {
+		int bw = button_width(cr, "Sign In...");
+		button(cr, w - PAD - bw, y + (ROW_H - BUTTON_H) / 2, bw, "Sign In...",
+			ACT_SIGN_IN, NULL, true, true);
+	}
+	return y + ROW_H;
+}
+
 static void paint_alert(cairo_t *cr, int w, int h) {
 	char **lines = g_strsplit(ui.alert.text, "\n", -1);
 	int n = g_strv_length(lines);
@@ -820,6 +1100,7 @@ static void paint(cairo_t *cr, int w, int h, void *data) {
 			network_row(cr, g_ptr_array_index(model.networks, i), y, w);
 			y += ROW_H;
 		}
+		y = online_row(cr, y, w);
 	}
 	y += PAD / 2;
 
@@ -956,6 +1237,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_menu(m, "File");
 	app_menu_add_item(m, ACT_SCAN, scanning ? "Scanning..." : "Scan", "",
 		powered && !scanning ? 0 : APP_MENU_DISABLED);
+	app_menu_add_item(m, ACT_SIGN_IN, "Sign In to Network...", "",
+		needs_sign_in() ? 0 : APP_MENU_DISABLED);
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_CLOSE, "Close", "^W", 0);
 	app_menu_add_menu(m, "Options");
