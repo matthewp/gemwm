@@ -149,11 +149,14 @@ or any search URL with `%s` where the query goes.
 
 ## When pages misbehave
 
-GemWeb keeps a short record of what its pages have been doing (loads,
-failures, requests that never finish, crashed pages, ad filter changes).
-**Help > Save Diagnostics**, or `gemweb --debug`, writes it out with how every
-tab stands now to `~/.local/state/gemweb/debug.log`, without a restart that
-might put things right.
+GemWeb keeps a short record of what its pages have been doing: loads,
+failures, requests that are slow, still waiting or given up on, crashed pages,
+ad filter changes, and the pages' own script errors and `console.error`
+messages. **Help > Save Diagnostics**, or `gemweb --debug`, writes it out to
+`~/.local/state/gemweb/debug.log` with how every tab stands now: what it's
+still loading, the page's state and service worker, and its last few fetches.
+There's no restart, which might put things right before they're recorded.
+Private windows' pages aren't recorded.
 
 ## What it needs
 

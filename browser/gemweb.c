@@ -94,6 +94,9 @@ struct tab {
 	gint64 load_started;
 	unsigned resources, resources_failed;
 	GHashTable *pending;
+	/* The page's own last fetches and XHRs, as it saw them (status, time,
+	 * size, whether its service worker answered): strings, newest last. */
+	GQueue *fetches;
 	bool private; /* its window's a private one (see private_session) */
 };
 
@@ -194,6 +197,7 @@ static struct {
 	bool passwords;
 	char *password_session;
 	WebKitUserScript *login_script;
+	WebKitUserScript *diag_script; /* page errors and fetches, for diagnostics */
 	char *readability; /* Readability.js, and the call that runs it */
 	/* Ad blocking: WebKit's compiled filter, where it's kept, and whether
 	 * the lists are being fetched and compiled afresh. */
@@ -234,7 +238,7 @@ static gboolean on_context_menu(WebKitWebView *view, WebKitContextMenu *menu,
 	WebKitHitTestResult *hit, struct tab *t);
 static bool app_owns(struct browser *b, const char *uri);
 static void open_in_browser(const char *uri);
-static char *debug_dump(void);
+static char *debug_dump(GHashTable *states);
 static struct browser *app_window(const char *uri, const char *name);
 static GtkWidget *pixel_area(struct browser *b, int height,
 	GtkDrawingAreaDrawFunc draw, GCallback pressed);
@@ -290,6 +294,59 @@ static const char scroll_script[] =
 	"  if (window.ResizeObserver && document.documentElement)"
 	"    new ResizeObserver(queue).observe(document.documentElement);"
 	"  queue();"
+	"})();";
+
+/* For diagnostics: tells GemWeb about the page's script errors, promises
+ * rejected with nothing to catch them, console.error() (where apps like
+ * X say what went wrong), and every fetch() and XHR the page sees
+ * finish, with its status, time and size and whether the page's service
+ * worker answered it (those never reach WebKit's own resource list). In
+ * the page's own world, to see its errors whole; a page could post here
+ * too, but it would only be writing in GemWeb's log. At most 30 errors a
+ * page; fetches come in batches. */
+static const char diag_script[] =
+	"(function () {"
+	"  var h = window.webkit && window.webkit.messageHandlers &&"
+	"    window.webkit.messageHandlers.gemwebDiag;"
+	"  if (!h) return;"
+	"  var sent = 0;"
+	"  function text(v) {"
+	"    try {"
+	"      if (v instanceof Error) return v.name + ': ' + v.message;"
+	"      if (v && typeof v === 'object') return JSON.stringify(v).slice(0, 200);"
+	"      return String(v);"
+	"    } catch (e) { return '?'; }"
+	"  }"
+	"  function send(kind, s) {"
+	"    if (sent++ >= 30) return;"
+	"    try { h.postMessage(kind + '\\t' + String(s).slice(0, 400)); } catch (e) {}"
+	"  }"
+	"  addEventListener('error', function (e) {"
+	"    if (e instanceof ErrorEvent)"
+	"      send('error', e.message + ' (' + e.filename + ':' + e.lineno + ')');"
+	"  }, true);"
+	"  addEventListener('unhandledrejection', function (e) {"
+	"    send('unhandled rejection', text(e.reason));"
+	"  });"
+	"  var error = console.error;"
+	"  console.error = function () {"
+	"    send('console.error', Array.prototype.map.call(arguments, text).join(' '));"
+	"    return error.apply(this, arguments);"
+	"  };"
+	"  try {"
+	"    new PerformanceObserver(function (list) {"
+	"      var out = [];"
+	"      list.getEntries().forEach(function (e) {"
+	"        if (e.initiatorType !== 'fetch' &&"
+	"            e.initiatorType !== 'xmlhttprequest') return;"
+	"        out.push([Math.round(e.duration),"
+	"          e.responseStatus === undefined ? -1 : e.responseStatus,"
+	"          e.decodedBodySize, e.workerStart > 0 ? 1 : 0,"
+	"          e.name.slice(0, 300)].join(' '));"
+	"      });"
+	"      if (out.length) h.postMessage('fetch\\t' + out.join('\\n'));"
+	"    }).observe({ type: 'resource', buffered: true });"
+	"  } catch (e) {}"
 	"})();";
 
 /* A new tab: a GEM dialog box on a dithered desk. */
@@ -899,7 +956,7 @@ static void sync_tabbar(struct browser *b) {
  * restart (which would put it right). Each log is a ring of its last
  * DEBUG_LINES lines: the scroll bars are told things constantly, so page
  * loading has its own, or they'd crowd it out. */
-#define DEBUG_LINES 400
+#define DEBUG_LINES 1000
 struct debug_log {
 	char *lines[DEBUG_LINES];
 	unsigned next;
@@ -1079,7 +1136,12 @@ static gboolean record_later(gpointer data) {
 struct pending {
 	char *uri;
 	gint64 started;
+	bool cancelled; /* by a reload, leaving, or the page itself */
+	bool waited;    /* "still waiting" has been logged */
 };
+#define SLOW_REQUEST 3        /* seconds: a request finishing later is logged */
+#define WAITING_REQUEST 20    /* seconds: one still going is logged, once */
+#define FETCHES_KEPT 20       /* a page's own fetches, for the dump */
 
 static unsigned tab_ids;
 
@@ -1115,6 +1177,11 @@ static void on_resource_failed(WebKitWebResource *r, GError *error,
 		struct tab *t) {
 	if (g_error_matches(error, WEBKIT_NETWORK_ERROR,
 			WEBKIT_NETWORK_ERROR_CANCELLED)) {
+		/* Said when it finishes, with how long it had been going. */
+		struct pending *p = g_hash_table_lookup(t->pending, r);
+		if (p != NULL) {
+			p->cancelled = true;
+		}
 		return;
 	}
 	t->resources_failed++;
@@ -1123,16 +1190,60 @@ static void on_resource_failed(WebKitWebResource *r, GError *error,
 		g_quark_to_string(error->domain), error->code);
 }
 
-/* Comes after "failed" too. */
+/* Comes after "failed" too. Besides errors, says what took a while: a
+ * request that hangs and is then given up on (a reload cancels it) shows
+ * as "cancelled after", one that got there in the end as "slow". */
 static void on_resource_finished(WebKitWebResource *r, struct tab *t) {
 	WebKitURIResponse *response = webkit_web_resource_get_response(r);
 	guint status = response != NULL ?
 		webkit_uri_response_get_status_code(response) : 0;
-	if (status >= 400) {
-		load_debug("tab %u: resource got HTTP %u: %.200s", t->id, status,
+	struct pending *p = g_hash_table_lookup(t->pending, r);
+	double took = p != NULL ?
+		(g_get_monotonic_time() - p->started) / 1e6 : 0;
+	if (p != NULL && p->cancelled) {
+		if (took >= 1) {
+			load_debug("tab %u: resource cancelled after %.1fs%s: %.200s",
+				t->id, took, status != 0 ? " (had a response)" :
+				" (NO RESPONSE yet)", p->uri);
+		}
+	} else if (status >= 400) {
+		load_debug("tab %u: resource got HTTP %u after %.1fs: %.200s", t->id,
+			status, took, logged(t, webkit_web_resource_get_uri(r)));
+	} else if (took >= SLOW_REQUEST || (p != NULL && p->waited)) {
+		guint64 size = response != NULL ?
+			webkit_uri_response_get_content_length(response) : 0;
+		load_debug("tab %u: resource slow, HTTP %u after %.1fs, %" G_GUINT64_FORMAT
+			" bytes said: %.200s", t->id, status, took, size,
 			logged(t, webkit_web_resource_get_uri(r)));
 	}
 	resource_forget(t, r);
+}
+
+/* Every few seconds: requests going for a long time are logged as they
+ * go, not just when something ends them. Pages that stream (chat, live
+ * updates) will show here too, once per request. */
+static gboolean watch_requests(gpointer data) {
+	gint64 now = g_get_monotonic_time();
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		for (guint i = 0; b != NULL && i < b->tabs->len; i++) {
+			struct tab *t = g_ptr_array_index(b->tabs, i);
+			GHashTableIter iter;
+			gpointer value;
+			g_hash_table_iter_init(&iter, t->pending);
+			while (g_hash_table_iter_next(&iter, NULL, &value)) {
+				struct pending *p = value;
+				double took = (now - p->started) / 1e6;
+				if (!p->waited && took >= WAITING_REQUEST) {
+					p->waited = true;
+					load_debug("tab %u: resource still waiting after %.0fs: %s",
+						t->id, took, p->uri);
+				}
+			}
+		}
+	}
+	return G_SOURCE_CONTINUE;
 }
 
 static void on_resource_started(WebKitWebView *view, WebKitWebResource *r,
@@ -1203,6 +1314,11 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event,
 	static const char *const events[] = { "started", "redirected",
 		"committed", "finished" };
 	if (event == WEBKIT_LOAD_STARTED) {
+		if (g_hash_table_size(t->pending) > 0) {
+			load_debug("tab %u: %u requests from before still going as a new "
+				"load starts (each is logged as it ends)", t->id,
+				g_hash_table_size(t->pending));
+		}
 		t->load_started = g_get_monotonic_time();
 		t->resources = t->resources_failed = 0;
 	}
@@ -1349,6 +1465,59 @@ static void on_progress(WebKitWebView *view, GParamSpec *pspec, struct tab *t) {
 		gtk_widget_queue_draw(t->browser->info);
 		gtk_widget_queue_draw(t->browser->buttons);
 	}
+}
+
+/* What diag_script tells: errors go in the log; fetches are kept, the
+ * last FETCHES_KEPT, for the dump, and logged if they went wrong where
+ * WebKit couldn't see (the service worker answered) or took long. */
+static void on_diag_message(WebKitUserContentManager *content,
+		JSCValue *value, struct tab *t) {
+	char *message = jsc_value_to_string(value);
+	char *tab = strchr(message, '\t');
+	if (tab == NULL || t->private) {
+		g_free(message);
+		return;
+	}
+	*tab = '\0';
+	const char *kind = message, *what = tab + 1;
+	if (strcmp(kind, "fetch") != 0) {
+		load_debug("tab %u: page %s: %.400s", t->id, kind, what);
+		g_free(message);
+		return;
+	}
+	GDateTime *now = g_date_time_new_now_local();
+	char *when = g_date_time_format(now, "%H:%M:%S");
+	g_date_time_unref(now);
+	char **lines = g_strsplit(what, "\n", -1);
+	for (int i = 0; lines[i] != NULL; i++) {
+		long ms, status, size;
+		int worker, at = 0;
+		if (sscanf(lines[i], "%ld %ld %ld %d %n", &ms, &status, &size, &worker,
+				&at) < 4 || at == 0) {
+			continue;
+		}
+		const char *uri = lines[i] + at;
+		/* WebKit doesn't tell pages the status yet (-1); its own log has
+		 * it, for what it saw. */
+		char code[24] = "";
+		if (status >= 0) {
+			g_snprintf(code, sizeof(code), "HTTP %ld, ", status);
+		}
+		char *line = g_strdup_printf("%s %s%.1fs, %ld bytes%s: %s",
+			when, code, ms / 1000.0, size,
+			worker ? ", from its service worker" : "", uri);
+		g_queue_push_tail(t->fetches, line);
+		while (g_queue_get_length(t->fetches) > FETCHES_KEPT) {
+			g_free(g_queue_pop_head(t->fetches));
+		}
+		if ((worker && (status >= 400 || status == 0)) ||
+				ms >= SLOW_REQUEST * 1000) {
+			load_debug("tab %u: page's fetch: %s", t->id, line + strlen(when) + 1);
+		}
+	}
+	g_strfreev(lines);
+	g_free(when);
+	g_free(message);
 }
 
 static void on_media_message(WebKitUserContentManager *content,
@@ -1761,6 +1930,7 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 	t->media = b->tabs->len == 0;
 	t->id = ++tab_ids;
 	t->pending = g_hash_table_new_full(NULL, NULL, NULL, pending_free);
+	t->fetches = g_queue_new();
 	struct tab *opener = related != NULL ?
 		g_object_get_data(G_OBJECT(related), "tab") : NULL;
 	if (opener != NULL) {
@@ -1785,6 +1955,13 @@ static struct tab *tab_new(struct browser *b, WebKitWebView *related,
 			"gemwebLogin", PASSWORD_WORLD);
 		g_signal_connect(t->content, "script-message-received::gemwebLogin",
 			G_CALLBACK(on_login_message), t);
+	}
+	if (!t->private) {
+		webkit_user_content_manager_add_script(t->content, shared.diag_script);
+		webkit_user_content_manager_register_script_message_handler(t->content,
+			"gemwebDiag", NULL);
+		g_signal_connect(t->content, "script-message-received::gemwebDiag",
+			G_CALLBACK(on_diag_message), t);
 	}
 	if (shared.media_script != NULL) {
 		webkit_user_content_manager_add_script(t->content, shared.media_script);
@@ -1886,6 +2063,7 @@ static void tab_free(gpointer data, GObject *view) {
 	g_free(t->failed);
 	pending_clear(t);
 	g_hash_table_unref(t->pending);
+	g_queue_free_full(t->fetches, g_free);
 	g_free(t);
 }
 
@@ -4260,6 +4438,30 @@ static void key_pressed(GtkGestureClick *gesture, int n_press, double x,
 	fill_password(b);
 }
 
+static void debug_dump_async(void (*done)(char *path, void *data),
+	void *data);
+
+/* Help > Save Diagnostics: says where, if its window's still there. */
+static void diagnostics_saved(char *path, void *data) {
+	GWeakRef *ref = data;
+	GtkWidget *window = g_weak_ref_get(ref);
+	g_weak_ref_clear(ref);
+	g_free(ref);
+	struct browser *b = window != NULL ?
+		g_object_get_data(G_OBJECT(window), "browser") : NULL;
+	if (b != NULL) {
+		static const char *const ok[] = { "OK", NULL };
+		char *text = path != NULL ?
+			g_strdup_printf("Diagnostics saved to\n%s", path) :
+			g_strdup("Couldn't save diagnostics.");
+		gem_alert(GTK_OVERLAY(b->overlay), path != NULL ? GEM_ALERT_NOTE :
+			GEM_ALERT_STOP, text, ok, 0, 0, NULL, NULL);
+		g_free(text);
+	}
+	g_clear_object(&window);
+	g_free(path);
+}
+
 static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 	struct browser *b = g_object_get_data(G_OBJECT(widget), "browser");
 	struct tab *t = active_tab(b);
@@ -4364,15 +4566,10 @@ static gboolean shortcut(GtkWidget *widget, GVariant *args, gpointer data) {
 		show_notice(b, g_strdup("Passwords locked"));
 		break;
 	case ACT_DIAGNOSTICS: {
-		static const char *const ok[] = { "OK", NULL };
-		char *path = debug_dump();
-		char *text = path != NULL ?
-			g_strdup_printf("Diagnostics saved to\n%s", path) :
-			g_strdup("Couldn't save diagnostics.");
-		gem_alert(GTK_OVERLAY(b->overlay), path != NULL ? GEM_ALERT_NOTE :
-			GEM_ALERT_STOP, text, ok, 0, 0, NULL, NULL);
-		g_free(text);
-		g_free(path);
+		GWeakRef *window = g_new(GWeakRef, 1);
+		g_weak_ref_init(window, b->window);
+		show_notice(b, g_strdup("Saving diagnostics..."));
+		debug_dump_async(diagnostics_saved, window);
 		break;
 	}
 	}
@@ -4736,6 +4933,10 @@ static void shared_init(GtkApplication *app) {
 	shared.scroll_script = webkit_user_script_new(scroll_script,
 		WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
 		WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, NULL, NULL);
+	shared.diag_script = webkit_user_script_new(diag_script,
+		WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+		WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+	g_timeout_add_seconds(5, watch_requests, NULL);
 
 	shared.media_missing = find_missing_media();
 	char *note = NULL;
@@ -5047,8 +5248,9 @@ static void debug_write(FILE *f, struct debug_log *log, const char *what) {
 
 /* gemweb --debug, or Help > Save Diagnostics: writes the logs and how
  * every window and tab stands now to ~/.local/state/gemweb/debug.log;
- * returns its path. */
-static char *debug_dump(void) {
+ * returns its path. states: what each page said of itself (tab id to
+ * string), for those that answered. */
+static char *debug_dump(GHashTable *states) {
 	char *dir = g_build_filename(g_get_user_state_dir(), "gemweb", NULL);
 	g_mkdir_with_parents(dir, 0700);
 	char *path = g_build_filename(dir, "debug.log", NULL);
@@ -5137,6 +5339,18 @@ static char *debug_dump(void) {
 					p->uri);
 			}
 			g_ptr_array_free(list, TRUE);
+			if (!t->private) {
+				const char *state = g_hash_table_lookup(states,
+					GUINT_TO_POINTER(t->id));
+				fprintf(f, "    page: %s\n", state != NULL ? state :
+					"DIDN'T ANSWER (busy, hung or gone)");
+				fprintf(f, "    its own fetches and XHRs, last %u, oldest first:%s\n",
+					g_queue_get_length(t->fetches),
+					g_queue_is_empty(t->fetches) ? " none" : "");
+				for (GList *l = t->fetches->head; l != NULL; l = l->next) {
+					fprintf(f, "      %s\n", (char *)l->data);
+				}
+			}
 			if (t->scroll_messages == 0) {
 				fprintf(f, "    page has sent NO scroll reports\n");
 			} else {
@@ -5153,23 +5367,141 @@ static char *debug_dump(void) {
 	return path;
 }
 
+/* Before writing the dump, each page is asked how it stands, in GemWeb's
+ * own script world: a page whose web process is stuck won't answer, so
+ * it's written after DUMP_WAIT ms whatever. */
+#define DUMP_WAIT 2000
+static const char page_state_js[] =
+	"(function () {"
+	"  var sw = navigator.serviceWorker;"
+	"  return ['document ' + document.readyState, document.visibilityState,"
+	"    navigator.onLine ? 'online' : 'OFFLINE',"
+	"    !sw ? 'service workers not visible' : sw.controller ?"
+	"      'service worker ' + sw.controller.scriptURL : 'no service worker',"
+	"    document.getElementsByTagName('*').length + ' elements',"
+	"    (document.body ? document.body.innerText.length : 0) +"
+	"      ' characters of text'].join(', ');"
+	"})()";
+
+struct dump {
+	int refs;
+	bool written;
+	guint timer;
+	GHashTable *states;
+	void (*done)(char *path, void *data);
+	void *data;
+};
+
+struct dump_ask {
+	struct dump *dump;
+	unsigned id;
+};
+
+static void dump_unref(struct dump *d) {
+	if (--d->refs == 0) {
+		g_hash_table_unref(d->states);
+		g_free(d);
+	}
+}
+
+static void dump_write(struct dump *d) {
+	if (d->written) {
+		return;
+	}
+	d->written = true;
+	if (d->timer != 0) {
+		g_source_remove(d->timer);
+		d->timer = 0;
+		dump_unref(d); /* the timer's */
+	}
+	d->done(debug_dump(d->states), d->data);
+}
+
+static gboolean dump_waited(gpointer data) {
+	struct dump *d = data;
+	d->timer = 0;
+	dump_write(d);
+	dump_unref(d);
+	return G_SOURCE_REMOVE;
+}
+
+static void dump_answered(GObject *view, GAsyncResult *result, gpointer data) {
+	struct dump_ask *a = data;
+	struct dump *d = a->dump;
+	JSCValue *value = webkit_web_view_evaluate_javascript_finish(
+		WEBKIT_WEB_VIEW(view), result, NULL);
+	if (value != NULL && jsc_value_is_string(value) && !d->written) {
+		g_hash_table_insert(d->states, GUINT_TO_POINTER(a->id),
+			jsc_value_to_string(value));
+	}
+	g_clear_object(&value);
+	g_free(a);
+	/* The last answer writes it; refs left are the timer's and this. */
+	if (d->refs == 2 && d->timer != 0) {
+		dump_write(d);
+	}
+	dump_unref(d);
+}
+
+/* Asks the pages, then writes the dump; done gets its path (or NULL),
+ * to free. */
+static void debug_dump_async(void (*done)(char *path, void *data),
+		void *data) {
+	struct dump *d = g_new0(struct dump, 1);
+	d->refs = 1; /* the timer's */
+	d->states = g_hash_table_new_full(NULL, NULL, NULL, g_free);
+	d->done = done;
+	d->data = data;
+	d->timer = g_timeout_add(DUMP_WAIT, dump_waited, d);
+	for (GList *w = gtk_application_get_windows(shared.app); w != NULL;
+			w = w->next) {
+		struct browser *b = g_object_get_data(G_OBJECT(w->data), "browser");
+		for (guint i = 0; b != NULL && i < b->tabs->len; i++) {
+			struct tab *t = g_ptr_array_index(b->tabs, i);
+			if (t->private) {
+				continue;
+			}
+			struct dump_ask *a = g_new(struct dump_ask, 1);
+			a->dump = d;
+			a->id = t->id;
+			d->refs++;
+			webkit_web_view_evaluate_javascript(t->view, page_state_js, -1,
+				PASSWORD_WORLD, NULL, NULL, dump_answered, a);
+		}
+	}
+	if (d->refs == 1) {
+		dump_write(d); /* no pages to ask */
+	}
+}
+
+static void dump_for_command_line(char *path, void *data) {
+	GApplicationCommandLine *cmdline = data;
+	if (path != NULL) {
+		g_application_command_line_print(cmdline, "gemweb: wrote %s\n", path);
+	} else {
+		g_application_command_line_printerr(cmdline,
+			"gemweb: couldn't write the diagnostics\n");
+	}
+	g_application_command_line_set_exit_status(cmdline, path != NULL ? 0 : 1);
+	g_free(path);
+	g_object_unref(cmdline); /* the other gemweb exits now */
+}
+
 static int command_line(GApplication *app, GApplicationCommandLine *cmdline) {
 	int argc;
 	char **argv = g_application_command_line_get_arguments(cmdline, &argc);
 	/* A second `gemweb` hands its arguments to this one and exits: say so
 	 * on its terminal, or it looks as if a fresh GemWeb started. */
 	if (argc == 2 && strcmp(argv[1], "--debug") == 0) {
-		char *path = shared.app != NULL ? debug_dump() : NULL;
-		if (path != NULL) {
-			g_application_command_line_print(cmdline,
-				"gemweb: wrote %s\n", path);
-		} else {
+		g_strfreev(argv);
+		if (shared.app == NULL) {
 			g_application_command_line_printerr(cmdline,
 				"gemweb: no GemWeb running to ask\n");
+			return 1;
 		}
-		g_free(path);
-		g_strfreev(argv);
-		return path != NULL ? 0 : 1;
+		/* Answered when the pages have been asked. */
+		debug_dump_async(dump_for_command_line, g_object_ref(cmdline));
+		return 0;
 	}
 	if (g_application_command_line_get_is_remote(cmdline)) {
 		g_application_command_line_printerr(cmdline,
