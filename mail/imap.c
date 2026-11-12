@@ -422,6 +422,7 @@ void summaries_free(GPtrArray *messages) {
 		struct summary *s = messages->pdata[i];
 		g_free(s->from);
 		g_free(s->subject);
+		g_free(s->mailbox);
 		g_free(s);
 	}
 	if (messages != NULL) {
@@ -538,7 +539,10 @@ static bool has_uid(GArray *sorted, guint32 uid) {
 
 /* Summaries of the messages given, into the cache: a hundred at a time,
  * so a big first sync isn't one huge answer. */
-static int fetch_summaries(struct mail *m, const char *mailbox, GArray *uids) {
+/* The summaries of uids, into the cache, or with out, into out instead
+ * (each with its mailbox). */
+static int fetch_summaries(struct mail *m, const char *mailbox, GArray *uids,
+		GPtrArray *out) {
 	for (guint at = 0; at < uids->len; at += 100) {
 		guint n = MIN(100, uids->len - at);
 		struct mailimap_set *set = uid_set(&g_array_index(uids, guint32, at), n);
@@ -565,11 +569,18 @@ static int fetch_summaries(struct mail *m, const char *mailbox, GArray *uids) {
 		if (r != MAILIMAP_NO_ERROR) {
 			return r;
 		}
-		cache_begin(m->cache);
+		if (out == NULL) {
+			cache_begin(m->cache);
+		}
 		for (clistiter *c = clist_begin(result); c != NULL; c = clist_next(c)) {
 			struct summary *s = read_summary(clist_content(c));
 			if (s->from == NULL) {
 				parse_headers(s, "", 0);
+			}
+			if (out != NULL && s->uid != 0) {
+				s->mailbox = g_strdup(mailbox);
+				g_ptr_array_add(out, s);
+				continue;
 			}
 			if (s->uid != 0) {
 				cache_put(m->cache, mailbox, s);
@@ -578,7 +589,9 @@ static int fetch_summaries(struct mail *m, const char *mailbox, GArray *uids) {
 			g_free(s->subject);
 			g_free(s);
 		}
-		cache_commit(m->cache);
+		if (out == NULL) {
+			cache_commit(m->cache);
+		}
 		mailimap_fetch_list_free(result);
 	}
 	return MAILIMAP_NO_ERROR;
@@ -696,7 +709,7 @@ static int run_list_messages(struct mail *m, struct job *j) {
 		}
 	}
 	if (r == MAILIMAP_NO_ERROR) {
-		r = fetch_summaries(m, j->mailbox, missing);
+		r = fetch_summaries(m, j->mailbox, missing, NULL);
 	}
 	g_array_free(missing, TRUE);
 	g_array_free(cached, TRUE);
@@ -708,6 +721,59 @@ static int run_list_messages(struct mail *m, struct job *j) {
 done:
 	cache_set_state(m->cache, j->mailbox, &now);
 	j->list = cache_messages(m->cache, j->mailbox, j->limit);
+	return MAILIMAP_NO_ERROR;
+}
+
+static int newest_first(gconstpointer a, gconstpointer b) {
+	const struct summary *x = *(struct summary *const *)a;
+	const struct summary *y = *(struct summary *const *)b;
+	return x->date < y->date ? 1 : x->date > y->date ? -1 : 0;
+}
+
+/* Each mailbox in turn: what the server says is flagged there, and those
+ * messages' summaries. A folder that won't open is skipped; a broken
+ * connection starts it all again (run_with). */
+static int run_search_flagged(struct mail *m, struct job *j) {
+	summaries_free(j->list);
+	j->list = g_ptr_array_new();
+	for (int i = 0; j->recipients[i] != NULL; i++) {
+		const char *mailbox = j->recipients[i];
+		int r = select_mailbox(m, mailbox);
+		if (broken(r)) {
+			return r;
+		}
+		if (r != MAILIMAP_NO_ERROR) {
+			continue;
+		}
+		struct mailimap_search_key *key = mailimap_search_key_new(
+			MAILIMAP_SEARCH_KEY_FLAGGED, NULL, NULL, NULL, NULL, NULL, NULL,
+			NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL,
+			NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL);
+		clist *found = NULL;
+		r = mailimap_uid_search(m->imap, NULL, key, &found);
+		mailimap_search_key_free(key);
+		if (broken(r)) {
+			return r;
+		}
+		if (r != MAILIMAP_NO_ERROR) {
+			continue;
+		}
+		GArray *uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+		for (clistiter *c = clist_begin(found); c != NULL; c = clist_next(c)) {
+			g_array_append_val(uids, *(guint32 *)clist_content(c));
+		}
+		mailimap_search_result_free(found);
+		g_array_sort(uids, compare_uids);
+		cache_begin(m->cache);
+		cache_set_flagged_only(m->cache, mailbox, uids);
+		cache_commit(m->cache);
+		r = fetch_summaries(m, mailbox, uids, j->list);
+		g_array_free(uids, TRUE);
+		if (broken(r)) {
+			return r;
+		}
+	}
+	g_ptr_array_sort(j->list, newest_first);
 	return MAILIMAP_NO_ERROR;
 }
 
@@ -1212,6 +1278,28 @@ void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
 	j->mailbox = g_strdup(mailbox);
 	set_uids(j, uids, n);
 	j->flag = seen;
+	queue(m, j);
+}
+
+static void do_search_flagged(struct mail *m, struct job *j) {
+	run_with(m, j, run_search_flagged);
+}
+
+/* done owns the list it's given. */
+static gboolean finish_flagged(struct job *j) {
+	((mail_messages_fn)j->done)(j->error ? NULL : j->list, j->error, j->data);
+	if (j->error != NULL) {
+		summaries_free(j->list);
+	}
+	job_free(j);
+	return G_SOURCE_REMOVE;
+}
+
+void mail_search_flagged(struct mail *m, char **mailboxes,
+		mail_messages_fn done, void *data) {
+	struct job *j = job_new(do_search_flagged, (GSourceFunc)finish_flagged,
+		G_CALLBACK(done), data);
+	j->recipients = g_strdupv(mailboxes); /* the mailboxes, here */
 	queue(m, j);
 }
 

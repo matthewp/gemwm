@@ -42,6 +42,12 @@ void cache_forget_folder(struct cache *c, const char *mailbox);
 GPtrArray *cache_messages(struct cache *c, const char *mailbox, guint limit);
 /* Its UIDs, lowest first. */
 GArray *cache_uids(struct cache *c, const char *mailbox);
+/* What's flagged in mailboxes (NULL-terminated), as far as the cache
+ * knows: struct summary, each with its mailbox, newest first. */
+GPtrArray *cache_flagged(struct cache *c, char **mailboxes);
+/* A folder's flagged messages are uids, and no others (sorted). */
+void cache_set_flagged_only(struct cache *c, const char *mailbox,
+	GArray *uids);
 
 void cache_begin(struct cache *c);
 void cache_commit(struct cache *c);

@@ -31,6 +31,9 @@ reads.
 - **Flag** (F, or the button on an open message) marks messages as
   important, with a flag in the list. It's IMAP's standard flag, so it's the
   same as a star in Gmail or a flag in Apple Mail and Outlook, both ways.
+  **View > Flagged** (or Flagged under the folders) lists every flagged
+  message in every folder but Trash and Junk, asked of the server so older
+  ones and those flagged elsewhere are there too; F there unflags one.
 - **File > Empty Trash...** deletes everything in Trash for good.
 - **File > Delete Folder...** deletes the folder shown, after asking; its
   messages go to Trash first (on Gmail, they stay in All Mail). The Inbox,

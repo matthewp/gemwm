@@ -191,7 +191,8 @@ if etpan.found() and gmime.found() and webkit.found()
 	executable(
 		'gemmail',
 		['mail/gemmail.c', 'mail/account.c', 'mail/addresses.c', 'mail/cache.c',
-			'mail/bills.c', 'mail/categories.c', 'mail/ledger.c', 'mail/logos.c',
+			'mail/bills.c', 'mail/categories.c', 'mail/flagview.c',
+			'mail/ledger.c', 'mail/logos.c',
 			'mail/magazine.c', 'mail/net.c',
 			'mail/imap.c', 'mail/message.c',
 			'lib/app-menu.c', 'lib/augur.c', 'lib/gem-alert.c', 'lib/gem-draw.c',

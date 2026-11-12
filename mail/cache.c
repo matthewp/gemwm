@@ -218,6 +218,53 @@ void cache_forget_folder(struct cache *c, const char *mailbox) {
 
 /* ---- Messages ----------------------------------------------------------- */
 
+GPtrArray *cache_flagged(struct cache *c, char **mailboxes) {
+	GPtrArray *list = g_ptr_array_new();
+	sqlite3_stmt *s = prepare(c, "SELECT uid, sender, subject, date, seen,"
+		" answered, size FROM messages WHERE mailbox = ?1 AND flagged = 1");
+	if (s == NULL) {
+		return list;
+	}
+	for (int i = 0; mailboxes[i] != NULL; i++) {
+		sqlite3_reset(s);
+		bind_text(s, 1, mailboxes[i]);
+		while (sqlite3_step(s) == SQLITE_ROW) {
+			struct summary *m = g_new0(struct summary, 1);
+			m->uid = (guint32)sqlite3_column_int64(s, 0);
+			m->from = g_strdup((const char *)sqlite3_column_text(s, 1));
+			m->subject = g_strdup((const char *)sqlite3_column_text(s, 2));
+			m->date = sqlite3_column_int64(s, 3);
+			m->seen = sqlite3_column_int(s, 4);
+			m->answered = sqlite3_column_int(s, 5);
+			m->flagged = true;
+			m->size = (guint32)sqlite3_column_int64(s, 6);
+			m->mailbox = g_strdup(mailboxes[i]);
+			if (m->from == NULL) {
+				m->from = g_strdup("");
+			}
+			if (m->subject == NULL) {
+				m->subject = g_strdup("");
+			}
+			g_ptr_array_add(list, m);
+		}
+	}
+	sqlite3_finalize(s);
+	return list;
+}
+
+void cache_set_flagged_only(struct cache *c, const char *mailbox,
+		GArray *uids) {
+	sqlite3_stmt *s = prepare(c, "UPDATE messages SET flagged = 0"
+		" WHERE mailbox = ?1 AND flagged = 1");
+	if (s != NULL) {
+		bind_text(s, 1, mailbox);
+	}
+	run(s);
+	for (guint i = 0; i < uids->len; i++) {
+		cache_set_flagged(c, mailbox, g_array_index(uids, guint32, i), true);
+	}
+}
+
 GPtrArray *cache_messages(struct cache *c, const char *mailbox, guint limit) {
 	GPtrArray *list = g_ptr_array_new();
 	sqlite3_stmt *s = prepare(c, "SELECT uid, sender, subject, date, seen,"

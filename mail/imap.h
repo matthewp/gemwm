@@ -33,6 +33,7 @@ struct summary {
 	gint64 date; /* unix time; 0 if none */
 	bool seen, answered, flagged;
 	guint32 size;
+	char *mailbox; /* its folder, where lists span folders; else NULL */
 };
 
 struct mail;
@@ -79,6 +80,11 @@ typedef void (*mail_done_fn)(const char *error, void *data);
  * programs show as a flag or (Gmail) a star. */
 void mail_set_flagged(struct mail *m, const char *mailbox,
 	const guint32 *uids, guint n, bool flagged, mail_done_fn done, void *data);
+/* Every flagged message in mailboxes (NULL-terminated), asked of the
+ * server: struct summary, each with its mailbox, newest first. The cache
+ * gets the flags too. A folder that can't be read is left out. */
+void mail_search_flagged(struct mail *m, char **mailboxes,
+	mail_messages_fn done, void *data);
 void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
 	guint n, bool seen, mail_done_fn done, void *data);
 /* Moves messages to another folder (created first if create, and it

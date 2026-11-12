@@ -25,6 +25,7 @@
 #include "augur.h"
 #include "cache.h"
 #include "categories.h"
+#include "flagview.h"
 #include "gem-alert.h"
 #include "gem-file.h"
 #include "gem-print.h"
@@ -69,7 +70,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
-	ACT_DELETE_FOLDER, ACT_PRINT, ACT_FLAG,
+	ACT_DELETE_FOLDER, ACT_PRINT, ACT_FLAG, ACT_FLAGGED,
 	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
@@ -145,12 +146,20 @@ static struct {
 	gint64 categorise_after; /* after an error, not before this */
 	char *session;          /* the password manager's, once unlocked */
 
-	/* The views: Newsletters (magazine.h) and Bills (ledger.h), each made
-	 * when first shown; in_view the one shown, or that a message open was
-	 * opened from. */
+	/* The views: Flagged (flagview.h), Newsletters (magazine.h) and Bills
+	 * (ledger.h), each made when first shown; in_view the one shown, or
+	 * that a message open was opened from. */
+	struct flagview *flagview;
 	struct magazine *magazine;
 	struct ledger *ledger;
-	enum view_kind { VIEW_NONE, VIEW_NEWSLETTERS, VIEW_BILLS } in_view;
+	enum view_kind {
+		VIEW_NONE, VIEW_FLAGGED, VIEW_NEWSLETTERS, VIEW_BILLS
+	} in_view;
+	/* What's flagged, every folder: the server's last answer, or the
+	 * cache's until then (struct summary, with mailboxes); and whether
+	 * the server's being asked. */
+	GPtrArray *flagged;
+	bool searching_flagged;
 	/* Reading bills (bills.h): a request out, how many are left, and
 	 * after an error, not before. */
 	bool reading_bills;
@@ -754,12 +763,21 @@ static int folders_offset(void) {
 static int categories_top(void);
 static int views_top(void);
 
+/* Under the folders, the views: Flagged always, Newsletters and Bills
+ * with categories on; then the categories. */
+static int view_count(void) {
+	return categorising_on() ? 3 : 1;
+}
+
 static int folders_height(void) {
 	int folders = ui.folder_list != NULL ? (int)ui.folder_list->len : 0;
-	if (categorising_on() && ui.folder_list != NULL) {
+	if (ui.folder_list == NULL) {
+		return PAD / 2 + folders * ROW_H + PAD / 2;
+	}
+	if (categorising_on()) {
 		return categories_top() + ui.categories->list->len * ROW_H + PAD / 2;
 	}
-	return PAD / 2 + folders * ROW_H + PAD / 2;
+	return views_top() + view_count() * ROW_H + PAD / 2;
 }
 
 /* The scroll bar fitted to what's there: shown only when it doesn't all
@@ -828,8 +846,21 @@ static int views_top(void) {
 }
 
 static int categories_top(void) {
-	return views_top() + 2 * ROW_H + ROW_H;
+	return views_top() + view_count() * ROW_H + ROW_H;
 }
+
+/* The Flagged view, 13x9: a flag. */
+static const char *const flag_icon[] = {
+	"##########...",
+	"#########....",
+	"########.....",
+	"#########....",
+	"##########...",
+	"#............",
+	"#............",
+	"#............",
+	"#............",
+};
 
 /* The Newsletters view, 13x9: a folded paper. */
 static const char *const paper_icon[] = {
@@ -884,22 +915,24 @@ static int in_category_count(const char *name) {
 	return n;
 }
 
+static const struct {
+	enum view_kind kind;
+	const char *name;
+	const char *const *icon;
+} views[] = {
+	{ VIEW_FLAGGED, "Flagged", flag_icon },
+	{ VIEW_NEWSLETTERS, "Newsletters", paper_icon },
+	{ VIEW_BILLS, "Bills", ledger_icon },
+};
+
 static void paint_categories(cairo_t *cr, int w) {
-	if (!categorising_on() || ui.folder_list == NULL) {
+	if (ui.folder_list == NULL) {
 		return;
 	}
 	int y = views_top();
 	gem_black(cr);
 	dotted_rule(cr, w, y - ROW_H / 2);
-	static const struct {
-		enum view_kind kind;
-		const char *name;
-		const char *const *icon;
-	} views[] = {
-		{ VIEW_NEWSLETTERS, "Newsletters", paper_icon },
-		{ VIEW_BILLS, "Bills", ledger_icon },
-	};
-	for (guint i = 0; i < G_N_ELEMENTS(views); i++, y += ROW_H) {
+	for (int i = 0; i < view_count(); i++, y += ROW_H) {
 		gem_black(cr);
 		if (ui.in_view == views[i].kind) {
 			gem_fill(cr, 0, y, w - 1, ROW_H);
@@ -907,6 +940,9 @@ static void paint_categories(cairo_t *cr, int w) {
 		}
 		gem_bitmap(cr, views[i].icon, 9, PAD, y + 5);
 		clipped(cr, views[i].name, PAD + 18, y, w - 1 - PAD - (PAD + 18), ROW_H);
+	}
+	if (!categorising_on()) {
+		return;
 	}
 	int top = categories_top();
 	gem_black(cr);
@@ -983,17 +1019,13 @@ static void choose_category(int index) {
 static void folders_pressed(GtkGestureClick *g, int n, double x, double y,
 		gpointer data) {
 	y += folders_offset();
-	int top = categories_top(), views = views_top();
-	if (!categorising_on() || ui.folder_list == NULL || y < views - ROW_H) {
+	int top = categories_top(), first = views_top();
+	if (ui.folder_list == NULL || y < first - ROW_H) {
 		choose_folder(((int)y - PAD / 2) / ROW_H);
-	} else if (y >= top) {
+	} else if (categorising_on() && y >= top) {
 		choose_category(((int)y - top) / ROW_H);
-	} else if (y >= views && y < views + ROW_H) {
-		show_view(VIEW_NEWSLETTERS);
-	} else if (y >= views + ROW_H && y < views + 2 * ROW_H) {
-		show_view(VIEW_BILLS);
-	} else {
-		choose_folder(((int)y - PAD / 2) / ROW_H);
+	} else if (y >= first && y < first + view_count() * ROW_H) {
+		show_view(views[((int)y - first) / ROW_H].kind);
 	}
 }
 
@@ -1879,6 +1911,8 @@ static void show_body(void) {
 	g_free(body);
 }
 
+static bool is_flagged_in_view(const char *mailbox, guint32 uid);
+
 /* The open message in the list, if it's there (not from a view). */
 static struct summary *open_summary(void) {
 	struct folder *f = current_folder();
@@ -1910,9 +1944,11 @@ static void paint_header(cairo_t *cr, int w, int h, void *data) {
 	x += button(cr, hits, x, y, "Archive", ACT_ARCHIVE, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Delete", ACT_DELETE, 0, false) + PAD;
 	struct summary *open = open_summary();
-	if (open != NULL) {
-		x += button(cr, hits, x, y, open->flagged ? "Unflag" : "Flag", ACT_FLAG,
-			0, false) + PAD;
+	if (open != NULL || ui.in_view == VIEW_FLAGGED) {
+		bool flagged = open != NULL ? open->flagged :
+			is_flagged_in_view(ui.open_mailbox, ui.open_uid);
+		x += button(cr, hits, x, y, flagged ? "Unflag" : "Flag", ACT_FLAG, 0,
+			false) + PAD;
 	}
 	if (has_pictures(m) && !ui.show_attached) {
 		x += button(cr, hits, x, y, "Show Attached Images", ACT_SHOW_ATTACHED, 0,
@@ -2016,19 +2052,159 @@ static void logo_ready(void *data) {
 }
 
 static const char *view_name(enum view_kind kind) {
-	return kind == VIEW_BILLS ? "Bills" : "Newsletters";
+	return kind == VIEW_BILLS ? "Bills" : kind == VIEW_FLAGGED ? "Flagged" :
+		"Newsletters";
+}
+
+/* ---- The Flagged view ------------------------------------------------------ */
+
+/* Where flagged mail is looked for: every folder but Trash and Junk; on
+ * Gmail, All Mail alone, which has the rest (or they'd be there twice). */
+static char **flagged_mailboxes(void) {
+	GPtrArray *list = g_ptr_array_new();
+	struct folder *all = NULL;
+	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
+		struct folder *f = ui.folder_list->pdata[i];
+		if (f->role == ROLE_ALL && f->selectable) {
+			all = f;
+		}
+	}
+	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
+		struct folder *f = ui.folder_list->pdata[i];
+		if (f->selectable && f->role != ROLE_TRASH && f->role != ROLE_JUNK &&
+				(all == NULL || f == all)) {
+			g_ptr_array_add(list, g_strdup(f->mailbox));
+		}
+	}
+	g_ptr_array_add(list, NULL);
+	return (char **)g_ptr_array_free(list, FALSE);
+}
+
+static void flagged_show(void) {
+	if (ui.flagview == NULL || ui.in_view != VIEW_FLAGGED || ui.open != NULL) {
+		return;
+	}
+	GHashTable *names = g_hash_table_new(g_str_hash, g_str_equal);
+	for (guint i = 0; ui.folder_list != NULL && i < ui.folder_list->len; i++) {
+		struct folder *f = ui.folder_list->pdata[i];
+		g_hash_table_insert(names, f->mailbox, f->name);
+	}
+	flagview_load(ui.flagview, ui.flagged, names, ui.searching_flagged);
+	g_hash_table_unref(names);
+}
+
+static void flagged_found(GPtrArray *found, const char *error, void *data) {
+	ui.searching_flagged = false;
+	if (found != NULL) {
+		summaries_free(ui.flagged);
+		ui.flagged = found;
+	} else if (error != NULL) {
+		set_status("%s", error);
+	}
+	flagged_show();
+}
+
+/* What's flagged, from the server, every folder. */
+static void search_flagged(void) {
+	if (ui.mail == NULL || ui.searching_flagged) {
+		return;
+	}
+	char **mailboxes = flagged_mailboxes();
+	ui.searching_flagged = true;
+	mail_search_flagged(ui.mail, mailboxes, flagged_found, NULL);
+	g_strfreev(mailboxes);
+}
+
+/* A message flagged or unflagged here: the view's list kept up, until the
+ * server's next answer. */
+static void flagged_note(const char *mailbox, const struct summary *s,
+		bool flagged) {
+	if (ui.flagged == NULL) {
+		return;
+	}
+	for (guint i = 0; i < ui.flagged->len; i++) {
+		struct summary *f = ui.flagged->pdata[i];
+		if (f->uid == s->uid && g_strcmp0(f->mailbox, mailbox) == 0) {
+			if (!flagged) {
+				g_free(f->from);
+				g_free(f->subject);
+				g_free(f->mailbox);
+				g_free(f);
+				g_ptr_array_remove_index(ui.flagged, i);
+			}
+			return;
+		}
+	}
+	if (flagged) {
+		struct summary *f = g_new(struct summary, 1);
+		*f = *s;
+		f->from = g_strdup(s->from);
+		f->subject = g_strdup(s->subject);
+		f->mailbox = g_strdup(mailbox);
+		f->flagged = true;
+		/* Newest first, as the server's answer is. */
+		guint at = 0;
+		while (at < ui.flagged->len &&
+				((struct summary *)ui.flagged->pdata[at])->date >= f->date) {
+			at++;
+		}
+		g_ptr_array_insert(ui.flagged, at, f);
+	}
+}
+
+static bool is_flagged_in_view(const char *mailbox, guint32 uid) {
+	for (guint i = 0; ui.flagged != NULL && i < ui.flagged->len; i++) {
+		struct summary *f = ui.flagged->pdata[i];
+		if (f->uid == uid && g_strcmp0(f->mailbox, mailbox) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* F in the Flagged view: off the server's flags, and the lists here. */
+static void flagview_unflag(const char *mailbox, guint32 uid, void *data) {
+	mail_set_flagged(ui.mail, mailbox, &uid, 1, false, NULL, NULL);
+	struct summary key = { .uid = uid };
+	flagged_note(mailbox, &key, false);
+	struct folder *f = current_folder();
+	for (int i = 0; f != NULL && g_strcmp0(f->mailbox, mailbox) == 0 &&
+			ui.messages != NULL && i < (int)ui.messages->len; i++) {
+		struct summary *s = ui.messages->pdata[i];
+		if (s->uid == uid) {
+			s->flagged = false;
+		}
+	}
+	set_status("Message unflagged.");
 }
 
 /* A view, from what's been categorized in every folder so far. Shown
  * again, it's read again: what's been read or newly found since. */
 static void show_view(enum view_kind kind) {
-	if (ui.cache == NULL || !categorising_on() || kind == VIEW_NONE) {
+	if (ui.cache == NULL || kind == VIEW_NONE ||
+			(kind != VIEW_FLAGGED && !categorising_on())) {
 		return;
 	}
 	g_clear_pointer(&ui.open, message_free);
 	g_clear_pointer(&ui.open_mailbox, g_free);
 	ui.in_view = kind;
-	if (kind == VIEW_NEWSLETTERS) {
+	if (kind == VIEW_FLAGGED) {
+		if (ui.flagview == NULL) {
+			ui.flagview = flagview_new(view_open, flagview_unflag, NULL);
+			gtk_stack_add_named(GTK_STACK(ui.stack),
+				flagview_widget(ui.flagview), "flagged");
+		}
+		if (ui.flagged == NULL) {
+			/* What the cache knows, while the server's asked. */
+			char **mailboxes = flagged_mailboxes();
+			ui.flagged = cache_flagged(ui.cache, mailboxes);
+			g_strfreev(mailboxes);
+		}
+		search_flagged();
+		flagged_show();
+		gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "flagged");
+		flagview_focus(ui.flagview);
+	} else if (kind == VIEW_NEWSLETTERS) {
 		if (ui.magazine == NULL) {
 			logos_init(logo_ready, NULL);
 			ui.magazine = magazine_new(ui.cache, view_open, NULL);
@@ -2063,7 +2239,9 @@ static void refresh_view(void) {
 	if (!viewing()) {
 		return;
 	}
-	if (ui.in_view == VIEW_NEWSLETTERS) {
+	if (ui.in_view == VIEW_FLAGGED) {
+		flagged_show();
+	} else if (ui.in_view == VIEW_NEWSLETTERS) {
 		magazine_load(ui.magazine, "Newsletter");
 	} else {
 		ledger_load(ui.ledger, ui.bills_left);
@@ -2606,6 +2784,23 @@ static void toggle_seen(void) {
  * unflags them. */
 static void toggle_flagged(void) {
 	struct folder *f = current_folder();
+	/* Open from the Flagged view, but older than the list goes back: only
+	 * the view knows it's flagged. */
+	if (f != NULL && ui.open != NULL && open_summary() == NULL &&
+			ui.in_view == VIEW_FLAGGED &&
+			g_strcmp0(ui.open_mailbox, f->mailbox) == 0) {
+		bool flagged = !is_flagged_in_view(f->mailbox, ui.open_uid);
+		mail_set_flagged(ui.mail, f->mailbox, &ui.open_uid, 1, flagged, NULL,
+			NULL);
+		struct summary key = { .uid = ui.open_uid }; /* placed by the next search */
+		key.from = ui.open->from;
+		key.subject = ui.open->subject;
+		flagged_note(f->mailbox, &key, flagged);
+		set_status("Message %s.", flagged ? "flagged" : "unflagged");
+		gtk_widget_queue_draw(ui.header);
+		app_menu_update(ui.menu);
+		return;
+	}
 	/* An open message from a view may be another folder's. */
 	GPtrArray *t = f != NULL && (ui.open == NULL || open_summary() != NULL) ?
 		targets() : NULL;
@@ -2625,6 +2820,7 @@ static void toggle_flagged(void) {
 		if (s->flagged != flagged) {
 			s->flagged = flagged;
 			g_array_append_val(uids, s->uid);
+			flagged_note(f->mailbox, s, flagged);
 		}
 	}
 	mail_set_flagged(ui.mail, f->mailbox, (guint32 *)uids->data, uids->len,
@@ -3292,9 +3488,11 @@ static void run_action(enum action action, int index) {
 			show_list();
 		}
 		break;
+	case ACT_FLAGGED:
 	case ACT_NEWSLETTERS:
 	case ACT_BILLS: {
-		enum view_kind kind = action == ACT_BILLS ? VIEW_BILLS : VIEW_NEWSLETTERS;
+		enum view_kind kind = action == ACT_BILLS ? VIEW_BILLS :
+			action == ACT_FLAGGED ? VIEW_FLAGGED : VIEW_NEWSLETTERS;
 		if (viewing() && ui.in_view == kind) {
 			show_list();
 		} else {
@@ -3757,14 +3955,16 @@ static void build_menus(struct app_menu *m, void *data) {
 	}
 	/* View: the views, from every folder; and the folder's messages, all
 	 * or one category's. */
+	app_menu_add_menu(m, "View");
+	app_menu_add_item(m, ACT_FLAGGED, "Flagged", NULL,
+		(account ? 0 : APP_MENU_DISABLED) |
+		(viewing() && ui.in_view == VIEW_FLAGGED ? APP_MENU_CHECKED : 0));
 	if (categorising_on()) {
-		app_menu_add_menu(m, "View");
-		app_menu_add_submenu(m, "Views", 0);
 		app_menu_add_item(m, ACT_NEWSLETTERS, "Newsletters", NULL,
 			viewing() && ui.in_view == VIEW_NEWSLETTERS ? APP_MENU_CHECKED : 0);
 		app_menu_add_item(m, ACT_BILLS, "Bills", NULL,
 			viewing() && ui.in_view == VIEW_BILLS ? APP_MENU_CHECKED : 0);
-		app_menu_end_submenu(m);
+		app_menu_add_separator(m);
 		app_menu_add_submenu(m, "Categories", 0);
 		app_menu_add_item(m, ACT_VIEW_ALL, "All Messages", NULL,
 			ui.filter == NULL && !viewing() ? APP_MENU_CHECKED : 0);
