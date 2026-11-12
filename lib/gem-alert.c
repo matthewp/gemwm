@@ -177,8 +177,21 @@ static void released(GtkGestureClick *g, int n, double x, double y,
 static gboolean key(GtkEventControllerKey *c, guint keyval, guint keycode,
 		GdkModifierType state, gpointer data) {
 	struct alert *a = data;
-	if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) && a->def >= 0) {
+	if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter ||
+			keyval == GDK_KEY_space) && a->def >= 0) {
 		answer(a, a->def);
+		return TRUE;
+	}
+	/* The default, GEM's thick border, is what the keyboard moves. */
+	int step = keyval == GDK_KEY_Tab || keyval == GDK_KEY_Right ? 1 :
+		keyval == GDK_KEY_ISO_Left_Tab || keyval == GDK_KEY_Left ? -1 : 0;
+	if (keyval == GDK_KEY_Tab && (state & GDK_SHIFT_MASK)) {
+		step = -1;
+	}
+	if (step != 0 && a->n_buttons > 0) {
+		a->def = a->def < 0 ? (step > 0 ? 0 : a->n_buttons - 1) :
+			(a->def + step + a->n_buttons) % a->n_buttons;
+		gtk_widget_queue_draw(a->area);
 		return TRUE;
 	}
 	if (keyval == GDK_KEY_Escape && a->cancel >= 0) {

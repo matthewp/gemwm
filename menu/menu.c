@@ -317,6 +317,7 @@ static struct {
 		struct wl_subsurface *subsurface;
 		int x, y, w, h;
 		int button_x[2], button_y, button_w[2], button_h; /* action, Cancel */
+		int selected; /* the button Return presses, drawn as the default */
 	} alert;
 
 	struct menu_app apps[MAX_APPS];
@@ -1862,7 +1863,8 @@ static void run(const char *command) {
 /* ---- Alert box ---------------------------------------------------------- */
 
 /* GEM's form_alert: an icon, the question, and buttons, the default one
- * (Cancel, the safe choice) with a thick border. */
+ * (Cancel, the safe choice, until Tab or an arrow moves it) with a thick
+ * border. Shown again, it's drawn again in place. */
 static void show_alert(void) {
 	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
 	cairo_t *cr = begin(scratch);
@@ -1944,7 +1946,7 @@ static void show_alert(void) {
 		int bw = st.alert.button_w[i];
 		cairo_rectangle(cr, bx + 0.5, by + 0.5, bw - 1, button_h - 1);
 		cairo_stroke(cr);
-		if (i == 1) { /* the default button's thick border */
+		if (i == st.alert.selected) { /* the default button's thick border */
 			cairo_rectangle(cr, bx - 1.5, by - 1.5, bw + 3, button_h + 3);
 			cairo_rectangle(cr, bx - 0.5, by - 0.5, bw + 1, button_h + 1);
 			cairo_stroke(cr);
@@ -1956,10 +1958,12 @@ static void show_alert(void) {
 	cairo_destroy(cr);
 	free(question);
 
-	st.alert.surface = wl_compositor_create_surface(st.compositor);
-	st.alert.subsurface = wl_subcompositor_get_subsurface(st.subcompositor,
-		st.alert.surface, st.overlay);
-	wl_subsurface_set_position(st.alert.subsurface, st.alert.x, st.alert.y);
+	if (st.alert.surface == NULL) {
+		st.alert.surface = wl_compositor_create_surface(st.compositor);
+		st.alert.subsurface = wl_subcompositor_get_subsurface(st.subcompositor,
+			st.alert.surface, st.overlay);
+		wl_subsurface_set_position(st.alert.subsurface, st.alert.x, st.alert.y);
+	}
 	submit(st.alert.surface, buffer, st.alert.w, st.alert.h);
 	wl_surface_commit(st.overlay);
 }
@@ -1968,6 +1972,7 @@ static void show_alert(void) {
 static void ask(const struct item *item) {
 	close_menu();
 	st.alert.active = true;
+	st.alert.selected = 1; /* Cancel */
 	st.alert.text = strdup(item->confirm);
 	st.alert.command = strdup(item->command);
 	/* The action button reads like the item: "Shutdown..." -> "Shutdown". */
@@ -1997,6 +2002,8 @@ static void dismiss_alert(void) {
 	overlay_destroy();
 }
 
+static void alert_choose(int button);
+
 /* A click while the alert is up: its buttons, or nothing (it's modal). */
 static void alert_press(double x, double y) {
 	double lx = x - st.alert.x, ly = y - st.alert.y;
@@ -2005,14 +2012,19 @@ static void alert_press(double x, double y) {
 				lx < st.alert.button_x[i] + st.alert.button_w[i] &&
 				ly >= st.alert.button_y &&
 				ly < st.alert.button_y + st.alert.button_h) {
-			char *command = i == 0 ? strdup(st.alert.command) : NULL;
-			dismiss_alert();
-			if (command != NULL) {
-				run(command);
-				free(command);
-			}
+			alert_choose(i);
 			return;
 		}
+	}
+}
+
+/* The alert's answer: its action (0), which runs the command, or Cancel. */
+static void alert_choose(int button) {
+	char *command = button == 0 ? strdup(st.alert.command) : NULL;
+	dismiss_alert();
+	if (command != NULL) {
+		run(command);
+		free(command);
 	}
 }
 
@@ -2238,12 +2250,39 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
 static void keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
 		int32_t rate, int32_t delay) {}
 
-/* Escape, Return and Enter all pick Cancel, the alert's default. */
+/* Tab (or Shift+Tab: there are two) and the arrows move the default
+ * between the buttons; Return, Enter and Space press it; Escape is
+ * always Cancel. */
 static void keyboard_key(void *data, struct wl_keyboard *keyboard,
 		uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
-	if (st.alert.active && state == WL_KEYBOARD_KEY_STATE_PRESSED &&
-			(key == KEY_ESC || key == KEY_ENTER || key == KEY_KPENTER)) {
-		dismiss_alert();
+	if (!st.alert.active || state != WL_KEYBOARD_KEY_STATE_PRESSED) {
+		return;
+	}
+	int selected = st.alert.selected;
+	switch (key) {
+	case KEY_ESC:
+		alert_choose(1);
+		return;
+	case KEY_ENTER:
+	case KEY_KPENTER:
+	case KEY_SPACE:
+		alert_choose(st.alert.selected);
+		return;
+	case KEY_TAB:
+		selected = 1 - selected;
+		break;
+	case KEY_LEFT:
+		selected = 0;
+		break;
+	case KEY_RIGHT:
+		selected = 1;
+		break;
+	default:
+		return;
+	}
+	if (selected != st.alert.selected && st.alert.surface != NULL) {
+		st.alert.selected = selected;
+		show_alert();
 	}
 }
 

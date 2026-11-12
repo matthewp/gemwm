@@ -2,8 +2,9 @@
  * A GEM alert box over a window, as GEM's form_alert drew it: an icon, the
  * message, and a row of buttons of one width at the right, the default
  * with a thicker border. It holds the window while it's up: the rest takes
- * no input. Return answers with the default, Escape with the cancel
- * button.
+ * no input. Tab and Right move the default to the next button, Shift+Tab
+ * and Left to the one before; Return, Enter and Space answer with the
+ * default, and Escape always with the cancel button.
  *
  * host is a GtkOverlay holding the window's content; the alert goes over
  * it. done gets the index of the button pressed.
