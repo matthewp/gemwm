@@ -48,6 +48,8 @@ void cache_commit(struct cache *c);
 void cache_put(struct cache *c, const char *mailbox, const struct summary *s);
 void cache_set_flags(struct cache *c, const char *mailbox, guint32 uid,
 	bool seen, bool answered, bool flagged);
+void cache_set_flagged(struct cache *c, const char *mailbox, guint32 uid,
+	bool flagged);
 void cache_set_seen(struct cache *c, const char *mailbox, guint32 uid,
 	bool seen);
 void cache_remove(struct cache *c, const char *mailbox, guint32 uid);

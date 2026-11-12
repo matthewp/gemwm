@@ -305,6 +305,18 @@ void cache_set_flags(struct cache *c, const char *mailbox, guint32 uid,
 	run(s);
 }
 
+void cache_set_flagged(struct cache *c, const char *mailbox, guint32 uid,
+		bool flagged) {
+	sqlite3_stmt *s = prepare(c, "UPDATE messages SET flagged = ?3"
+		" WHERE mailbox = ?1 AND uid = ?2");
+	if (s != NULL) {
+		bind_text(s, 1, mailbox);
+		sqlite3_bind_int64(s, 2, uid);
+		sqlite3_bind_int(s, 3, flagged);
+	}
+	run(s);
+}
+
 void cache_set_seen(struct cache *c, const char *mailbox, guint32 uid,
 		bool seen) {
 	sqlite3_stmt *s = prepare(c, "UPDATE messages SET seen = ?3"

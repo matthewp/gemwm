@@ -69,7 +69,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
-	ACT_DELETE_FOLDER, ACT_PRINT,
+	ACT_DELETE_FOLDER, ACT_PRINT, ACT_FLAG,
 	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
@@ -1206,6 +1206,15 @@ static void diamond(cairo_t *cr, int cx, int cy) {
 	cairo_fill(cr);
 }
 
+/* A flagged message's mark: a pennant on a pole, 7 by 10. */
+static void flag_mark(cairo_t *cr, int x, int y) {
+	static const char *const rows[] = {
+		"#######", "######.", "#####..", "######.", "#######",
+		"#......", "#......", "#......", "#......", "#......",
+	};
+	gem_bitmap(cr, rows, G_N_ELEMENTS(rows), x, y);
+}
+
 /* ---- Selecting ----------------------------------------------------------- */
 
 static bool is_picked(const struct summary *s) {
@@ -1284,7 +1293,8 @@ static GPtrArray *targets(void) {
 }
 
 static void paint_list(cairo_t *cr, int w, int h, void *data) {
-	int from_x = 20, from_w = MIN(200, w / 4), date_w = 90;
+	/* Left of From: unread's diamond, then the flag. */
+	int from_x = 32, from_w = MIN(200, w / 4), date_w = 90;
 	int subject_x = from_x + from_w + PAD;
 	int subject_w = w - subject_x - date_w - PAD;
 	gem_black(cr);
@@ -1320,6 +1330,9 @@ static void paint_list(cairo_t *cr, int w, int h, void *data) {
 		}
 		if (!s->seen) {
 			diamond(cr, 10, y + ROW_H / 2);
+		}
+		if (s->flagged) {
+			flag_mark(cr, 19, y + (ROW_H - 10) / 2);
 		}
 		clipped(cr, s->from, from_x, y, from_w, ROW_H);
 		/* Its categories, boxed, at the end of the subject's space. */
@@ -1866,6 +1879,22 @@ static void show_body(void) {
 	g_free(body);
 }
 
+/* The open message in the list, if it's there (not from a view). */
+static struct summary *open_summary(void) {
+	struct folder *f = current_folder();
+	if (ui.open == NULL || f == NULL ||
+			g_strcmp0(ui.open_mailbox, f->mailbox) != 0) {
+		return NULL;
+	}
+	for (int i = 0; i < message_count(); i++) {
+		struct summary *s = ui.messages->pdata[i];
+		if (s->uid == ui.open_uid) {
+			return s;
+		}
+	}
+	return NULL;
+}
+
 static void paint_header(cairo_t *cr, int w, int h, void *data) {
 	GArray *hits = ui.header_hits;
 	g_array_set_size(hits, 0);
@@ -1880,6 +1909,11 @@ static void paint_header(cairo_t *cr, int w, int h, void *data) {
 	x += button(cr, hits, x, y, "Forward", ACT_FORWARD, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Archive", ACT_ARCHIVE, 0, false) + PAD;
 	x += button(cr, hits, x, y, "Delete", ACT_DELETE, 0, false) + PAD;
+	struct summary *open = open_summary();
+	if (open != NULL) {
+		x += button(cr, hits, x, y, open->flagged ? "Unflag" : "Flag", ACT_FLAG,
+			0, false) + PAD;
+	}
 	if (has_pictures(m) && !ui.show_attached) {
 		x += button(cr, hits, x, y, "Show Attached Images", ACT_SHOW_ATTACHED, 0,
 			false) + PAD;
@@ -2568,6 +2602,45 @@ static void toggle_seen(void) {
 	app_menu_update(ui.menu);
 }
 
+/* Flags what's selected (or open), or if all are flagged already,
+ * unflags them. */
+static void toggle_flagged(void) {
+	struct folder *f = current_folder();
+	/* An open message from a view may be another folder's. */
+	GPtrArray *t = f != NULL && (ui.open == NULL || open_summary() != NULL) ?
+		targets() : NULL;
+	if (t == NULL || t->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
+		return;
+	}
+	bool flagged = false;
+	for (guint k = 0; k < t->len; k++) {
+		flagged |= !((struct summary *)t->pdata[k])->flagged;
+	}
+	GArray *uids = g_array_new(FALSE, FALSE, sizeof(guint32));
+	for (guint k = 0; k < t->len; k++) {
+		struct summary *s = t->pdata[k];
+		if (s->flagged != flagged) {
+			s->flagged = flagged;
+			g_array_append_val(uids, s->uid);
+		}
+	}
+	mail_set_flagged(ui.mail, f->mailbox, (guint32 *)uids->data, uids->len,
+		flagged, NULL, NULL);
+	if (t->len > 1) {
+		set_status("%u messages %s.", t->len, flagged ? "flagged" : "unflagged");
+	} else {
+		set_status("Message %s.", flagged ? "flagged" : "unflagged");
+	}
+	g_array_free(uids, TRUE);
+	g_ptr_array_free(t, TRUE);
+	gtk_widget_queue_draw(ui.list);
+	gtk_widget_queue_draw(ui.header);
+	app_menu_update(ui.menu);
+}
+
 /* Moves what's selected (or open) to another folder. */
 static void move_to(struct folder *dest) {
 	struct folder *f = current_folder();
@@ -3248,6 +3321,9 @@ static void run_action(enum action action, int index) {
 	case ACT_UNREAD:
 		toggle_seen();
 		break;
+	case ACT_FLAG:
+		toggle_flagged();
+		break;
 	case ACT_CATEGORIZE: {
 		bool on = !(ui.categories != NULL && ui.categories->enabled);
 		char *why = categories_set_enabled(on);
@@ -3418,6 +3494,12 @@ static gboolean window_key(GtkEventControllerKey *c, guint keyval,
 			return FALSE;
 		}
 		move_dialog();
+		return TRUE;
+	case GDK_KEY_f:
+		if (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) {
+			return FALSE;
+		}
+		toggle_flagged();
 		return TRUE;
 	}
 	return FALSE;
@@ -3610,9 +3692,10 @@ static void categories_dialog(void) {
 static void build_menus(struct app_menu *m, void *data) {
 	bool account = ui.account != NULL;
 	GPtrArray *t = ui.messages != NULL ? targets() : g_ptr_array_new();
-	bool unread = false;
+	bool unread = false, unflagged = false;
 	for (guint k = 0; k < t->len; k++) {
 		unread |= !((struct summary *)t->pdata[k])->seen;
+		unflagged |= !((struct summary *)t->pdata[k])->flagged;
 	}
 	uint32_t have = t->len > 0 ? 0 : APP_MENU_DISABLED;
 	struct summary *s = selected_summary();
@@ -3650,6 +3733,8 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_separator(m);
 	app_menu_add_item(m, ACT_UNREAD, unread ? "Mark as Read" :
 		"Mark as Unread", "^U", have);
+	app_menu_add_item(m, ACT_FLAG, t->len == 0 || unflagged ? "Flag" : "Unflag",
+		"F", have);
 	app_menu_add_item(m, ACT_ARCHIVE, "Archive", "A", have);
 	app_menu_add_item(m, ACT_MOVE, "Move to Folder...", "M", have);
 	app_menu_add_item(m, ACT_DELETE, "Delete", "Del", have);

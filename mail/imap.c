@@ -855,6 +855,29 @@ static int run_set_seen(struct mail *m, struct job *j) {
 	return r;
 }
 
+static int run_set_flagged(struct mail *m, struct job *j) {
+	int r = select_mailbox(m, j->mailbox);
+	if (r == MAILIMAP_NO_ERROR) {
+		struct mailimap_set *set = uid_set((guint32 *)j->uids->data,
+			j->uids->len);
+		r = store_flag(m, set, mailimap_flag_new_flagged(), j->flag);
+		mailimap_set_free(set);
+	}
+	if (r == MAILIMAP_NO_ERROR) {
+		cache_begin(m->cache);
+		for (guint i = 0; i < j->uids->len; i++) {
+			cache_set_flagged(m->cache, j->mailbox,
+				g_array_index(j->uids, guint32, i), j->flag);
+		}
+		cache_commit(m->cache);
+	}
+	if (r != MAILIMAP_NO_ERROR) {
+		j->error = imap_error(m, j->uids->len > 1 ?
+			"Couldn't flag the messages" : "Couldn't flag the message", r);
+	}
+	return r;
+}
+
 static int run_move(struct mail *m, struct job *j) {
 	int r;
 	if (j->other != NULL && j->flag) {
@@ -1189,6 +1212,21 @@ void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
 	j->mailbox = g_strdup(mailbox);
 	set_uids(j, uids, n);
 	j->flag = seen;
+	queue(m, j);
+}
+
+static void do_set_flagged(struct mail *m, struct job *j) {
+	run_with(m, j, run_set_flagged);
+}
+
+void mail_set_flagged(struct mail *m, const char *mailbox,
+		const guint32 *uids, guint n, bool flagged, mail_done_fn done,
+		void *data) {
+	struct job *j = job_new(do_set_flagged, (GSourceFunc)finish_done,
+		G_CALLBACK(done), data);
+	j->mailbox = g_strdup(mailbox);
+	set_uids(j, uids, n);
+	j->flag = flagged;
 	queue(m, j);
 }
 

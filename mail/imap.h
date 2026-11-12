@@ -75,6 +75,10 @@ void mail_prefetch(struct mail *m, const char *mailbox, const guint32 *uids,
 /* Done: NULL error on success. */
 typedef void (*mail_done_fn)(const char *error, void *data);
 /* Marks messages (n of them) read, or not. */
+/* Flags messages, or unflags them: IMAP's \Flagged, which other mail
+ * programs show as a flag or (Gmail) a star. */
+void mail_set_flagged(struct mail *m, const char *mailbox,
+	const guint32 *uids, guint n, bool flagged, mail_done_fn done, void *data);
 void mail_set_seen(struct mail *m, const char *mailbox, const guint32 *uids,
 	guint n, bool seen, mail_done_fn done, void *data);
 /* Moves messages to another folder (created first if create, and it
