@@ -232,7 +232,9 @@ static void draw_thumb(struct server *server, struct thumb *t, bool selected) {
 	struct wlr_box *geo = &t->view->xdg_toplevel->base->geometry;
 	struct copying c = {
 		.content = t->content,
-		.scale = (double)cw / MAX(geo->width, 1),
+		/* Never past the frame, whichever way rounding goes. */
+		.scale = MIN((double)cw / MAX(geo->width, 1),
+			(double)ch / MAX(geo->height, 1)),
 		.geo_x = geo->x,
 		.geo_y = geo->y,
 	};
@@ -330,7 +332,16 @@ void overview_open(struct server *server) {
 		}
 		struct thumb *t = &o.thumbs[o.count++];
 		t->view = view;
-		view_frame_box(view, &t->from);
+		/* Its frame box as the overview draws it: plain, without the
+		 * scroll bars GemWM may draw round it, so that the frame less its
+		 * chrome is the window's own size and its contents keep their
+		 * shape (a scroll bar counted in stretched them past the frame's
+		 * bottom). */
+		struct wlr_box *geo = &view->xdg_toplevel->base->geometry;
+		int ew, eh;
+		extents(&ew, &eh);
+		t->from = (struct wlr_box){ view->x, view->y, geo->width + ew,
+			geo->height + eh };
 		t->now = t->from;
 		t->tree = wlr_scene_tree_create(o.tree);
 		t->frame = wlr_scene_buffer_create(t->tree, NULL);
