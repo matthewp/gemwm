@@ -70,7 +70,7 @@ enum action {
 	ACT_SEND, ACT_CANCEL, ACT_PASSWORD_OK, ACT_PASSWORD_CANCEL,
 	ACT_CATEGORIZE, ACT_CATEGORIES, ACT_CATEGORY_TOGGLE, ACT_CATEGORIES_OK,
 	ACT_CATEGORIES_CANCEL, ACT_VIEW_ALL, ACT_NEWSLETTERS, ACT_BILLS, ACT_EMPTY_TRASH,
-	ACT_DELETE_FOLDER, ACT_PRINT, ACT_FLAG, ACT_FLAGGED,
+	ACT_DELETE_FOLDER, ACT_PRINT, ACT_FLAG, ACT_FLAGGED, ACT_SPAM,
 	ACT_ATTACH, ACT_UNATTACH,
 	ACT_VIEW_CATEGORY = 1000, /* View's categories: this, plus which */
 };
@@ -2687,6 +2687,30 @@ static void take_away(bool archive) {
 	send_away(f, t, to, create, mv);
 }
 
+/* Message > Mark as Spam: to the server's Junk (or Spam) folder, which is
+ * also how its spam filter learns. In that folder, Not Spam: back to the
+ * Inbox. */
+static void mark_spam(void) {
+	struct folder *f = current_folder();
+	struct folder *junk = folder_with_role(ROLE_JUNK);
+	struct folder *inbox = folder_with_role(ROLE_INBOX);
+	struct folder *dest = f == junk ? inbox : junk;
+	GPtrArray *t = f != NULL && dest != NULL && dest != f ? targets() : NULL;
+	if (t == NULL || t->len == 0) {
+		if (t != NULL) {
+			g_ptr_array_free(t, TRUE);
+		}
+		return;
+	}
+	guint n = t->len;
+	struct moving *mv = g_new0(struct moving, 1);
+	mv->mailbox = g_strdup(f->mailbox);
+	mv->done = n > 1 ?
+		g_strdup_printf("Moved %u messages to %s.", n, dest->name) :
+		g_strdup_printf("Moved to %s.", dest->name);
+	send_away(f, t, dest->mailbox, false, mv);
+}
+
 /* Sends the messages t (freed) from f to another folder (to NULL: gone
  * for good): out of the list at once, the next one selected (or, reading,
  * opened). */
@@ -3522,6 +3546,9 @@ static void run_action(enum action action, int index) {
 	case ACT_FLAG:
 		toggle_flagged();
 		break;
+	case ACT_SPAM:
+		mark_spam();
+		break;
 	case ACT_CATEGORIZE: {
 		bool on = !(ui.categories != NULL && ui.categories->enabled);
 		char *why = categories_set_enabled(on);
@@ -3936,6 +3963,12 @@ static void build_menus(struct app_menu *m, void *data) {
 	app_menu_add_item(m, ACT_ARCHIVE, "Archive", "A", have);
 	app_menu_add_item(m, ACT_MOVE, "Move to Folder...", "M", have);
 	app_menu_add_item(m, ACT_DELETE, "Delete", "Del", have);
+	/* In the spam folder, the way out; disabled with no spam folder. */
+	struct folder *junk = folder_with_role(ROLE_JUNK);
+	bool in_junk = junk != NULL && current_folder() == junk;
+	app_menu_add_item(m, ACT_SPAM, in_junk ? "Not Spam" : "Mark as Spam", NULL,
+		junk != NULL && (!in_junk || folder_with_role(ROLE_INBOX) != NULL) ?
+		have : APP_MENU_DISABLED);
 	if (categorising_on()) {
 		app_menu_add_item(m, ACT_CATEGORIES, "Categories...", NULL, have);
 	}

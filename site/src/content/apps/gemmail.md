@@ -28,6 +28,9 @@ reads.
 - Shift-click, Ctrl-click and Ctrl+A select several messages; Archive, Delete
   and Mark as Read (^U) act on all of them at once.
 - Drag messages onto a folder, or **Move to Folder...** (M).
+- **Message > Mark as Spam** moves messages to the server's Junk (or Spam)
+  folder, which is also how its spam filter learns; in that folder, **Not
+  Spam** sends them back to the Inbox.
 - **Flag** (F, or the button on an open message) marks messages as
   important, with a flag in the list. It's IMAP's standard flag, so it's the
   same as a star in Gmail or a flag in Apple Mail and Outlook, both ways.
